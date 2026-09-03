@@ -11,6 +11,7 @@ from data.crypto_quant.cmc import (
     iter_cmc_windows,
     normalize_cmc_payload,
 )
+from data.crypto_quant.cmc import _utc_timestamp
 
 
 @pytest.fixture
@@ -98,6 +99,19 @@ def test_normalize_requires_nonempty_status(fixture_payload, status):
         payload.pop("status")
     with pytest.raises(CmcSchemaError, match="status"):
         normalize_cmc_payload(payload, pd.Timestamp("2026-09-03"))
+
+
+@pytest.mark.parametrize("status", [{"error_code": None}, {"message": "ok"}])
+def test_normalize_requires_status_error_code_zero(fixture_payload, status):
+    payload = {**fixture_payload, "status": status}
+    with pytest.raises(CmcSchemaError, match="error_code"):
+        normalize_cmc_payload(payload, pd.Timestamp("2026-09-03"))
+
+
+@pytest.mark.parametrize("value", [None, "", "not-a-timestamp", pd.NaT])
+def test_utc_timestamp_rejects_missing_or_invalid_values(value):
+    with pytest.raises(CmcSchemaError, match="timestamp"):
+        _utc_timestamp(value, "timestamp")
 
 
 def test_normalize_rejects_non_integer_id(fixture_payload):

@@ -30,10 +30,14 @@ def iter_cmc_windows(
 
 
 def _utc_timestamp(value: object, field: str) -> pd.Timestamp:
+    if value is None or (isinstance(value, str) and not value.strip()):
+        raise CmcSchemaError(f"invalid {field}: timestamp is required")
     try:
         timestamp = pd.to_datetime(value, utc=True, errors="raise")
-    except (TypeError, ValueError) as exc:
+    except (TypeError, ValueError, OverflowError) as exc:
         raise CmcSchemaError(f"invalid {field}") from exc
+    if pd.isna(timestamp):
+        raise CmcSchemaError(f"invalid {field}: timestamp is required")
     if not isinstance(timestamp, pd.Timestamp):
         timestamp = pd.Timestamp(timestamp)
     return timestamp
@@ -96,7 +100,7 @@ def normalize_cmc_payload(
     if not status_mapping:
         raise CmcSchemaError("status must not be empty")
     error_code = status_mapping.get("error_code")
-    if error_code not in (0, None):
+    if error_code != 0:
         raise CmcSchemaError(f"CMC status error_code={error_code}")
 
     data = root.get("data")
