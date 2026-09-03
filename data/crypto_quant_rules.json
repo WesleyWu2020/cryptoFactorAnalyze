@@ -1,0 +1,13 @@
+{
+  "version": "2026-09-03-v1",
+  "stablecoin_symbols": [
+    "USDT", "USDC", "DAI", "FDUSD", "TUSD", "USDP", "BUSD",
+    "USDD", "USDE", "USD0", "USD1", "PYUSD", "RLUSD", "GUSD",
+    "LUSD", "FRAX", "SUSD", "CRVUSD", "GHO", "EURC", "EURS"
+  ],
+  "wrapper_symbols": [
+    "WBTC", "WETH", "STETH", "WSTETH", "CBETH", "CBBTC", "RETH"
+  ],
+  "overrides": [],
+  "blocked_cmc_ids": []
+}
