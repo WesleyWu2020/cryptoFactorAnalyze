@@ -76,6 +76,64 @@ def test_normalize_table_rejects_null_and_conflicting_duplicate_keys():
         normalize_table("cmc100_daily", conflict)
 
 
+@pytest.mark.parametrize("table", ["futures_contracts", "klines_daily", "funding_events", "universe_monthly"])
+def test_normalize_table_and_upsert_preserve_string_primary_keys(table, tmp_path):
+    values = {column: 1 for column in TABLE_SPECS[table].columns}
+    for column in TABLE_SPECS[table].columns:
+        if column.endswith("_date") or column in {"date", "funding_time"}:
+            values[column] = "2026-09-01T00:00:00Z"
+        elif column in {"symbol", "cmc_symbol", "binance_symbol", "base_asset", "quote_asset", "contract_type", "status", "mapping_source", "rate_type"}:
+            values[column] = "BTCUSDT" if "symbol" in column else "PERPETUAL"
+    normalized = normalize_table(table, pd.DataFrame([values]))
+    for column in {"symbol", "cmc_symbol", "binance_symbol"} & set(TABLE_SPECS[table].columns):
+        assert normalized.loc[0, column] == values[column]
+        assert pd.api.types.is_string_dtype(normalized[column]) or normalized[column].dtype == object
+    store = CryptoQuantStore(tmp_path / f"{table}.h5")
+    store.upsert(table, pd.DataFrame([values]))
+    string_column = next(column for column in TABLE_SPECS[table].columns if column in {"symbol", "cmc_symbol", "binance_symbol"})
+    assert store.read(table).loc[0, string_column] == values[string_column]
+
+
+def test_normalize_table_parses_boolean_text_strictly():
+    columns = TABLE_SPECS["research_panel_daily"].columns
+    values = {column: 1 for column in columns}
+    for column in columns:
+        if column == "date" or column.endswith("_date"):
+            values[column] = "2026-09-01"
+        elif column.endswith("_time"):
+            values[column] = "2026-09-01T00:00:00Z"
+        elif column == "binance_symbol":
+            values[column] = "BTCUSDT"
+        elif column == "has_complete_kline":
+            values[column] = "False"
+        elif column == "has_complete_funding":
+            values[column] = "true"
+    normalized = normalize_table("research_panel_daily", pd.DataFrame([values]))
+    assert bool(normalized.loc[0, "has_complete_kline"]) is False
+    assert bool(normalized.loc[0, "has_complete_funding"]) is True
+    assert pd.api.types.is_bool_dtype(normalized["has_complete_kline"])
+    assert pd.api.types.is_bool_dtype(normalized["has_complete_funding"])
+
+
+def test_normalize_table_normalizes_cmc_id_to_integer():
+    frame = pd.DataFrame([{"date": "2026-09-01", "cmc_id": "100", "symbol": "BTC", "name": "Bitcoin", "weight": 0.5}])
+    normalized = normalize_table("cmc100_constituents", frame)
+    assert normalized.loc[0, "cmc_id"] == 100
+    assert pd.api.types.is_integer_dtype(normalized["cmc_id"])
+
+
+def test_normalize_table_rejects_non_boolean_text_and_non_integral_cmc_id():
+    panel = pd.DataFrame([{column: 1 for column in TABLE_SPECS["research_panel_daily"].columns}])
+    panel["date"] = "2026-09-01"
+    panel["binance_symbol"] = "BTCUSDT"
+    panel["has_complete_kline"] = "not-a-bool"
+    with pytest.raises(ValueError, match="invalid boolean"):
+        normalize_table("research_panel_daily", panel)
+    constituents = pd.DataFrame([{"date": "2026-09-01", "cmc_id": 100.5, "symbol": "BTC", "name": "Bitcoin", "weight": 0.5}])
+    with pytest.raises(ValueError, match="invalid integer"):
+        normalize_table("cmc100_constituents", constituents)
+
+
 def test_upsert_is_idempotent_and_new_rows_win(tmp_path):
     store = CryptoQuantStore(tmp_path / "active.h5")
     store.upsert("cmc100_daily", _cmc_row(100))

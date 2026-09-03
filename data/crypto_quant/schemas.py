@@ -22,12 +22,38 @@ _STRING_SIZES = {
     "contract_type": 32,
     "rate_type": 32,
 }
+_STRING_COLUMNS = set(_STRING_SIZES) | {"rate_type"}
+_INTEGER_COLUMNS = {"cmc_id"}
+_BOOLEAN_COLUMNS = {"has_complete_kline", "has_complete_funding"}
 
 
 def _spec(columns: tuple[str, ...], key: tuple[str, ...]) -> TableSpec:
     query = tuple(c for c in columns if c in {"date", "decision_date", "effective_date", "funding_time", "symbol", "binance_symbol"})
     sizes = {c: _STRING_SIZES[c] for c in columns if c in _STRING_SIZES}
     return TableSpec(columns, key, query, sizes)
+
+
+def _strict_bool(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized == "true":
+            return True
+        if normalized == "false":
+            return False
+    if value in (0, 1) and not isinstance(value, (str, bool)):
+        return bool(value)
+    raise ValueError(f"invalid boolean value: {value!r}")
+
+
+def _strict_int(value: Any) -> int:
+    if isinstance(value, bool):
+        raise ValueError(f"invalid integer value: {value!r}")
+    converted = pd.to_numeric(value, errors="raise")
+    if pd.isna(converted) or int(converted) != converted:
+        raise ValueError(f"invalid integer value: {value!r}")
+    return int(converted)
 
 
 TABLE_SPECS = {
@@ -56,12 +82,16 @@ def normalize_table(name: str, frame: pd.DataFrame) -> pd.DataFrame:
             result[column] = pd.to_datetime(result[column], errors="raise").dt.normalize()
         elif column.endswith("_time") or column == "fetched_at_utc" or column == "source_update_time":
             result[column] = pd.to_datetime(result[column], errors="raise", utc=True)
-        elif column in spec.key or column in {"cmc_id", "market_cap_rank", "trade_count", "funding_event_count"}:
+        elif column in _STRING_COLUMNS:
+            result[column] = result[column].where(result[column].isna(), result[column].astype(str))
+        elif column in _INTEGER_COLUMNS:
+            result[column] = result[column].map(_strict_int).astype("int64")
+        elif column in _BOOLEAN_COLUMNS:
+            result[column] = result[column].map(_strict_bool).astype("bool")
+        elif column in {"market_cap_rank", "trade_count", "funding_event_count"}:
             result[column] = pd.to_numeric(result[column], errors="raise")
         elif column not in spec.min_itemsize and result[column].dtype == object:
-            if column.startswith("has_complete_"):
-                result[column] = result[column].astype(bool)
-            elif column not in {"rate_type"}:
+            if column not in {"rate_type"}:
                 result[column] = pd.to_numeric(result[column], errors="ignore")
     if result.duplicated(list(spec.key), keep=False).any():
         conflicts = result[result.duplicated(list(spec.key), keep=False)]
