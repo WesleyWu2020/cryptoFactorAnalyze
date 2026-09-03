@@ -153,14 +153,16 @@ class CryptoQuantPipeline:
         existing = store.read("cmc100_daily")
         last = _day(existing["date"].max()) if not existing.empty else None
         start = self.config.universe_start if mode == "backfill" or last is None else max(self.config.universe_start, last - timedelta(days=self.config.cmc_overlap_days - 1))
+        self._replace_cmc_range(store, "cmc100_daily", start, end)
+        self._replace_cmc_range(store, "cmc100_constituents", start, end)
 
         def on_page(daily: pd.DataFrame, members: pd.DataFrame, through: date) -> None:
             daily = self._clip_date_frame(daily, "date", start, end)
             members = self._clip_date_frame(members, "date", start, end)
             if not daily.empty:
-                store.upsert("cmc100_daily", daily)
+                self._replace_cmc_dates(store, "cmc100_daily", daily)
             if not members.empty:
-                store.upsert("cmc100_constituents", members)
+                self._replace_cmc_dates(store, "cmc100_constituents", members)
             prefix = self._cmc_common_prefix(store, end)
             if prefix is not None:
                 store.write_metadata({"checkpoint.cmc_through": prefix.isoformat()})
@@ -169,10 +171,36 @@ class CryptoQuantPipeline:
         daily = self._clip_date_frame(daily, "date", start, end)
         members = self._clip_date_frame(members, "date", start, end)
         if not daily.empty:
-            store.upsert("cmc100_daily", daily)
+            self._replace_cmc_dates(store, "cmc100_daily", daily)
         if not members.empty:
-            store.upsert("cmc100_constituents", members)
+            self._replace_cmc_dates(store, "cmc100_constituents", members)
         return self._cmc_common_prefix(store, end)
+
+    @staticmethod
+    def _replace_cmc_dates(store: CryptoQuantStore, name: str, incoming: pd.DataFrame) -> None:
+        if incoming.empty:
+            return
+        incoming = incoming.copy()
+        for column in ("index_value", "weight"):
+            if column in incoming:
+                incoming[column] = pd.to_numeric(incoming[column], errors="raise").astype("float64")
+        if "cmc_id" in incoming:
+            incoming["cmc_id"] = pd.to_numeric(incoming["cmc_id"], errors="raise").astype("int64")
+        dates = set(pd.to_datetime(incoming["date"], errors="coerce", utc=True).dt.date.dropna())
+        existing = store.read(name)
+        if not existing.empty:
+            old_dates = pd.to_datetime(existing["date"], errors="coerce", utc=True).dt.date
+            existing = existing.loc[~old_dates.isin(dates)]
+        combined = incoming if existing.empty else pd.concat([existing, incoming], ignore_index=True)
+        store.replace(name, combined)
+
+    @classmethod
+    def _replace_cmc_range(cls, store: CryptoQuantStore, name: str, start: date, end: date) -> None:
+        existing = store.read(name)
+        if existing.empty:
+            return
+        values = pd.to_datetime(existing["date"], errors="coerce", utc=True).dt.date
+        store.replace(name, existing.loc[~values.between(start, end)])
 
     def _map_contracts(self, store: CryptoQuantStore, exchange: pd.DataFrame) -> pd.DataFrame:
         constituents = store.read("cmc100_constituents")
@@ -225,7 +253,7 @@ class CryptoQuantPipeline:
             if current not in daily_dates:
                 break
             snapshot = members.loc[member_dates == current]
-            valid = not snapshot.empty and len(snapshot) >= 100
+            valid = len(snapshot) == 100
             valid &= not snapshot.duplicated(["date", "cmc_id"]).any()
             valid &= not snapshot[list(required)].isna().any().any()
             if not valid:

@@ -377,6 +377,40 @@ def test_cmc_partial_snapshot_truncates_common_watermark_prefix(tmp_path):
     assert metadata["last_successful_cmc_date"] == "2024-01-09"
 
 
+def test_cmc_incremental_partial_snapshot_replaces_old_date_before_validation(tmp_path):
+    _run(tmp_path)
+    class PartialUpdate(FakeCmc):
+        def fetch_history(self, start, end, on_page=None):
+            daily, members = super().fetch_history(start, end, on_page=None)
+            members = members[~((members.date == pd.Timestamp("2024-02-20")) & (members.cmc_id == 100))]
+            if on_page:
+                on_page(daily, members, end)
+            return daily, members
+
+    config = _config(tmp_path)
+    CryptoQuantPipeline(config, PartialUpdate(), FakeBinance()).update(datetime(2024, 2, 26, tzinfo=timezone.utc))
+    metadata = CryptoQuantStore(config.store_path).read_metadata()
+    assert metadata["last_successful_cmc_date"] == "2024-02-19"
+    assert metadata["checkpoint.cmc_through"] == "2024-02-19"
+
+
+def test_cmc_snapshot_with_101_unique_members_is_not_complete(tmp_path):
+    class OversizedSnapshot(FakeCmc):
+        def fetch_history(self, start, end, on_page=None):
+            daily, members = super().fetch_history(start, end, on_page=None)
+            extra = members[members.date == pd.Timestamp("2024-01-10")].iloc[[0]].copy()
+            extra["cmc_id"] = 1001
+            members = pd.concat([members, extra], ignore_index=True)
+            if on_page:
+                on_page(daily, members, end)
+            return daily, members
+
+    _run(tmp_path, cmc=OversizedSnapshot())
+    metadata = CryptoQuantStore(_config(tmp_path).store_path).read_metadata()
+    assert metadata["checkpoint.cmc_through"] == "2024-01-09"
+    assert metadata["last_successful_cmc_date"] == "2024-01-09"
+
+
 def test_funding_internal_natural_day_gap_blocks_completion(tmp_path):
     class GapFunding(FakeBinance):
         def fetch_funding(self, symbol, start_ms, end_ms):
