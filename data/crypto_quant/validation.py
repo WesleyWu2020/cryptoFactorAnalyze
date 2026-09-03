@@ -38,10 +38,6 @@ class ValidationReport:
             )
 
 
-def _timestamp(value: object) -> pd.Timestamp:
-    return pd.Timestamp(value).normalize()
-
-
 def _symbol_column(frame: pd.DataFrame) -> str | None:
     if "binance_symbol" in frame:
         return "binance_symbol"
@@ -59,6 +55,20 @@ def _stablecoins(metadata: Mapping[str, object]) -> set[str]:
     if isinstance(metadata.get("mapping_rules"), Mapping):
         values = list(values) + list(metadata["mapping_rules"].get("stablecoin_symbols", []))
     return {str(value).upper() for value in values}
+
+
+def _parse_universe_timestamp(
+    universe: pd.DataFrame,
+    column: str,
+    issues: list[ValidationIssue],
+    *,
+    allow_null: bool = False,
+) -> pd.Series:
+    parsed = pd.to_datetime(universe[column], errors="coerce", utc=True, format="mixed").dt.tz_localize(None).dt.normalize()
+    invalid = parsed.isna() if not allow_null else parsed.isna() & universe[column].notna()
+    for index in universe.index[invalid]:
+        _issue(issues, "invalid_timestamp", f"column={column}, index={index!s}, value={universe.at[index, column]!s}")
+    return parsed
 
 
 def _validate_duplicate_keys(frames: Mapping[str, pd.DataFrame], issues: list[ValidationIssue]) -> None:
@@ -95,6 +105,13 @@ def _validate_universe(frames: Mapping[str, pd.DataFrame], metadata: Mapping[str
     universe = frames.get("universe_monthly", pd.DataFrame())
     if universe.empty:
         return
+    parsed_dates = {
+        column: _parse_universe_timestamp(
+            universe, column, issues, allow_null=column == "effective_end_date"
+        )
+        for column in ("decision_date", "effective_date", "effective_end_date")
+        if column in universe
+    }
     date_column = "decision_date" if "decision_date" in universe else "date"
     sizes = universe.groupby(date_column, dropna=False).size()
     for decision_date, size in sizes.items():
@@ -110,13 +127,13 @@ def _validate_universe(frames: Mapping[str, pd.DataFrame], metadata: Mapping[str
             row = universe.loc[bad].iloc[0]
             _issue(issues, "excluded_asset", f"decision_date={row.get('decision_date')!s}, symbol={row[symbols]!s}")
         if "effective_date" in universe and "decision_date" in universe:
-            early = pd.to_datetime(universe["effective_date"], errors="coerce").dt.normalize() < pd.to_datetime(universe["decision_date"], errors="coerce").dt.normalize() + pd.Timedelta(days=1)
+            early = parsed_dates["effective_date"] < parsed_dates["decision_date"] + pd.Timedelta(days=1)
             if early.any():
                 row = universe.loc[early].iloc[0]
                 _issue(issues, "early_effective_date", f"decision_date={row['decision_date']!s}, effective_date={row['effective_date']!s}, symbol={row[symbols]!s}")
         if {"effective_date", "effective_end_date"}.issubset(universe.columns):
-            starts = pd.to_datetime(universe["effective_date"], errors="coerce").dt.normalize()
-            ends = pd.to_datetime(universe["effective_end_date"], errors="coerce").dt.normalize()
+            starts = parsed_dates["effective_date"]
+            ends = parsed_dates["effective_end_date"]
             invalid = starts.notna() & ends.notna() & (ends < starts)
             if invalid.any():
                 row = universe.loc[invalid].iloc[0]
@@ -134,7 +151,7 @@ def _validate_universe(frames: Mapping[str, pd.DataFrame], metadata: Mapping[str
         constituents = frames.get("cmc100_constituents", pd.DataFrame())
         if not constituents.empty and {"date", "cmc_id"}.issubset(constituents.columns) and "cmc_id" in universe:
             available = set(zip(pd.to_datetime(constituents["date"]).dt.normalize(), constituents["cmc_id"]))
-            missing = [(row.get("decision_date"), row.get("cmc_id")) for _, row in universe.iterrows() if (_timestamp(row["decision_date"]), row["cmc_id"]) not in available]
+            missing = [(row.get("decision_date"), row.get("cmc_id")) for index, row in universe.iterrows() if pd.notna(parsed_dates["decision_date"].loc[index]) and (parsed_dates["decision_date"].loc[index], row["cmc_id"]) not in available]
             if missing:
                 _issue(issues, "missing_cmc_snapshot", f"decision_date={missing[0][0]!s}, cmc_id={missing[0][1]!s}")
 
@@ -143,7 +160,10 @@ def _validate_universe(frames: Mapping[str, pd.DataFrame], metadata: Mapping[str
             completed = klines.get("completed", pd.Series(True, index=klines.index)).map(lambda value: type(value) is bool and value) if "completed" in klines else pd.Series(True, index=klines.index)
             keys = set(zip(pd.to_datetime(klines["date"]).dt.normalize(), klines["symbol"], completed))
             for _, row in universe.iterrows():
-                expected = (_timestamp(row["decision_date"]) - pd.Timedelta(days=1), row[symbols])
+                decision = parsed_dates["decision_date"].loc[row.name]
+                if pd.isna(decision):
+                    continue
+                expected = (decision - pd.Timedelta(days=1), row[symbols])
                 if not any(key[0] == expected[0] and key[1] == expected[1] and key[2] for key in keys):
                     _issue(issues, "missing_t_minus_one", f"decision_date={row['decision_date']!s}, symbol={row[symbols]!s}")
                     break
@@ -178,8 +198,8 @@ def _validate_panel(panel: pd.DataFrame, universe: pd.DataFrame, issues: list[Va
                 _issue(issues, "panel_universe_size", f"date={timestamp!s}, memberships={count}")
         if not universe.empty and {"effective_date", "effective_end_date"}.issubset(universe.columns):
             panel_dates = pd.to_datetime(panel["date"], errors="coerce").dt.normalize()
-            universe_starts = pd.to_datetime(universe["effective_date"], errors="coerce").dt.normalize()
-            universe_ends = pd.to_datetime(universe["effective_end_date"], errors="coerce").dt.normalize()
+            universe_starts = pd.to_datetime(universe["effective_date"], errors="coerce", utc=True, format="mixed").dt.tz_localize(None).dt.normalize()
+            universe_ends = pd.to_datetime(universe["effective_end_date"], errors="coerce", utc=True, format="mixed").dt.tz_localize(None).dt.normalize()
             universe_symbol = _symbol_column(universe)
             if universe_symbol:
                 for index, row in panel.iterrows():

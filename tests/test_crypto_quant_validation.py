@@ -213,3 +213,15 @@ def test_invalid_funding_timestamps_are_errors():
     frames["funding_events"] = funding
     report = validate_frames(frames, {})
     assert "invalid_funding_timestamp" in _issue_codes(report)
+
+
+@pytest.mark.parametrize("column", ["decision_date", "effective_date", "effective_end_date"])
+def test_invalid_universe_timestamps_are_structured_issues(column):
+    frames = _valid_store_frames()
+    universe = frames["universe_monthly"].astype({column: object})
+    universe.loc[0, column] = "not-a-timestamp"
+    frames["universe_monthly"] = universe
+    report = validate_frames(frames, {})
+    assert report.ok is False
+    assert "invalid_timestamp" in _issue_codes(report)
+    assert any(column in issue.detail and "index=0" in issue.detail for issue in report.issues)
