@@ -9,7 +9,7 @@
 
 Build a point-in-time, reproducible data pipeline for personal cross-sectional crypto research. The pipeline will maintain a monthly market-cap Top50 universe, restricted to Binance USDT-margined perpetual contracts, and provide a daily panel suitable for five equal cross-sectional groups and 3-day or 5-day portfolio rebalancing.
 
-The system starts on 2024-01-01, the first available CMC100 index date. It does not splice the existing Binance liquidity proxy into the pre-2024 period because that would change the universe definition and make results incomparable.
+The investable-universe history starts on 2024-01-01, the first available CMC100 index date. The first decision is made on 2024-01-01 and becomes effective on 2024-01-02 under the T+1 rule. Raw Binance market data may begin earlier only as support history for the T-1 eligibility check and rolling-factor warm-up; it does not create a pre-2024 market-cap universe. The system does not splice the existing Binance liquidity proxy into the pre-2024 period because that would change the universe definition and make results incomparable.
 
 ## 2. Confirmed Decisions
 
@@ -21,6 +21,7 @@ The system starts on 2024-01-01, the first available CMC100 index date. It does 
 - Universe is recomputed monthly.
 - A monthly decision made from the CMC snapshot at `00:00 UTC` becomes effective on the next natural day (`T+1`).
 - Market data frequency: daily futures OHLCV.
+- Raw Binance history includes a configurable 180-day warm-up before a candidate's first required universe date, bounded by the contract's actual history.
 - Funding data frequency: preserve raw settlement events; derive daily aggregates later.
 - Factor values are computed daily; portfolios normally rebalance every 3 or 5 days.
 - Storage: one local HDF5 file containing multiple normalized logical tables.
@@ -61,7 +62,7 @@ Use Binance futures endpoints for:
 
 The CMC100 feed supplies market-cap ordering, while Binance supplies tradability, futures prices, volumes, and funding. Binance data is not used as a market-cap proxy.
 
-Historical eligibility must be established from observations available on or before the decision time. Current exchange status must not be projected backward. For historical months, a mapped contract is eligible only if it has a completed daily futures kline for `T-1`; this naturally excludes contracts not yet listed or already unavailable. The current exchange-information endpoint is used only for current metadata and the latest decision.
+Historical eligibility must be established from observations available on or before the decision time. Current exchange status must not be projected backward. For historical months, a mapped contract is eligible only if it has a completed daily futures kline for `T-1`; this naturally excludes contracts not yet listed or already unavailable. The current exchange-information endpoint is used only for current metadata and a real current-day decision, where `status=TRADING` is an additional safety condition. Historical replay dates never consume today's status.
 
 References:
 
@@ -79,6 +80,8 @@ The pipeline has three independent source adapters and two deterministic derived
 5. Panel builder expands monthly membership to daily rows and joins market and funding data.
 
 Raw normalized tables remain independent of derived rules. Changing a stablecoin rule, symbol mapping, or effective-date policy therefore requires rebuilding only the universe and panel, not downloading all source data again.
+
+Rolling factors must be calculated from `/klines_daily` over each candidate contract's complete required lookback window and filtered to the point-in-time universe only after the factor value is formed. `/research_panel_daily` is suitable for same-day cross-sectional inputs and final membership filtering, but it must not truncate a rolling factor's pre-membership history.
 
 Existing CSV/liquidity scripts remain compatible and are not repurposed as true market-cap data. Shared retry, time-handling, and validation behavior should be reused or extended where practical, without changing the existing factor-miner input/output contract.
 
@@ -178,6 +181,8 @@ One row per selected contract per monthly decision:
 
 Primary key: `effective_date + binance_symbol`. Every valid month must contain exactly 50 unique contracts.
 
+`effective_end_date` is the day before the next accepted membership becomes effective. It remains null for the latest membership, which is an open interval; the panel builder caps expansion at its own completed-data end date.
+
 ### 5.7 `/research_panel_daily`
 
 One row per effective Top50 member per day. It contains the daily kline columns plus:
@@ -193,7 +198,7 @@ One row per effective Top50 member per day. It contains the daily kline columns 
 - `has_complete_kline`
 - `has_complete_funding`
 
-Primary key: `date + binance_symbol`. This is the default table consumed by factor research. A factor script can load a date range, group by date, sort 50 factor values, and split them into five groups of 10.
+Primary key: `date + binance_symbol`. A factor script can use this table directly for same-day inputs, or join factors computed from full `/klines_daily` history back to this table. After completeness filtering, it can group by date, sort 50 factor values, and split them into five groups of 10.
 
 ### 5.8 Store metadata
 
@@ -219,7 +224,7 @@ For each first calendar day `T` at `00:00 UTC`:
 5. Require a completed Binance daily kline on `T-1`. Only information timestamped no later than `T` may be used for this check.
 6. Sort eligible contracts by CMC weight descending, using CMC ID as a deterministic tie-breaker.
 7. Select exactly 50 contracts and assign ranks 1 through 50.
-8. Make the new membership effective on `T+1` and keep it unchanged until the next effective date.
+8. Make the new membership effective on `T+1` and keep it unchanged until the next effective date. The latest accepted membership remains open-ended.
 
 The intersection is performed before selecting 50. Selecting CMC's first 50 and intersecting afterward could leave fewer than 50 Binance contracts and break five equal groups.
 
@@ -233,8 +238,8 @@ The first complete run performs these stages in order:
 2. Persist each validated page as a restartable checkpoint.
 3. Normalize all observed CMC constituents and build the candidate mapping set.
 4. Resolve candidate contracts, recording explicit exceptions for collisions and renames.
-5. Fetch daily futures klines from 2024-01-01 or the contract's first available date.
-6. Fetch raw funding events over the same available interval.
+5. Fetch daily futures klines from the later of the contract's first available date and 180 days before its first required universe date. This includes at least the 2023-12-31 T-1 eligibility row for the initial 2024-01-01 decision when the contract existed then.
+6. Fetch raw funding events over the same support interval so funding-based rolling features can use an equivalent warm-up window.
 7. Build all monthly Top50 memberships.
 8. Build the daily research panel.
 9. Validate the complete HDF5 store before publishing it as the active file.
@@ -254,7 +259,23 @@ Each daily update:
 7. Runs all validations against a staging store.
 8. Atomically replaces the active store only after validation succeeds.
 
-The update is idempotent: running the same date range repeatedly produces identical keys, row counts, and values.
+The update is idempotent: running the same date range repeatedly against unchanged source payloads produces identical keys, row counts, and business values. Existing `fetched_at_utc` provenance is retained when a refetched source row is byte-equivalent on non-provenance columns; run-attempt metadata may advance without changing research data.
+
+### 8.1 Operational schedule
+
+The normal maintenance entry point is one idempotent command, intended to run every day at 00:20 UTC (08:20 Asia/Shanghai):
+
+`./.venv/bin/python data/update_crypto_quant.py update`
+
+At that time the updater:
+
+- Fetches CMC snapshots through the current UTC date.
+- Fetches Binance daily klines only through the previous completed UTC date.
+- Advances raw funding events through the current fetch time, while building the daily panel only through the last completed kline date.
+- Re-fetches a bounded recent overlap window before deduplication to capture late corrections.
+- Creates a new monthly decision on the first calendar day and activates it on the following day.
+
+The CLI also accepts an explicit UTC `--as-of` value for deterministic replay. A failed scheduled run exits non-zero, leaves the active store unchanged, and can be rerun manually or by the next schedule without deleting checkpoints. A resumable staging fingerprint uses schema, rules, mode, and target store—not the exact wall-clock time. A later retry may extend the target end time; attempting to move a staging target backward requires an explicit staging reset.
 
 ## 9. Funding Aggregation
 
@@ -317,7 +338,8 @@ The generated `.h5` file remains ignored by Git. Only code, tests, small metadat
 - Every member belongs to that decision's CMC snapshot and has a completed `T-1` kline.
 - Klines have unique `date + symbol` keys, positive prices, non-negative volumes, and valid OHLC relationships.
 - Funding events have unique keys and monotonic timestamps per symbol.
-- Every published panel day has 50 members and complete required kline fields.
+- Every panel date has 50 membership rows. Missing market or funding observations remain explicit through completeness flags and are never filled with zero.
+- `last_complete_panel_date` advances only through dates on which all 50 members have complete required kline fields; the factor adapter excludes later incomplete dates by default.
 
 ### Future-leak validation
 
@@ -334,14 +356,14 @@ Dynamic cutoff tests run the pipeline twice: once with all available source data
 
 Pandas HDF5 support requires PyTables (`tables`). This is the only new storage dependency. No database server, distributed engine, or heavy data framework is introduced.
 
-The existing factor-miner contract is unchanged. An adapter from `/research_panel_daily` will expose the repository's expected `date`, `instrument`, and market-data columns. Existing CSV-based scripts and reports remain reproducible while the new HDF5 pipeline is introduced alongside them.
+The existing factor-miner contract is unchanged. An adapter exposes the repository's expected `date`, `instrument`, and market-data columns, loads warm-up history from `/klines_daily` for rolling calculations, and filters completed factor values through `/research_panel_daily`. Existing CSV-based scripts and reports remain reproducible while the new HDF5 pipeline is introduced alongside them.
 
 ## 13. Definition of Done
 
-- A clean machine can build `data/crypto_quant.h5` from public endpoints starting at 2024-01-01.
+- A clean machine can build `data/crypto_quant.h5` with market-cap membership starting at 2024-01-01 and only the required earlier Binance warm-up history.
 - All seven logical tables and metadata are present with their declared schemas.
 - Every published monthly universe contains exactly 50 eligible contracts.
-- The daily research panel can be filtered by date and loaded directly for five-group factor analysis.
+- The factor adapter can load pre-membership warm-up history, calculate rolling factors without truncation, and filter final values to complete Top50 panel dates for five-group analysis.
 - Incremental reruns are idempotent and resume after interruption.
 - API failures cannot replace a valid active HDF5 file with a partial file.
 - Static future-leak checks pass.
