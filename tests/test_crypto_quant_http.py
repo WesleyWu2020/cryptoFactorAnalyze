@@ -1,0 +1,89 @@
+import pytest
+import requests
+
+from data.crypto_quant.http import HttpRequestError, JsonHttpClient
+
+
+class FakeResponse:
+    def __init__(self, status_code, payload, *, headers=None):
+        self.status_code = status_code
+        self._payload = payload
+        self.headers = headers or {}
+
+    def json(self):
+        if isinstance(self._payload, Exception):
+            raise self._payload
+        return self._payload
+
+
+class FakeSession:
+    def __init__(self, responses):
+        self.responses = iter(responses)
+
+    def get(self, url, *, params=None, timeout=None):
+        response = next(self.responses)
+        if isinstance(response, Exception):
+            raise response
+        return response
+
+
+def test_retries_429_using_retry_after():
+    session = FakeSession([
+        FakeResponse(429, {}, headers={"Retry-After": "2"}),
+        FakeResponse(200, {"data": [1]}),
+    ])
+    sleeps = []
+    client = JsonHttpClient(
+        session, timeout=3, max_attempts=3, sleep=sleeps.append, random_fn=lambda: 0
+    )
+    assert client.get_json("https://example.test") == {"data": [1]}
+    assert sleeps == [2.0]
+
+
+def test_retries_500_then_succeeds():
+    session = FakeSession([FakeResponse(500, {}), FakeResponse(200, {"ok": True})])
+    client = JsonHttpClient(
+        session, timeout=3, max_attempts=2, sleep=lambda _: None, random_fn=lambda: 0
+    )
+    assert client.get_json("https://example.test") == {"ok": True}
+
+
+def test_does_not_retry_400():
+    client = JsonHttpClient(FakeSession([FakeResponse(400, {"error": "bad"})]), max_attempts=3)
+    with pytest.raises(HttpRequestError, match="HTTP 400"):
+        client.get_json("https://example.test")
+
+
+def test_rejects_non_json_success():
+    response = FakeResponse(200, ValueError("invalid json"))
+    client = JsonHttpClient(FakeSession([response]), max_attempts=1)
+    with pytest.raises(HttpRequestError, match="invalid JSON"):
+        client.get_json("https://example.test")
+
+
+def test_retries_connection_error_with_exponential_backoff():
+    session = FakeSession([
+        requests.ConnectionError("offline"),
+        FakeResponse(200, {"ok": True}),
+    ])
+    sleeps = []
+    client = JsonHttpClient(
+        session, max_attempts=2, sleep=sleeps.append, random_fn=lambda: 0.25
+    )
+
+    assert client.get_json("https://example.test") == {"ok": True}
+    assert sleeps == [1.25]
+
+
+def test_honors_zero_retry_after():
+    session = FakeSession([
+        FakeResponse(429, {}, headers={"Retry-After": "0"}),
+        FakeResponse(200, {"ok": True}),
+    ])
+    sleeps = []
+    client = JsonHttpClient(
+        session, max_attempts=2, sleep=sleeps.append, random_fn=lambda: 0.25
+    )
+
+    assert client.get_json("https://example.test") == {"ok": True}
+    assert sleeps == [0.0]
