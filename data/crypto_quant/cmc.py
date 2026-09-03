@@ -7,6 +7,7 @@ from math import isfinite
 from numbers import Integral
 
 import pandas as pd
+from pandas.api.types import is_scalar
 
 from .http import JsonHttpClient
 
@@ -30,6 +31,8 @@ def iter_cmc_windows(
 
 
 def _utc_timestamp(value: object, field: str) -> pd.Timestamp:
+    if not is_scalar(value):
+        raise CmcSchemaError(f"invalid {field}: timestamp must be scalar")
     if value is None or (isinstance(value, str) and not value.strip()):
         raise CmcSchemaError(f"invalid {field}: timestamp is required")
     try:

@@ -108,7 +108,9 @@ def test_normalize_requires_status_error_code_zero(fixture_payload, status):
         normalize_cmc_payload(payload, pd.Timestamp("2026-09-03"))
 
 
-@pytest.mark.parametrize("value", [None, "", "not-a-timestamp", pd.NaT])
+@pytest.mark.parametrize(
+    "value", [None, "", "not-a-timestamp", pd.NaT, [], ["2024-01-01T00:00:00Z"]]
+)
 def test_utc_timestamp_rejects_missing_or_invalid_values(value):
     with pytest.raises(CmcSchemaError, match="timestamp"):
         _utc_timestamp(value, "timestamp")
