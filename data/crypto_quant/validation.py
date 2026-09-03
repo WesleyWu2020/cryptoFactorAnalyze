@@ -149,11 +149,13 @@ def _validate_universe(frames: Mapping[str, pd.DataFrame], metadata: Mapping[str
             intervals = universe.assign(_start=starts, _end=ends).sort_values([symbols, "_start"], kind="stable")
             for symbol, group in intervals.groupby(symbols, sort=False):
                 previous_end = pd.NaT
+                open_ended = False
                 for _, row in group.iterrows():
-                    if pd.notna(previous_end) and pd.notna(row["_start"]) and row["_start"] <= previous_end:
+                    if (open_ended or pd.notna(previous_end)) and pd.notna(row["_start"]) and (open_ended or row["_start"] <= previous_end):
                         _issue(issues, "overlapping_universe", f"symbol={symbol!s}, effective_date={row['effective_date']!s}")
-                        break
-                    if pd.notna(row["_end"]):
+                    if pd.isna(row["_end"]):
+                        open_ended = True
+                    elif not open_ended:
                         previous_end = row["_end"] if pd.isna(previous_end) else max(previous_end, row["_end"])
 
         constituents = frames.get("cmc100_constituents", pd.DataFrame())

@@ -206,6 +206,16 @@ def test_universe_intervals_must_be_ordered_and_non_overlapping():
     assert "overlapping_universe" in _issue_codes(report)
 
 
+def test_open_universe_interval_overlaps_any_later_same_symbol_interval():
+    frames = _valid_store_frames()
+    universe = frames["universe_monthly"]
+    universe.loc[1, "binance_symbol"] = universe.loc[0, "binance_symbol"]
+    universe.loc[1, "effective_date"] = pd.Timestamp("2024-01-03")
+    universe.loc[1, "effective_end_date"] = pd.Timestamp("2024-01-04")
+    report = validate_frames(frames, {})
+    assert "overlapping_universe" in _issue_codes(report)
+
+
 def test_invalid_funding_timestamps_are_errors():
     frames = _valid_store_frames()
     funding = frames["funding_events"].astype({"funding_time": object})
