@@ -181,6 +181,18 @@ def fetch_cmc_history(
             },
         )
         daily, members = normalize_cmc_payload(payload, pd.Timestamp.now(tz="UTC"))
+        if not daily.empty and (
+            (daily["date"] < window_start) | (daily["date"] > window_end)
+        ).any():
+            raise CmcSchemaError(
+                f"CMC response date outside request window [{window_start}, {window_end}]"
+            )
+        if not members.empty and (
+            (members["date"] < window_start) | (members["date"] > window_end)
+        ).any():
+            raise CmcSchemaError(
+                f"CMC response date outside request window [{window_start}, {window_end}]"
+            )
         candidate_daily = daily_rows + daily.to_dict("records")
         candidate_members = member_rows + members.to_dict("records")
         daily_rows = _deduplicate(

@@ -146,14 +146,26 @@ def test_normalize_rejects_empty_text_fields(fixture_payload, field):
         normalize_cmc_payload(payload, pd.Timestamp("2026-09-03"))
 
 
-def test_fetch_deduplicates_cross_page_member_by_business_fields(fixture_payload):
+def test_fetch_deduplicates_cross_page_member_by_business_fields(
+    fixture_payload, monkeypatch
+):
+    monkeypatch.setattr(
+        "data.crypto_quant.cmc.iter_cmc_windows",
+        lambda start, end: iter([(date(2024, 1, 1), date(2024, 1, 2))] * 3),
+    )
     client = SequentialClient([fixture_payload] * 3)
     daily, members = fetch_cmc_history(client, date(2024, 1, 1), date(2024, 1, 23))
     assert len(daily) == 2
     assert len(members) == 6
 
 
-def test_fetch_rejects_cross_page_conflict_before_second_callback(fixture_payload):
+def test_fetch_rejects_cross_page_conflict_before_second_callback(
+    fixture_payload, monkeypatch
+):
+    monkeypatch.setattr(
+        "data.crypto_quant.cmc.iter_cmc_windows",
+        lambda start, end: iter([(date(2024, 1, 1), date(2024, 1, 2))] * 3),
+    )
     conflicting = json.loads(json.dumps(fixture_payload))
     conflicting["data"][0]["constituents"][0]["weight"] = 0.99
     client = SequentialClient([fixture_payload, conflicting, fixture_payload])
@@ -165,7 +177,7 @@ def test_fetch_rejects_cross_page_conflict_before_second_callback(fixture_payloa
             date(2024, 1, 23),
             on_page=lambda d, m, end: callbacks.append(end),
         )
-    assert callbacks == [date(2024, 1, 10)]
+    assert callbacks == [date(2024, 1, 2)]
 
 
 def test_normalize_rejects_missing_constituents(fixture_payload):
@@ -190,3 +202,21 @@ def test_fetch_history_empty_2023_interval_does_not_request(fake_client):
     assert daily.empty
     assert members.empty
     assert len(fake_client.calls) == 1
+
+
+def test_fetch_rejects_page_dates_outside_requested_window(fixture_payload):
+    out_of_window = json.loads(json.dumps(fixture_payload))
+    for point in out_of_window["data"]:
+        for constituent in point["constituents"]:
+            constituent["update_time"] = "2024-01-03T00:00:00Z"
+    out_of_window["data"] = out_of_window["data"][:1]
+    client = FakeClient(out_of_window)
+    callbacks = []
+    with pytest.raises(CmcSchemaError, match="window"):
+        fetch_cmc_history(
+            client,
+            date(2024, 1, 1),
+            date(2024, 1, 2),
+            on_page=lambda d, m, end: callbacks.append(end),
+        )
+    assert callbacks == []
