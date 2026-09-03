@@ -87,9 +87,9 @@ class CryptoQuantPipeline:
             store.write_metadata({"run_target_as_of": run_at.isoformat(), "mode": mode})
 
             kline_complete = funding_complete = False
-            cmc_complete = True
+            cmc_watermark = None
             if not derived_only:
-                cmc_complete = self._fetch_cmc(store, mode, cmc_end)
+                cmc_watermark = self._fetch_cmc(store, mode, cmc_end)
                 exchange = self.binance_source.fetch_exchange_info()
                 store.replace("futures_contracts", self._map_contracts(store, exchange))
                 if mode != "rebuild":
@@ -108,7 +108,7 @@ class CryptoQuantPipeline:
                         with pd.HDFStore(store.path, mode="a") as hdf:
                             hdf.remove(name, start=0, stop=1)
             self._build_derived(store, cmc_end, kline_end)
-            metadata = self._metadata(store, run_at, cmc_end, kline_end, funding_end_ms, cmc_complete, kline_complete, funding_complete)
+            metadata = self._metadata(store, run_at, cmc_end, kline_end, funding_end_ms, cmc_watermark, kline_complete, funding_complete)
             store.write_metadata(metadata)
             report = validate_store(self.config.staging_path)
             report.raise_for_errors()
@@ -149,7 +149,7 @@ class CryptoQuantPipeline:
                 values[column] = 0.0
         return values
 
-    def _fetch_cmc(self, store: CryptoQuantStore, mode: str, end: date) -> bool:
+    def _fetch_cmc(self, store: CryptoQuantStore, mode: str, end: date) -> date | None:
         existing = store.read("cmc100_daily")
         last = _day(existing["date"].max()) if not existing.empty else None
         start = self.config.universe_start if mode == "backfill" or last is None else max(self.config.universe_start, last - timedelta(days=self.config.cmc_overlap_days - 1))
@@ -159,7 +159,7 @@ class CryptoQuantPipeline:
             members = self._clip_date_frame(members, "date", start, end)
             if not daily.empty:
                 store.upsert("cmc100_daily", daily)
-                store.write_metadata({"checkpoint.cmc_through": min(through, end).isoformat()})
+                store.write_metadata({"checkpoint.cmc_through": _day(daily["date"].max()).isoformat()})
             if not members.empty:
                 store.upsert("cmc100_constituents", members)
 
@@ -170,7 +170,7 @@ class CryptoQuantPipeline:
             store.upsert("cmc100_daily", daily)
         if not members.empty:
             store.upsert("cmc100_constituents", members)
-        return not daily.empty and _day(daily["date"].max()) == end
+        return _day(daily["date"].max()) if not daily.empty else None
 
     def _map_contracts(self, store: CryptoQuantStore, exchange: pd.DataFrame) -> pd.DataFrame:
         constituents = store.read("cmc100_constituents")
@@ -225,9 +225,12 @@ class CryptoQuantPipeline:
             if not klines.empty:
                 kline_batches.append(klines)
                 actual_start, actual_end = _day(klines["date"].min()), _day(klines["date"].max())
-                complete = actual_start == kline_start and actual_end == kline_end
+                expected = pd.date_range(kline_start, kline_end, freq="D").date
+                observed_dates = set(pd.to_datetime(klines["date"]).dt.date)
+                missing_count = len(set(expected) - observed_dates)
+                complete = actual_start == kline_start and actual_end == kline_end and missing_count == 0
                 all_kline_complete &= complete
-                store.write_metadata({f"checkpoint.klines.{symbol}": {"requested_start": kline_start.isoformat(), "requested_end": kline_end.isoformat(), "actual_start": actual_start.isoformat(), "actual_end": actual_end.isoformat(), "complete": complete}})
+                store.write_metadata({f"checkpoint.klines.{symbol}": {"requested_start": kline_start.isoformat(), "requested_end": kline_end.isoformat(), "actual_start": actual_start.isoformat(), "actual_end": actual_end.isoformat(), "missing_date_count": missing_count, "complete": complete}})
             else:
                 all_kline_complete = False
 
@@ -242,7 +245,11 @@ class CryptoQuantPipeline:
                 funding_batches.append(funding)
                 actual_start = int(pd.Timestamp(funding["funding_time"].min()).timestamp() * 1000)
                 actual_end = int(pd.Timestamp(funding["funding_time"].max()).timestamp() * 1000)
-                complete = actual_start <= funding_start and actual_end >= funding_end_ms
+                requested_start_day = pd.Timestamp(funding_start, unit="ms", tz="UTC").date()
+                requested_end_day = pd.Timestamp(funding_end_ms, unit="ms", tz="UTC").date()
+                actual_start_day = pd.to_datetime(funding["funding_time"], utc=True).min().date()
+                actual_end_day = pd.to_datetime(funding["funding_time"], utc=True).max().date()
+                complete = actual_start_day <= requested_start_day and actual_end_day >= requested_end_day
                 all_funding_complete &= complete
                 store.write_metadata({f"checkpoint.funding.{symbol}": {"requested_start_ms": funding_start, "requested_end_ms": funding_end_ms, "actual_start_ms": actual_start, "actual_end_ms": actual_end, "complete": complete}})
             else:
@@ -287,7 +294,7 @@ class CryptoQuantPipeline:
         panel = panel.reindex(columns=TABLE_SPECS["research_panel_daily"].columns)
         store.replace("research_panel_daily", panel)
 
-    def _metadata(self, store: CryptoQuantStore, run_at: datetime, cmc_end: date, kline_end: date, funding_end_ms: int, cmc_complete: bool, kline_complete: bool, funding_complete: bool) -> dict[str, object]:
+    def _metadata(self, store: CryptoQuantStore, run_at: datetime, cmc_end: date, kline_end: date, funding_end_ms: int, cmc_watermark: date | None, kline_complete: bool, funding_complete: bool) -> dict[str, object]:
         prior = store.read_metadata()
         ranges: dict[str, object] = {}
         for name, spec in TABLE_SPECS.items():
@@ -301,7 +308,7 @@ class CryptoQuantPipeline:
         return {
             "schema_version": 1, "pipeline_version": "task10", "rules_version": load_mapping_rules(self.config.rules_path).version,
             "source_urls": {"cmc": self.config.cmc_url, "exchange_info": self.config.exchange_info_url, "klines": self.config.klines_url, "funding": self.config.funding_url},
-            "last_successful_cmc_date": cmc_end.isoformat() if cmc_complete else prior.get("last_successful_cmc_date"),
+            "last_successful_cmc_date": cmc_watermark.isoformat() if cmc_watermark is not None else prior.get("last_successful_cmc_date"),
             "last_successful_kline_date": kline_end.isoformat() if kline_complete else prior.get("last_successful_kline_date"),
             "last_successful_funding_time": funding_end_ms if funding_complete else prior.get("last_successful_funding_time"),
             "last_complete_panel_date": str(last_complete_panel_date(store.read("research_panel_daily"))),

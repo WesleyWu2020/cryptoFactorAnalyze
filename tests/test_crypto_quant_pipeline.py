@@ -238,3 +238,43 @@ def test_pipeline_cutoff_replay_matches_full_raw_and_derived_prefix(tmp_path):
         left = left[pd.to_datetime(left[column]) <= pd.Timestamp(cutoff)].reset_index(drop=True)
         right = right[pd.to_datetime(right[column]) <= pd.Timestamp(cutoff)].reset_index(drop=True)
         pd.testing.assert_frame_equal(left, right)
+
+
+def test_cmc_checkpoint_uses_actual_clipped_maximum(tmp_path):
+    cmc = FakeCmc()
+    cmc.max_return_date = date(2024, 2, 20)
+    _run(tmp_path, cmc=cmc)
+    metadata = CryptoQuantStore(_config(tmp_path).store_path).read_metadata()
+    assert metadata["checkpoint.cmc_through"] == "2024-02-20"
+    assert metadata["last_successful_cmc_date"] == "2024-02-20"
+
+
+def test_kline_gap_is_not_marked_complete_or_advanced_globally(tmp_path):
+    class Gap(FakeBinance):
+        def fetch_klines(self, symbol, start, end):
+            out = super().fetch_klines(symbol, start, end)
+            if symbol == SYMBOLS[0] and len(out) > 4:
+                out = out.drop(out.index[len(out) // 2])
+            return out
+
+    _run(tmp_path, binance=Gap())
+    metadata = CryptoQuantStore(_config(tmp_path).store_path).read_metadata()
+    checkpoint = metadata["checkpoint.klines.C00USDT"]
+    assert checkpoint["complete"] is False
+    assert checkpoint["missing_date_count"] > 0
+    assert metadata["last_successful_kline_date"] is None
+
+
+def test_funding_watermark_uses_completed_natural_day_not_exact_event_end(tmp_path):
+    class DailyFunding(FakeBinance):
+        def fetch_funding(self, symbol, start_ms, end_ms):
+            start = pd.Timestamp(start_ms, unit="ms", tz="UTC")
+            end_day = pd.Timestamp(end_ms, unit="ms", tz="UTC").normalize()
+            return pd.DataFrame([
+                {"funding_time": start, "symbol": symbol, "funding_rate": 0.0, "mark_price": 1.0, "rate_type": "Regular"},
+                {"funding_time": end_day + pd.Timedelta(hours=8), "symbol": symbol, "funding_rate": 0.0, "mark_price": 1.0, "rate_type": "Regular"},
+            ])
+
+    _run(tmp_path, binance=DailyFunding())
+    metadata = CryptoQuantStore(_config(tmp_path).store_path).read_metadata()
+    assert metadata["last_successful_funding_time"] == int(datetime(2024, 2, 25, 12, tzinfo=timezone.utc).timestamp() * 1000)
