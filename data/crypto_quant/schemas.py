@@ -25,6 +25,10 @@ _STRING_SIZES = {
 _STRING_COLUMNS = set(_STRING_SIZES) | {"rate_type"}
 _INTEGER_COLUMNS = {"cmc_id"}
 _BOOLEAN_COLUMNS = {"has_complete_kline", "has_complete_funding"}
+_DATE_COLUMNS = {
+    "date", "decision_date", "effective_date", "effective_end_date",
+    "onboard_date", "valid_from", "valid_to", "universe_effective_date",
+}
 
 
 def _spec(columns: tuple[str, ...], key: tuple[str, ...]) -> TableSpec:
@@ -78,7 +82,7 @@ def normalize_table(name: str, frame: pd.DataFrame) -> pd.DataFrame:
     for column in result.columns:
         if column in spec.key and result[column].isna().any():
             raise ValueError(f"null primary-key value in {name}.{column}")
-        if column == "date" or column.endswith("_date"):
+        if column in _DATE_COLUMNS:
             result[column] = pd.to_datetime(result[column], errors="raise").dt.normalize()
         elif column.endswith("_time") or column == "fetched_at_utc" or column == "source_update_time":
             result[column] = pd.to_datetime(result[column], errors="raise", utc=True)

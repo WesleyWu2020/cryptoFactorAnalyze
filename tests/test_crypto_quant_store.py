@@ -94,6 +94,23 @@ def test_normalize_table_and_upsert_preserve_string_primary_keys(table, tmp_path
     assert store.read(table).loc[0, string_column] == values[string_column]
 
 
+def test_futures_contract_validity_dates_are_datetime_in_hdf_round_trip(tmp_path):
+    frame = pd.DataFrame([{
+        "cmc_id": "100", "cmc_symbol": "BTC", "binance_symbol": "BTCUSDT",
+        "base_asset": "BTC", "quote_asset": "USDT", "contract_type": "PERPETUAL",
+        "onboard_date": "2020-01-01", "status": "TRADING", "mapping_source": "exact",
+        "valid_from": "2026-09-01", "valid_to": "2026-09-30",
+    }])
+    normalized = normalize_table("futures_contracts", frame)
+    assert pd.api.types.is_datetime64_dtype(normalized["valid_from"])
+    assert pd.api.types.is_datetime64_dtype(normalized["valid_to"])
+    store = CryptoQuantStore(tmp_path / "futures.h5")
+    store.upsert("futures_contracts", frame)
+    stored = store.read("futures_contracts")
+    assert pd.api.types.is_datetime64_dtype(stored["valid_from"])
+    assert pd.api.types.is_datetime64_dtype(stored["valid_to"])
+
+
 def test_normalize_table_parses_boolean_text_strictly():
     columns = TABLE_SPECS["research_panel_daily"].columns
     values = {column: 1 for column in columns}
