@@ -10,9 +10,27 @@ FUNDING_COLUMNS = [
     "date",
     "symbol",
     "funding_rate_sum",
+    "funding_rate_mean",
     "funding_event_count",
     "funding_rate_last",
 ]
+
+KLINE_COLUMNS = [
+    "open", "high", "low", "close", "volume", "close_time",
+    "quote_asset_volume", "trade_count", "taker_buy_base_volume",
+    "taker_buy_quote_volume",
+]
+REQUIRED_KLINE_COLUMNS = ["open", "high", "low", "close", "volume"]
+RESEARCH_PANEL_COLUMNS = [
+    "date", "binance_symbol", "universe_effective_date", "cmc_weight_at_decision",
+    *KLINE_COLUMNS,
+    "funding_rate_sum", "funding_rate_mean", "funding_event_count", "funding_rate_last",
+    "has_complete_kline", "has_complete_funding",
+]
+
+
+def _utc_naive(frame: pd.Series) -> pd.Series:
+    return pd.to_datetime(frame, errors="coerce", utc=True).dt.tz_localize(None)
 
 
 def aggregate_funding_daily(events: pd.DataFrame) -> pd.DataFrame:
@@ -21,13 +39,17 @@ def aggregate_funding_daily(events: pd.DataFrame) -> pd.DataFrame:
         return pd.DataFrame(columns=FUNDING_COLUMNS)
 
     data = events.copy()
-    data["funding_time"] = pd.to_datetime(data["funding_time"], errors="coerce")
+    event_symbol = _symbol_column(data)
+    if event_symbol != "symbol":
+        data = data.rename(columns={event_symbol: "symbol"})
+    data["funding_time"] = _utc_naive(data["funding_time"])
     data = data.dropna(subset=["funding_time", "symbol"])
     data["date"] = data["funding_time"].dt.normalize()
     data = data.sort_values(["date", "symbol", "funding_time"], kind="stable")
     grouped = data.groupby(["date", "symbol"], sort=True, as_index=False)
     out = grouped.agg(
         funding_rate_sum=("funding_rate", "sum"),
+        funding_rate_mean=("funding_rate", "mean"),
         funding_event_count=("funding_rate", "size"),
         funding_rate_last=("funding_rate", "last"),
     )
@@ -35,10 +57,10 @@ def aggregate_funding_daily(events: pd.DataFrame) -> pd.DataFrame:
 
 
 def _symbol_column(frame: pd.DataFrame) -> str:
-    if "symbol" in frame.columns:
-        return "symbol"
     if "binance_symbol" in frame.columns:
         return "binance_symbol"
+    if "symbol" in frame.columns:
+        return "symbol"
     raise ValueError("frame must contain symbol or binance_symbol")
 
 
@@ -53,8 +75,8 @@ def build_research_panel(
     end = pd.Timestamp(panel_end).normalize()
     memberships = universe.copy()
     universe_symbol = _symbol_column(memberships)
-    memberships["_start"] = pd.to_datetime(memberships["effective_date"]).dt.normalize()
-    memberships["_end"] = pd.to_datetime(memberships["effective_end_date"], errors="coerce").dt.normalize()
+    memberships["_start"] = _utc_naive(memberships["effective_date"]).dt.normalize()
+    memberships["_end"] = _utc_naive(memberships["effective_end_date"]).dt.normalize()
     memberships["_end"] = memberships["_end"].fillna(end)
 
     expanded = []
@@ -62,33 +84,43 @@ def build_research_panel(
         start = row["_start"]
         stop = min(row["_end"], end)
         if pd.notna(start) and start <= stop:
-            item = {column: row[column] for column in universe.columns}
-            item["symbol"] = row[universe_symbol]
+            item = {
+                "date": None,
+                "binance_symbol": row[universe_symbol],
+                "universe_effective_date": start,
+                "cmc_weight_at_decision": row.get(
+                    "cmc_weight_at_decision", row.get("weight", float("nan"))
+                ),
+            }
             for timestamp in pd.date_range(start, stop, freq="D"):
                 item["date"] = timestamp
                 expanded.append(item.copy())
     panel = pd.DataFrame(expanded)
     if panel.empty:
-        return pd.DataFrame(columns=["date", "symbol", "has_complete_kline", "has_complete_funding"])
+        return pd.DataFrame(columns=RESEARCH_PANEL_COLUMNS)
 
-    panel = panel.drop(columns=[column for column in ["effective_date", "effective_end_date"] if column in panel], errors="ignore")
     kline = klines.copy()
-    kline["date"] = pd.to_datetime(kline["date"]).dt.normalize()
+    kline["date"] = _utc_naive(kline["date"]).dt.normalize()
     kline_symbol = _symbol_column(kline)
-    kline = kline.rename(columns={kline_symbol: "symbol"})
-    kline = kline.drop_duplicates(["date", "symbol"], keep="last")
-    panel = panel.merge(kline, on=["date", "symbol"], how="left", suffixes=("", "_kline"), indicator=True)
+    kline = kline.rename(columns={kline_symbol: "binance_symbol"})
+    kline = kline.drop_duplicates(["date", "binance_symbol"], keep="last")
+    kline_columns = [column for column in KLINE_COLUMNS if column in kline.columns]
+    kline = kline[["date", "binance_symbol", *kline_columns, *(["completed"] if "completed" in kline else [])]]
+    panel = panel.merge(kline, on=["date", "binance_symbol"], how="left", indicator=True)
+    for column in KLINE_COLUMNS:
+        if column not in panel:
+            panel[column] = pd.NA
     complete = panel["_merge"].eq("both")
+    complete &= panel[REQUIRED_KLINE_COLUMNS].notna().all(axis=1)
     if "completed" in panel.columns:
         complete &= panel["completed"].map(lambda value: type(value) is bool and value)
     panel["has_complete_kline"] = complete
-    panel = panel.drop(columns="_merge")
-
+    panel = panel.drop(columns=["_merge", "completed"], errors="ignore")
     funding_daily = aggregate_funding_daily(funding)
-    panel = panel.merge(funding_daily, on=["date", "symbol"], how="left")
+    panel = panel.merge(funding_daily.rename(columns={"symbol": "binance_symbol"}), on=["date", "binance_symbol"], how="left")
     panel["funding_event_count"] = panel["funding_event_count"].fillna(0).astype("int64")
     panel["has_complete_funding"] = panel["date"] <= pd.Timestamp(funding_complete_through).normalize()
-    return panel.sort_values(["date", "symbol"], kind="stable").reset_index(drop=True)
+    return panel[RESEARCH_PANEL_COLUMNS].sort_values(["date", "binance_symbol"], kind="stable").reset_index(drop=True)
 
 
 def last_complete_panel_date(panel: pd.DataFrame) -> pd.Timestamp | None:
@@ -103,7 +135,7 @@ def last_complete_panel_date(panel: pd.DataFrame) -> pd.Timestamp | None:
         if timestamp != expected:
             break
         rows = panel[panel["date"] == timestamp]
-        if rows["symbol"].nunique() != 50 or not rows["has_complete_kline"].fillna(False).all():
+        if rows["binance_symbol"].nunique() != 50 or not rows["has_complete_kline"].fillna(False).all():
             break
         last = timestamp
         expected += pd.Timedelta(days=1)
