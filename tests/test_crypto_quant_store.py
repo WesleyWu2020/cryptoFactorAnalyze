@@ -191,6 +191,11 @@ def test_public_write_methods_fail_when_store_lock_is_held(tmp_path, method):
                 getattr(store, method)("cmc100_daily", _cmc_row())
 
 
+def test_public_store_constructor_cannot_enable_lock_bypass(tmp_path):
+    with pytest.raises(TypeError):
+        CryptoQuantStore(tmp_path / "active.h5", lock_held=True)
+
+
 def test_failed_staging_context_keeps_active_bytes_unchanged(tmp_path):
     active, staging, lock = tmp_path / "active.h5", tmp_path / "stage.h5", tmp_path / "store.lock"
     CryptoQuantStore(active).replace("cmc100_daily", _cmc_row())

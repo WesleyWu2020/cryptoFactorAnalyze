@@ -44,11 +44,17 @@ def single_writer_lock(lock_path: Path) -> Iterator[None]:
 
 
 class CryptoQuantStore:
-    def __init__(self, path: Path, *, lock_path: Path | None = None, lock_held: bool = False):
+    def __init__(self, path: Path, *, lock_path: Path | None = None):
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.lock_path = Path(lock_path) if lock_path is not None else self.path.with_suffix(self.path.suffix + ".lock")
-        self._lock_held = lock_held
+        self._lock_held = False
+
+    @classmethod
+    def _from_staging(cls, path: Path, lock_path: Path) -> "CryptoQuantStore":
+        store = cls(path, lock_path=lock_path)
+        store._lock_held = True
+        return store
 
     @contextmanager
     def _write_lock(self) -> Iterator[None]:
@@ -143,7 +149,7 @@ def staged_store(active_path: Path, staging_path: Path, run_fingerprint: str, *,
             shutil.copy2(active_path, staging_path)
         else:
             staging_path.parent.mkdir(parents=True, exist_ok=True)
-        store = CryptoQuantStore(staging_path, lock_path=lock_path, lock_held=True)
+        store = CryptoQuantStore._from_staging(staging_path, lock_path)
         if store.read_metadata().get("run_fingerprint") != run_fingerprint:
             store.write_metadata({"run_fingerprint": run_fingerprint})
         try:
