@@ -106,10 +106,12 @@ def _run(tmp_path, cmc=None, binance=None, as_of=datetime(2024, 2, 25, 12, tzinf
 
 
 def test_backfill_writes_all_seven_tables_and_metadata(tmp_path):
-    _run(tmp_path)
+    summary = _run(tmp_path)
     store = CryptoQuantStore(tmp_path / "data" / "crypto_quant.h5")
     assert store.keys() == {"_metadata", "cmc100_daily", "cmc100_constituents", "futures_contracts", "klines_daily", "funding_events", "universe_monthly", "research_panel_daily"}
-    assert {"schema_version", "pipeline_version", "rules_version", "source_urls", "last_successful_cmc_date", "last_successful_kline_date", "last_successful_funding_time", "last_complete_panel_date", "table_row_counts", "table_date_ranges", "created_at_utc", "updated_at_utc"}.issubset(store.read_metadata())
+    metadata = store.read_metadata()
+    assert {"schema_version", "pipeline_version", "rules_version", "source_urls", "last_successful_cmc_date", "last_successful_kline_date", "last_successful_funding_time", "last_complete_panel_date", "table_row_counts", "table_date_ranges", "created_at_utc", "updated_at_utc"}.issubset(metadata)
+    assert summary.symbol_status and metadata["symbol_status"] == summary.symbol_status
 
 
 def test_complete_empty_funding_response_is_published_as_complete(tmp_path):
@@ -243,6 +245,24 @@ def test_fresh_backfill_failure_persists_completed_symbols_in_staging(tmp_path):
     assert not klines[klines.symbol == SYMBOLS[1]].empty
     assert staging.read_metadata().get("checkpoint.klines.C00USDT") is not None
     assert staging.read_metadata().get("checkpoint.klines.C01USDT") is not None
+
+
+def test_resume_consumes_symbol_checkpoints_and_deduplicates_retry(tmp_path):
+    config = _config(tmp_path)
+    with pytest.raises(RuntimeError):
+        CryptoQuantPipeline(config, FakeCmc(), FakeBinance(fail_symbol=SYMBOLS[2])).backfill(
+            datetime(2024, 2, 25, tzinfo=timezone.utc)
+        )
+    resumed = FakeBinance()
+    summary = CryptoQuantPipeline(config, FakeCmc(), resumed).backfill(datetime(2024, 2, 25, tzinfo=timezone.utc))
+    resumed_symbols = {request[0] for request in resumed.kline_requests}
+    assert SYMBOLS[0] not in resumed_symbols and SYMBOLS[1] not in resumed_symbols
+    assert SYMBOLS[2] in resumed_symbols
+    store = CryptoQuantStore(config.store_path)
+    for name in ("klines_daily", "funding_events"):
+        frame = store.read(name)
+        assert not frame.duplicated([column for column in ("date", "funding_time") if column in frame] + ["symbol"]).any()
+    assert summary.symbol_status[SYMBOLS[2]]["kline"]["complete"] is True
 
 
 def test_funding_failure_keeps_current_symbol_kline_checkpoint_in_staging(tmp_path):
@@ -614,10 +634,12 @@ def test_cmc_historical_gap_survives_incremental_overlap(tmp_path):
                 on_page(daily, members, end)
             return daily, members
 
-    _run(tmp_path, cmc=HistoricalGap())
+    cmc = HistoricalGap()
+    _run(tmp_path, cmc=cmc)
     config = _config(tmp_path)
-    CryptoQuantPipeline(config, FakeCmc(), FakeBinance()).update(datetime(2024, 2, 26, tzinfo=timezone.utc))
+    CryptoQuantPipeline(config, cmc, FakeBinance()).update(datetime(2024, 2, 26, tzinfo=timezone.utc))
     metadata = CryptoQuantStore(config.store_path).read_metadata()
+    assert cmc.ranges[-1][0] == date(2024, 1, 1)
     assert metadata["last_successful_cmc_date"] == "2024-01-09"
     assert metadata["checkpoint.cmc_through"] == "2024-01-09"
 
@@ -632,10 +654,12 @@ def test_kline_historical_gap_survives_incremental_overlap(tmp_path):
 
     _run(tmp_path, binance=HistoricalGap())
     config = _config(tmp_path)
-    CryptoQuantPipeline(config, FakeCmc(), FakeBinance()).update(datetime(2024, 2, 26, tzinfo=timezone.utc))
+    repaired = FakeBinance()
+    CryptoQuantPipeline(config, FakeCmc(), repaired).update(datetime(2024, 2, 26, tzinfo=timezone.utc))
     metadata = CryptoQuantStore(config.store_path).read_metadata()
-    assert metadata["last_successful_kline_date"] is None
-    assert metadata["checkpoint.klines.C00USDT"]["complete"] is False
+    assert metadata["last_successful_kline_date"] == "2024-02-25"
+    assert metadata["checkpoint.klines.C00USDT"]["complete"] is True
+    assert next(start for symbol, start, _ in repaired.kline_requests if symbol == SYMBOLS[0]) == date(2024, 1, 4)
 
 
 def test_funding_historical_gap_survives_incremental_overlap(tmp_path):
@@ -657,8 +681,8 @@ def test_funding_historical_gap_survives_incremental_overlap(tmp_path):
     config = _config(tmp_path)
     CryptoQuantPipeline(config, FakeCmc(), CompleteFunding()).update(datetime(2024, 2, 26, tzinfo=timezone.utc))
     metadata = CryptoQuantStore(config.store_path).read_metadata()
-    assert metadata["last_successful_funding_time"] is None
-    assert metadata["checkpoint.funding.C00USDT"]["complete"] is False
+    assert metadata["last_successful_funding_time"] == int(datetime(2024, 2, 26, tzinfo=timezone.utc).timestamp() * 1000)
+    assert metadata["checkpoint.funding.C00USDT"]["complete"] is True
 
 
 def test_empty_funding_response_does_not_hide_historical_gap(tmp_path):

@@ -1,14 +1,14 @@
 """Orchestration for reproducible crypto-quant backfills and updates."""
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 import hashlib
 import json
 import math
 from numbers import Integral, Real
 from pathlib import Path
-from typing import Callable, Protocol, Sequence
+from typing import Callable, Mapping, Protocol, Sequence
 
 import numpy as np
 import pandas as pd
@@ -42,6 +42,7 @@ class RunSummary:
     last_complete_panel_date: date | None
     row_counts: dict[str, int]
     warnings: Sequence[str]
+    symbol_status: Mapping[str, object] = field(default_factory=dict)
 
 
 def _utc(value: datetime) -> datetime:
@@ -122,9 +123,10 @@ class CryptoQuantPipeline:
             panel = store.read("research_panel_daily")
             complete = last_complete_panel_date(panel)
             warnings = tuple(f"{issue.code}: {issue.detail}" for issue in report.issues if issue.level == "warning")
-            store.write_metadata({"validation_warnings": list(warnings)})
+            symbol_status = self._symbol_status(store)
+            store.write_metadata({"validation_warnings": list(warnings), "symbol_status": symbol_status})
             last_kline = _day(metadata.get("last_successful_kline_date"))
-            return RunSummary(mode, run_at, self.config.store_path, last_kline, complete.date() if complete is not None else None, counts, warnings)
+            return RunSummary(mode, run_at, self.config.store_path, last_kline, complete.date() if complete is not None else None, counts, warnings, symbol_status)
 
     @staticmethod
     def _empty_frame(name: str) -> pd.DataFrame:
@@ -160,7 +162,7 @@ class CryptoQuantPipeline:
 
     def _fetch_cmc(self, store: CryptoQuantStore, mode: str, end: date) -> date | None:
         existing = store.read("cmc100_daily")
-        last = _day(existing["date"].max()) if not existing.empty else None
+        last = self._cmc_common_prefix(store, end) if not existing.empty else None
         start = self.config.universe_start if mode == "backfill" or last is None else max(self.config.universe_start, last - timedelta(days=self.config.cmc_overlap_days - 1))
 
         def on_page(daily: pd.DataFrame, members: pd.DataFrame, through: date) -> None:
@@ -331,6 +333,27 @@ class CryptoQuantPipeline:
         working_funding = old_funding.copy()
         kline_dirty = funding_dirty = False
 
+        for name, frame in (("klines_daily", working_klines), ("funding_events", working_funding)):
+            clean = frame.drop_duplicates(TABLE_SPECS[name].key, keep="last").reset_index(drop=True)
+            if len(clean) != len(frame):
+                store.replace(name, clean)
+                if name == "klines_daily":
+                    working_klines = clean
+                else:
+                    working_funding = clean
+
+        def append_new(name: str, current: pd.DataFrame, incoming: pd.DataFrame) -> tuple[pd.DataFrame, bool]:
+            keys = TABLE_SPECS[name].key
+            incoming = incoming.drop_duplicates(keys, keep="last").reset_index(drop=True)
+            if current.empty:
+                new_rows = incoming
+            else:
+                existing_keys = {tuple(row) for row in current[list(keys)].astype(str).itertuples(index=False, name=None)}
+                new_rows = incoming.loc[
+                    [tuple(row) not in existing_keys for row in incoming[list(keys)].astype(str).itertuples(index=False, name=None)]
+                ].reset_index(drop=True)
+            return merge_working(current, incoming, name), not new_rows.empty
+
         def merge_working(current: pd.DataFrame, incoming: pd.DataFrame, name: str) -> pd.DataFrame:
             combined = pd.concat([current, incoming], ignore_index=True)
             combined = combined.drop_duplicates(TABLE_SPECS[name].key, keep="last").reset_index(drop=True)
@@ -354,11 +377,12 @@ class CryptoQuantPipeline:
             expected_klines = set(pd.date_range(coverage_start, kline_end, freq="D").date)
             observed_klines = set(pd.to_datetime(full_klines["date"], errors="coerce").dt.date.dropna())
             kline_missing = len(expected_klines - observed_klines)
+            kline_missing_dates = sorted(expected_klines - observed_klines)
             actual_start = _day(full_klines["date"].min()) if not full_klines.empty else None
             actual_end = _day(full_klines["date"].max()) if not full_klines.empty else None
             kline_complete = actual_start == coverage_start and actual_end == kline_end and kline_missing == 0
             if kline_received:
-                store.write_metadata({f"checkpoint.klines.{symbol}": {"requested_start": coverage_start.isoformat(), "requested_end": kline_end.isoformat(), "actual_start": actual_start.isoformat() if actual_start else None, "actual_end": actual_end.isoformat() if actual_end else None, "missing_date_count": kline_missing, "complete": kline_complete}})
+                store.write_metadata({f"checkpoint.klines.{symbol}": {"requested_start": coverage_start.isoformat(), "requested_end": kline_end.isoformat(), "actual_start": actual_start.isoformat() if actual_start else None, "actual_end": actual_end.isoformat() if actual_end else None, "missing_date_count": kline_missing, "missing_dates": [value.isoformat() for value in kline_missing_dates], "complete": kline_complete}})
 
             full_funding = working_funding[working_funding["symbol"] == symbol]
             if empty_funding_response and prior_metadata.get(f"checkpoint.funding.{symbol}", {}).get("complete") is not False:
@@ -367,61 +391,87 @@ class CryptoQuantPipeline:
             else:
                 expected_funding = set(pd.date_range(coverage_start, self._funding_complete_end(funding_end_ms), freq="D").date)
                 observed_funding = set(pd.to_datetime(full_funding["funding_time"], errors="coerce", utc=True).dt.date.dropna())
-                funding_missing = len(expected_funding - observed_funding)
+                funding_missing_dates = sorted(expected_funding - observed_funding)
+                funding_missing = len(funding_missing_dates)
                 funding_complete = expected_funding.issubset(observed_funding)
+            if empty_funding_response and funding_complete:
+                funding_missing_dates = []
+            elif empty_funding_response:
+                funding_missing_dates = sorted(expected_funding - observed_funding)
             actual_start_ms = int(pd.Timestamp(full_funding["funding_time"].min()).timestamp() * 1000) if not full_funding.empty else None
             actual_end_ms = int(pd.Timestamp(full_funding["funding_time"].max()).timestamp() * 1000) if not full_funding.empty else None
             if funding_received:
-                store.write_metadata({f"checkpoint.funding.{symbol}": {"requested_start_ms": int(pd.Timestamp(coverage_start, tz="UTC").timestamp() * 1000), "requested_end_ms": funding_end_ms, "actual_start_ms": actual_start_ms, "actual_end_ms": actual_end_ms, "missing_date_count": funding_missing, "empty_result": empty_funding_response, "complete": funding_complete}})
+                store.write_metadata({f"checkpoint.funding.{symbol}": {"requested_start_ms": int(pd.Timestamp(coverage_start, tz="UTC").timestamp() * 1000), "requested_end_ms": funding_end_ms, "actual_start_ms": actual_start_ms, "actual_end_ms": actual_end_ms, "missing_date_count": funding_missing, "missing_dates": [value.isoformat() for value in funding_missing_dates], "empty_result": empty_funding_response, "complete": funding_complete}})
             return kline_complete, funding_complete
 
         for row in mappings.sort_values("binance_symbol").itertuples():
             symbol = row.binance_symbol
+            kline_checkpoint = prior_metadata.get(f"checkpoint.klines.{symbol}", {})
+            funding_checkpoint = prior_metadata.get(f"checkpoint.funding.{symbol}", {})
             observed = constituents.loc[constituents.cmc_id == row.cmc_id, "date"]
             first = _day(observed.min()) or self.config.universe_start
             support_start = first - timedelta(days=self.config.warmup_days)
             onboard = _day(getattr(row, "onboard_date", None))
             if onboard is not None:
                 support_start = max(support_start, onboard)
-            if mode == "backfill" or old_klines.empty:
+            kline_checkpoint_end = _day(kline_checkpoint.get("requested_end"))
+            kline_skip = kline_checkpoint.get("complete") is True and kline_checkpoint_end is not None and kline_checkpoint_end >= kline_end
+            if kline_skip:
+                kline_start = None
+            elif mode == "backfill" or old_klines.empty:
                 kline_start = support_start
             else:
                 dates = old_klines.loc[old_klines.symbol == symbol, "date"]
-                kline_start = max(support_start, (_day(dates.max()) or support_start) - timedelta(days=self.config.binance_overlap_days - 1))
-            klines = self.binance_source.fetch_klines(symbol, kline_start, kline_end)
-            klines = self._clip_date_frame(klines, "date", kline_start, kline_end)
-            if not klines.empty:
-                store.append("klines_daily", klines)
-                working_klines = merge_working(working_klines, klines, "klines_daily")
-                kline_dirty = True
-                kline_batch_symbols.add(symbol)
-                kline_status, _ = record_coverage(symbol, support_start, True, False, False)
-                all_kline_complete &= kline_status
+                missing_start = _day(min(kline_checkpoint.get("missing_dates", []), default=None))
+                base = missing_start or _day(dates.max()) or support_start
+                kline_start = max(support_start, base - timedelta(days=self.config.binance_overlap_days - 1))
+            if kline_skip:
+                all_kline_complete &= True
             else:
-                all_kline_complete = False
+                klines = self.binance_source.fetch_klines(symbol, kline_start, kline_end)
+                klines = self._clip_date_frame(klines, "date", kline_start, kline_end)
+                if not klines.empty:
+                    working_klines, has_new_rows = append_new("klines_daily", working_klines, klines)
+                    if has_new_rows:
+                        store.append("klines_daily", klines)
+                        kline_dirty = True
+                    kline_batch_symbols.add(symbol)
+                    kline_status, _ = record_coverage(symbol, support_start, True, False, False)
+                    all_kline_complete &= kline_status
+                else:
+                    all_kline_complete = False
 
-            if mode == "backfill" or old_funding.empty:
+            funding_checkpoint_end = funding_checkpoint.get("requested_end_ms")
+            funding_skip = funding_checkpoint.get("complete") is True and funding_checkpoint_end is not None and int(funding_checkpoint_end) >= funding_end_ms
+            if funding_skip:
+                funding_start = None
+            elif mode == "backfill" or old_funding.empty:
                 funding_start = int(pd.Timestamp(support_start, tz="UTC").timestamp() * 1000)
             else:
                 times = old_funding.loc[old_funding.symbol == symbol, "funding_time"]
-                funding_start = max(int(pd.Timestamp(support_start, tz="UTC").timestamp() * 1000), int(pd.Timestamp(times.max()).timestamp() * 1000) - 7 * DAY_MS if not times.empty else 0)
-            funding = self.binance_source.fetch_funding(symbol, funding_start, funding_end_ms)
-            funding = self._clip_funding(funding, funding_start, funding_end_ms)
+                missing_start = _day(min(funding_checkpoint.get("missing_dates", []), default=None))
+                base = int(pd.Timestamp(missing_start, tz="UTC").timestamp() * 1000) if missing_start else int(pd.Timestamp(times.max()).timestamp() * 1000) - 7 * DAY_MS if not times.empty else 0
+                funding_start = max(int(pd.Timestamp(support_start, tz="UTC").timestamp() * 1000), base)
             empty_funding_response = False
-            if not funding.empty:
-                store.append("funding_events", funding)
-                working_funding = merge_working(working_funding, funding, "funding_events")
-                funding_dirty = True
-                funding_batch_symbols.add(symbol)
-            elif {"funding_time", "symbol", "funding_rate", "mark_price", "rate_type"}.issubset(funding.columns):
-                funding_batch_symbols.add(symbol)
-                empty_funding_response = True
+            if funding_skip:
+                all_funding_complete &= True
             else:
-                all_funding_complete = False
-            if symbol in kline_batch_symbols or symbol in funding_batch_symbols:
-                kline_status, funding_status = record_coverage(symbol, support_start, symbol in kline_batch_symbols, symbol in funding_batch_symbols, empty_funding_response)
-                all_kline_complete &= kline_status
-                all_funding_complete &= funding_status
+                funding = self.binance_source.fetch_funding(symbol, funding_start, funding_end_ms)
+                funding = self._clip_funding(funding, funding_start, funding_end_ms)
+                if not funding.empty:
+                    working_funding, has_new_rows = append_new("funding_events", working_funding, funding)
+                    if has_new_rows:
+                        store.append("funding_events", funding)
+                        funding_dirty = True
+                    funding_batch_symbols.add(symbol)
+                elif {"funding_time", "symbol", "funding_rate", "mark_price", "rate_type"}.issubset(funding.columns):
+                    funding_batch_symbols.add(symbol)
+                    empty_funding_response = True
+                else:
+                    all_funding_complete = False
+                if symbol in funding_batch_symbols:
+                    _, funding_status = record_coverage(symbol, support_start, False, True, empty_funding_response)
+                    all_funding_complete &= funding_status
         if kline_dirty:
             store.replace("klines_daily", working_klines)
         if funding_dirty:
@@ -438,6 +488,17 @@ class CryptoQuantPipeline:
             metadata.get(f"checkpoint.funding.{symbol}", {}).get("complete") is True
             for symbol in mappings["binance_symbol"].dropna().astype(str)
         )
+
+    @staticmethod
+    def _symbol_status(store: CryptoQuantStore) -> dict[str, object]:
+        metadata = store.read_metadata()
+        status: dict[str, dict[str, object]] = {}
+        for key, value in metadata.items():
+            if key.startswith("checkpoint.klines."):
+                status.setdefault(key.removeprefix("checkpoint.klines."), {})["kline"] = value
+            elif key.startswith("checkpoint.funding."):
+                status.setdefault(key.removeprefix("checkpoint.funding."), {})["funding"] = value
+        return dict(sorted(status.items()))
 
     def _build_derived(self, store: CryptoQuantStore, cmc_end: date, panel_end: date, funding_complete: bool) -> None:
         constituents = store.read("cmc100_constituents")
