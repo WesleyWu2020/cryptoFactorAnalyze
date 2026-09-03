@@ -1,0 +1,128 @@
+from datetime import date
+
+import pandas as pd
+import pytest
+
+from data.crypto_quant.universe import UniverseBuildError, build_monthly_universe
+
+
+@pytest.fixture
+def synthetic_inputs():
+    constituents = pd.DataFrame(
+        [
+            {
+                "date": date(2024, 1, 1),
+                "cmc_id": cmc_id,
+                "symbol": f"C{cmc_id}",
+                "name": f"Coin {cmc_id}",
+                "weight": 100 - cmc_id,
+            }
+            for cmc_id in range(1, 61)
+        ]
+    )
+    # CMC id 50 is in the CMC top 50 but has no mapping; id 51 must enter.
+    mapped_ids = list(range(1, 50)) + list(range(51, 57))
+    mappings = pd.DataFrame(
+        [
+            {
+                "cmc_id": cmc_id,
+                "cmc_symbol": f"C{cmc_id}",
+                "binance_symbol": f"C{cmc_id}USDT",
+                "valid_from": pd.Timestamp("2020-01-01"),
+                "valid_to": pd.NaT,
+                "status": "TRADING",
+            }
+            for cmc_id in mapped_ids
+        ]
+    )
+    symbols = mappings["binance_symbol"].tolist()
+    klines = pd.DataFrame(
+        [
+            {"date": timestamp, "symbol": symbol, "completed": True}
+            for timestamp in (pd.Timestamp("2023-12-31"), pd.Timestamp("2024-01-31"))
+            for symbol in symbols
+        ]
+    )
+    return constituents, mappings, klines
+
+
+def test_intersects_before_selecting_top50(synthetic_inputs):
+    out = build_monthly_universe(*synthetic_inputs, date(2024, 1, 1), date(2024, 1, 31))
+    january = out[out["decision_date"] == pd.Timestamp("2024-01-01")]
+    assert len(january) == 50
+    assert january["binance_symbol"].nunique() == 50
+    assert january["market_cap_rank"].tolist() == list(range(1, 51))
+    assert "C51USDT" in set(january["binance_symbol"])
+    assert pd.Timestamp("2024-01-02") == january["effective_date"].iloc[0]
+
+
+def test_requires_t_minus_one_kline(synthetic_inputs):
+    constituents, mappings, klines = synthetic_inputs
+    missing_symbol = mappings.iloc[0]["binance_symbol"]
+    klines = klines[~((klines["symbol"] == missing_symbol) & (klines["date"] == pd.Timestamp("2023-12-31")))]
+    out = build_monthly_universe(constituents, mappings, klines, date(2024, 1, 1), date(2024, 1, 31))
+    assert missing_symbol not in set(out["binance_symbol"])
+
+
+def test_fails_closed_below_50(synthetic_inputs):
+    constituents, mappings, klines = synthetic_inputs
+    with pytest.raises(UniverseBuildError, match="eligible contracts: 49"):
+        build_monthly_universe(constituents, mappings.head(49), klines, date(2024, 1, 1), date(2024, 1, 31))
+
+
+def test_tie_breaks_by_cmc_id_and_closes_intervals(synthetic_inputs):
+    constituents, mappings, klines = synthetic_inputs
+    february = constituents.copy()
+    february["date"] = date(2024, 2, 1)
+    february.loc[february["cmc_id"].isin([1, 2]), "weight"] = 999
+    out = build_monthly_universe(
+        pd.concat([constituents, february], ignore_index=True), mappings, klines,
+        date(2024, 1, 1), date(2024, 2, 29), top_n=2,
+    )
+    accepted = out.sort_values(["decision_date", "market_cap_rank"])
+    assert accepted.loc[accepted["decision_date"] == pd.Timestamp("2024-02-01"), "cmc_id"].tolist() == [1, 2]
+    january = accepted[accepted["decision_date"] == pd.Timestamp("2024-01-01")]
+    assert january["effective_end_date"].eq(pd.Timestamp("2024-02-01") - pd.Timedelta(days=1)).all()
+    assert accepted[accepted["decision_date"] == pd.Timestamp("2024-02-01")]["effective_end_date"].isna().all()
+
+
+def test_historical_break_status_is_not_retroactively_filtered(synthetic_inputs):
+    constituents, mappings, klines = synthetic_inputs
+    mappings.loc[mappings["cmc_id"] == 1, "status"] = "BREAK"
+    out = build_monthly_universe(constituents, mappings, klines, date(2024, 1, 1), date(2024, 1, 31))
+    assert "C1USDT" in set(out["binance_symbol"])
+
+
+def test_current_observation_filters_symbols_for_same_day_only(synthetic_inputs):
+    constituents, mappings, klines = synthetic_inputs
+    current_symbols = set(mappings["binance_symbol"]) - {"C1USDT"}
+    out = build_monthly_universe(
+        constituents, mappings, klines, date(2024, 1, 1), date(2024, 1, 31),
+        current_trading_symbols=current_symbols, current_observed_date=date(2024, 1, 1),
+    )
+    assert "C1USDT" not in set(out["binance_symbol"])
+
+
+def test_schema_is_deterministic(synthetic_inputs):
+    out = build_monthly_universe(*synthetic_inputs, date(2024, 1, 1), date(2024, 1, 31))
+    assert list(out.columns) == [
+        "decision_date", "effective_date", "effective_end_date", "cmc_id",
+        "cmc_symbol", "binance_symbol", "weight", "market_cap_rank",
+    ]
+
+
+def test_cutoff_replay_matches_full_history_before_cutoff(synthetic_inputs):
+    constituents, mappings, klines = synthetic_inputs
+    later_constituent = constituents.copy()
+    later_constituent["date"] = date(2024, 2, 1)
+    full = build_monthly_universe(
+        pd.concat([constituents, later_constituent], ignore_index=True), mappings, klines,
+        date(2024, 1, 1), date(2024, 2, 29),
+    )
+    cutoff = build_monthly_universe(
+        constituents, mappings, klines[klines["date"] <= pd.Timestamp("2024-01-31")],
+        date(2024, 1, 1), date(2024, 1, 31),
+    )
+    full_january = full[full["decision_date"] == pd.Timestamp("2024-01-01")].reset_index(drop=True)
+    comparable = [column for column in cutoff.columns if column != "effective_end_date"]
+    pd.testing.assert_frame_equal(full_january[comparable], cutoff[comparable].reset_index(drop=True))
