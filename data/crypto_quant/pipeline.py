@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
+from collections import defaultdict
 import hashlib
 import json
 import math
@@ -38,7 +39,7 @@ class RunSummary:
     mode: str
     as_of_utc: datetime
     published_path: Path
-    last_complete_kline_date: date
+    last_complete_kline_date: date | None
     last_complete_panel_date: date | None
     row_counts: dict[str, int]
     warnings: Sequence[str]
@@ -345,77 +346,92 @@ class CryptoQuantPipeline:
                 else:
                     working_funding = clean
 
-        def append_new(name: str, current: pd.DataFrame, incoming: pd.DataFrame) -> tuple[pd.DataFrame, bool, bool]:
-            keys = TABLE_SPECS[name].key
-            incoming = incoming.drop_duplicates(keys, keep="last").reset_index(drop=True)
-            if current.empty:
-                new_rows = incoming
-                revised = False
-            else:
-                existing_keys = {tuple(row) for row in current[list(keys)].astype(str).itertuples(index=False, name=None)}
-                new_rows = incoming.loc[
-                    [tuple(row) not in existing_keys for row in incoming[list(keys)].astype(str).itertuples(index=False, name=None)]
-                ].reset_index(drop=True)
-                revised = False
-                business = [column for column in TABLE_SPECS[name].columns if column not in keys]
-                for row in incoming.itertuples(index=False):
-                    key = tuple(str(getattr(row, column)) for column in keys)
-                    if key not in existing_keys:
-                        continue
-                    key_mask = pd.Series(True, index=current.index)
-                    for column, value in zip(keys, key):
-                        key_mask &= current[column].astype(str).eq(value)
-                    old = current.loc[key_mask].iloc[0]
-                    for column in business:
-                        old_value, new_value = old[column], getattr(row, column)
-                        if pd.isna(old_value) and pd.isna(new_value):
-                            continue
-                        if old_value != new_value:
-                            revised = True
-                            break
-                    if revised:
-                        break
-            return merge_working(current, incoming, name), not new_rows.empty, revised
+        def cache_key(name: str, row: Mapping[str, object]) -> tuple[object, ...]:
+            key = []
+            for column in TABLE_SPECS[name].key:
+                value = row[column]
+                if column in {"date", "funding_time"}:
+                    value = pd.to_datetime(value, utc=True).value
+                else:
+                    value = str(value)
+                key.append(value)
+            return tuple(key)
 
-        def merge_working(current: pd.DataFrame, incoming: pd.DataFrame, name: str) -> pd.DataFrame:
-            combined = pd.concat([current, incoming], ignore_index=True)
-            combined = combined.drop_duplicates(TABLE_SPECS[name].key, keep="last").reset_index(drop=True)
+        def row_cache(frame: pd.DataFrame, name: str) -> dict[tuple[object, ...], dict[str, object]]:
+            return {cache_key(name, row): row for row in frame.to_dict("records")}
+
+        def cached_frame(name: str, rows: dict[tuple[object, ...], dict[str, object]]) -> pd.DataFrame:
+            frame = pd.DataFrame(rows.values(), columns=TABLE_SPECS[name].columns)
             numeric_columns = {
                 "klines_daily": ("open", "high", "low", "close", "volume", "quote_volume", "trade_count", "taker_buy_base_volume", "taker_buy_quote_volume"),
                 "funding_events": ("funding_rate", "mark_price"),
             }.get(name, ())
             for column in numeric_columns:
-                if column in combined:
-                    combined[column] = pd.to_numeric(combined[column], errors="raise")
-            return combined
+                if column in frame:
+                    frame[column] = pd.to_numeric(frame[column], errors="raise")
+            return frame
 
-        kline_batch_symbols: set[str] = set()
+        kline_rows = row_cache(working_klines, "klines_daily")
+        funding_rows = row_cache(working_funding, "funding_events")
+        kline_dates: dict[str, set[date]] = defaultdict(set)
+        funding_dates: dict[str, set[date]] = defaultdict(set)
+        funding_times: dict[str, set[int]] = defaultdict(set)
+        for row in kline_rows.values():
+            kline_dates[str(row["symbol"])].add(pd.to_datetime(row["date"], utc=True).date())
+        for row in funding_rows.values():
+            symbol = str(row["symbol"])
+            timestamp = pd.to_datetime(row["funding_time"], utc=True)
+            funding_dates[symbol].add(timestamp.date())
+            funding_times[symbol].add(timestamp.value // 1_000_000)
+
+        def append_new(name: str, cache: dict[tuple[object, ...], dict[str, object]], incoming: pd.DataFrame) -> tuple[pd.DataFrame, bool, bool]:
+            keys = TABLE_SPECS[name].key
+            incoming = incoming.drop_duplicates(keys, keep="last").reset_index(drop=True)
+            new_rows: list[dict[str, object]] = []
+            revised = False
+            keys_set = set(keys)
+            for row in incoming.to_dict("records"):
+                key = cache_key(name, row)
+                old = cache.get(key)
+                if old is None:
+                    new_rows.append(row)
+                else:
+                    for column, new_value in row.items():
+                        if column in keys_set:
+                            continue
+                        old_value = old[column]
+                        if pd.isna(old_value) and pd.isna(new_value):
+                            continue
+                        if old_value != new_value:
+                            revised = True
+                            break
+                cache[key] = row
+            return pd.DataFrame(new_rows, columns=TABLE_SPECS[name].columns), bool(new_rows), revised
+
         funding_batch_symbols: set[str] = set()
         all_kline_complete = bool(len(mappings))
         all_funding_complete = bool(len(mappings))
         prior_metadata = store.read_metadata()
 
         def record_coverage(symbol: str, coverage_start: date, kline_received: bool, funding_received: bool, empty_funding_response: bool) -> tuple[bool, bool]:
-            full_klines = working_klines[working_klines["symbol"] == symbol]
             expected_klines = set(pd.date_range(coverage_start, kline_end, freq="D").date)
-            observed_klines = set(pd.to_datetime(full_klines["date"], errors="coerce").dt.date.dropna())
+            observed_klines = kline_dates.get(symbol, set())
             kline_missing = len(expected_klines - observed_klines)
             kline_missing_dates = sorted(expected_klines - observed_klines)
-            actual_start = _day(full_klines["date"].min()) if not full_klines.empty else None
-            actual_end = _day(full_klines["date"].max()) if not full_klines.empty else None
+            actual_start = min(observed_klines) if observed_klines else None
+            actual_end = max(observed_klines) if observed_klines else None
             kline_complete = actual_start == coverage_start and actual_end == kline_end and kline_missing == 0
             if kline_received:
                 store.write_metadata({f"checkpoint.klines.{symbol}": {"requested_start": coverage_start.isoformat(), "requested_end": kline_end.isoformat(), "actual_start": actual_start.isoformat() if actual_start else None, "actual_end": actual_end.isoformat() if actual_end else None, "missing_date_count": kline_missing, "missing_dates": [value.isoformat() for value in kline_missing_dates], "complete": kline_complete}})
 
-            full_funding = working_funding[working_funding["symbol"] == symbol]
             prior_funding_checkpoint = prior_metadata.get(f"checkpoint.funding.{symbol}")
-            can_confirm_empty_funding = empty_funding_response and prior_funding_checkpoint is None and full_funding.empty
+            observed_funding = funding_dates.get(symbol, set())
+            can_confirm_empty_funding = empty_funding_response and prior_funding_checkpoint is None and not observed_funding
             if can_confirm_empty_funding:
                 funding_missing = 0
                 funding_complete = True
             else:
                 expected_funding = set(pd.date_range(coverage_start, self._funding_complete_end(funding_end_ms), freq="D").date)
-                observed_funding = set(pd.to_datetime(full_funding["funding_time"], errors="coerce", utc=True).dt.date.dropna())
                 funding_missing_dates = sorted(expected_funding - observed_funding)
                 funding_missing = len(funding_missing_dates)
                 funding_complete = expected_funding.issubset(observed_funding)
@@ -423,8 +439,8 @@ class CryptoQuantPipeline:
                 funding_missing_dates = []
             elif empty_funding_response:
                 funding_missing_dates = sorted(expected_funding - observed_funding)
-            actual_start_ms = int(pd.Timestamp(full_funding["funding_time"].min()).timestamp() * 1000) if not full_funding.empty else None
-            actual_end_ms = int(pd.Timestamp(full_funding["funding_time"].max()).timestamp() * 1000) if not full_funding.empty else None
+            actual_start_ms = min(funding_times[symbol]) if funding_times.get(symbol) else None
+            actual_end_ms = max(funding_times[symbol]) if funding_times.get(symbol) else None
             if funding_received:
                 store.write_metadata({f"checkpoint.funding.{symbol}": {"requested_start_ms": int(pd.Timestamp(coverage_start, tz="UTC").timestamp() * 1000), "requested_end_ms": funding_end_ms, "actual_start_ms": actual_start_ms, "actual_end_ms": actual_end_ms, "missing_date_count": funding_missing, "missing_dates": [value.isoformat() for value in funding_missing_dates], "empty_result": empty_funding_response, "complete": funding_complete}})
             return kline_complete, funding_complete
@@ -456,14 +472,15 @@ class CryptoQuantPipeline:
                 klines = self.binance_source.fetch_klines(symbol, kline_start, kline_end)
                 klines = self._clip_date_frame(klines, "date", kline_start, kline_end)
                 if not klines.empty:
-                    working_klines, has_new_rows, has_revisions = append_new("klines_daily", working_klines, klines)
+                    new_klines, has_new_rows, has_revisions = append_new("klines_daily", kline_rows, klines)
+                    for row_data in klines.to_dict("records"):
+                        kline_dates[symbol].add(pd.to_datetime(row_data["date"], utc=True).date())
                     if has_new_rows:
-                        store.append("klines_daily", klines)
+                        store.append("klines_daily", new_klines)
                         kline_dirty = True
                     if has_revisions:
-                        store.replace("klines_daily", working_klines)
+                        store.replace("klines_daily", cached_frame("klines_daily", kline_rows))
                         kline_dirty = True
-                    kline_batch_symbols.add(symbol)
                     kline_status, _ = record_coverage(symbol, support_start, True, False, False)
                     all_kline_complete &= kline_status
                 else:
@@ -487,12 +504,16 @@ class CryptoQuantPipeline:
                 funding = self.binance_source.fetch_funding(symbol, funding_start, funding_end_ms)
                 funding = self._clip_funding(funding, funding_start, funding_end_ms)
                 if not funding.empty:
-                    working_funding, has_new_rows, has_revisions = append_new("funding_events", working_funding, funding)
+                    new_funding, has_new_rows, has_revisions = append_new("funding_events", funding_rows, funding)
+                    for row_data in funding.to_dict("records"):
+                        timestamp = pd.to_datetime(row_data["funding_time"], utc=True)
+                        funding_dates[symbol].add(timestamp.date())
+                        funding_times[symbol].add(timestamp.value // 1_000_000)
                     if has_new_rows:
-                        store.append("funding_events", funding)
+                        store.append("funding_events", new_funding)
                         funding_dirty = True
                     if has_revisions:
-                        store.replace("funding_events", working_funding)
+                        store.replace("funding_events", cached_frame("funding_events", funding_rows))
                         funding_dirty = True
                     funding_batch_symbols.add(symbol)
                 elif {"funding_time", "symbol", "funding_rate", "mark_price", "rate_type"}.issubset(funding.columns):
@@ -504,9 +525,9 @@ class CryptoQuantPipeline:
                     _, funding_status = record_coverage(symbol, support_start, False, True, empty_funding_response)
                     all_funding_complete &= funding_status
         if kline_dirty:
-            store.replace("klines_daily", working_klines)
+            store.replace("klines_daily", cached_frame("klines_daily", kline_rows))
         if funding_dirty:
-            store.replace("funding_events", working_funding)
+            store.replace("funding_events", cached_frame("funding_events", funding_rows))
         return all_kline_complete, all_funding_complete
 
     @staticmethod

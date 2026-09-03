@@ -164,14 +164,26 @@ def test_summary_does_not_report_kline_end_when_kline_coverage_is_incomplete(tmp
     metadata = CryptoQuantStore(_config(tmp_path).store_path).read_metadata()
     assert metadata["validation_warnings"]
     assert metadata["last_complete_panel_date"] != "None"
+    assert summary.last_complete_kline_date is None or isinstance(summary.last_complete_kline_date, date)
 
 
-def test_pipeline_incremental_persistence_does_not_use_full_table_upsert(tmp_path, monkeypatch):
+def test_pipeline_incremental_persistence_uses_bounded_table_reads(tmp_path, monkeypatch):
+    reads = {"klines_daily": 0, "funding_events": 0}
+    original_read = CryptoQuantStore.read
+
+    def counted_read(self, name, where=None):
+        if name in reads:
+            reads[name] += 1
+        return original_read(self, name, where)
+
     def fail_upsert(*args, **kwargs):
         raise AssertionError("incremental pipeline must not upsert full tables per symbol")
 
+    monkeypatch.setattr(CryptoQuantStore, "read", counted_read)
     monkeypatch.setattr(CryptoQuantStore, "upsert", fail_upsert)
     _run(tmp_path)
+    assert reads["klines_daily"] < 20
+    assert reads["funding_events"] < 20
 
 
 def test_mapping_issues_are_retained_in_metadata(tmp_path):
@@ -214,6 +226,28 @@ def test_incremental_revision_of_existing_kline_key_is_persisted(tmp_path):
     )
     stored = CryptoQuantStore(config.store_path).read("klines_daily")
     assert stored.loc[(stored.symbol == SYMBOLS[0]) & (stored.date == pd.Timestamp("2024-02-20")), "close"].iloc[0] == 100.75
+
+
+def test_incremental_revision_of_existing_funding_key_is_persisted(tmp_path):
+    class FundingEvents(FakeBinance):
+        def fetch_funding(self, symbol, start_ms, end_ms):
+            start = pd.Timestamp(start_ms, unit="ms", tz="UTC")
+            end = pd.Timestamp(end_ms, unit="ms", tz="UTC")
+            dates = pd.date_range(start.normalize(), end.normalize(), freq="D", tz="UTC")
+            return pd.DataFrame([{"funding_time": value + pd.Timedelta(hours=8), "symbol": symbol, "funding_rate": 0.001, "mark_price": 1.0, "rate_type": "Regular"} for value in dates if start <= value + pd.Timedelta(hours=8) <= end])
+
+    _run(tmp_path, binance=FundingEvents())
+
+    class RevisedFunding(FundingEvents):
+        def fetch_funding(self, symbol, start_ms, end_ms):
+            out = super().fetch_funding(symbol, start_ms, end_ms)
+            out.loc[out.funding_time == pd.Timestamp("2024-02-20 08:00", tz="UTC"), "funding_rate"] = 0.009
+            return out
+
+    config = _config(tmp_path)
+    CryptoQuantPipeline(config, FakeCmc(), RevisedFunding()).update(datetime(2024, 2, 26, 12, tzinfo=timezone.utc))
+    stored = CryptoQuantStore(config.store_path).read("funding_events")
+    assert stored.loc[(stored.symbol == SYMBOLS[0]) & (stored.funding_time == pd.Timestamp("2024-02-20 08:00", tz="UTC")), "funding_rate"].iloc[0] == 0.009
 
 
 def test_fingerprint_is_stable_for_relative_and_absolute_target_paths(tmp_path):
