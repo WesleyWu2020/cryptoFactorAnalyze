@@ -5,9 +5,12 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 import hashlib
 import json
+import math
+from numbers import Integral, Real
 from pathlib import Path
 from typing import Callable, Protocol, Sequence
 
+import numpy as np
 import pandas as pd
 
 from .binance import DAY_MS
@@ -223,6 +226,19 @@ class CryptoQuantPipeline:
         if normalized_dates.isna().any() or normalized_dates.nunique() != 1:
             return False
         if snapshot[list(required)].isna().any().any():
+            return False
+        if any(
+            isinstance(value, (bool, np.bool_))
+            or not (
+                isinstance(value, Integral)
+                or (
+                    isinstance(value, Real)
+                    and math.isfinite(float(value))
+                    and float(value).is_integer()
+                )
+            )
+            for value in snapshot["cmc_id"]
+        ):
             return False
         cmc_ids = pd.to_numeric(snapshot["cmc_id"], errors="coerce")
         return not cmc_ids.isna().any() and cmc_ids.nunique() == 100

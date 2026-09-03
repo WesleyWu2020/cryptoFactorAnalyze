@@ -464,6 +464,31 @@ def test_cmc_snapshot_rejects_duplicate_id_across_same_utc_day_timestamps(tmp_pa
     assert date(2024, 1, 10) not in set(normalized)
 
 
+@pytest.mark.parametrize("invalid_id", [1.9, True])
+def test_cmc_snapshot_rejects_non_integer_cmc_id_before_cast(tmp_path, invalid_id):
+    class InvalidId(FakeCmc):
+        def fetch_history(self, start, end, on_page=None):
+            daily, members = super().fetch_history(start, end, on_page=None)
+            target = (members.date == pd.Timestamp("2024-01-10"))
+            members["cmc_id"] = members["cmc_id"].astype(object)
+            members.loc[target & members.cmc_id.eq(1), "cmc_id"] = invalid_id
+            members = members[
+                ~((members.date == pd.Timestamp("2024-01-10")) & members.cmc_id.eq(100))
+            ]
+            if on_page:
+                on_page(daily, members, end)
+            return daily, members
+
+    _run(tmp_path, cmc=InvalidId())
+    store = CryptoQuantStore(_config(tmp_path).store_path)
+    metadata = store.read_metadata()
+    assert metadata["checkpoint.cmc_through"] == "2024-01-09"
+    assert metadata["last_successful_cmc_date"] == "2024-01-09"
+    stored = store.read("cmc100_constituents")
+    normalized = pd.to_datetime(stored["date"], utc=True).dt.date
+    assert date(2024, 1, 10) not in set(normalized)
+
+
 def test_funding_internal_natural_day_gap_blocks_completion(tmp_path):
     class GapFunding(FakeBinance):
         def fetch_funding(self, symbol, start_ms, end_ms):
