@@ -225,3 +225,15 @@ def test_invalid_universe_timestamps_are_structured_issues(column):
     assert report.ok is False
     assert "invalid_timestamp" in _issue_codes(report)
     assert any(column in issue.detail and "index=0" in issue.detail for issue in report.issues)
+
+
+def test_validation_date_parsing_does_not_require_pandas_mixed_format(monkeypatch):
+    original = pd.to_datetime
+
+    def pandas_13_to_datetime(*args, **kwargs):
+        assert kwargs.get("format") != "mixed"
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(pd, "to_datetime", pandas_13_to_datetime)
+    report = validate_frames(_valid_store_frames(), {})
+    assert report.ok
