@@ -94,7 +94,9 @@ class CryptoQuantPipeline:
             if not derived_only:
                 cmc_watermark = self._fetch_cmc(store, mode, cmc_end)
                 exchange = self.binance_source.fetch_exchange_info()
-                store.replace("futures_contracts", self._map_contracts(store, exchange))
+                mappings, mapping_issues = self._map_contracts(store, exchange)
+                store.replace("futures_contracts", mappings)
+                store.write_metadata({"mapping_issues": self._serialize_mapping_issues(mapping_issues)})
                 if mode != "rebuild":
                     kline_complete, funding_complete = self._fetch_binance(store, mode, cmc_end, kline_end, funding_end_ms)
             else:
@@ -244,15 +246,30 @@ class CryptoQuantPipeline:
         cmc_ids = pd.to_numeric(snapshot["cmc_id"], errors="coerce")
         return not cmc_ids.isna().any() and (cmc_ids > 0).all() and cmc_ids.nunique() == 100
 
-    def _map_contracts(self, store: CryptoQuantStore, exchange: pd.DataFrame) -> pd.DataFrame:
+    def _map_contracts(self, store: CryptoQuantStore, exchange: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
         constituents = store.read("cmc100_constituents")
         rules = load_mapping_rules(self.config.rules_path)
         def probe(symbol: str, when: date) -> bool:
             return not self.binance_source.fetch_klines(symbol, when, when).empty
-        mappings, _issues = build_contract_mappings(constituents, exchange, rules, probe)
+        mappings, issues = build_contract_mappings(constituents, exchange, rules, probe)
         if mappings.empty:
-            return pd.DataFrame(columns=TABLE_SPECS["futures_contracts"].columns)
-        return mappings.reindex(columns=TABLE_SPECS["futures_contracts"].columns)
+            mappings = pd.DataFrame(columns=TABLE_SPECS["futures_contracts"].columns)
+        else:
+            mappings = mappings.reindex(columns=TABLE_SPECS["futures_contracts"].columns)
+        return mappings, issues
+
+    @staticmethod
+    def _serialize_mapping_issues(issues: pd.DataFrame) -> list[dict[str, object]]:
+        if issues.empty:
+            return []
+        records = issues.to_dict("records")
+        for record in records:
+            for key, value in record.items():
+                if isinstance(value, (date, datetime, pd.Timestamp)):
+                    record[key] = pd.Timestamp(value).date().isoformat()
+                elif pd.isna(value):
+                    record[key] = None
+        return records
 
     @staticmethod
     def _clip_date_frame(frame: pd.DataFrame, column: str, start: date, end: date) -> pd.DataFrame:
@@ -312,6 +329,7 @@ class CryptoQuantPipeline:
         coverage_starts: dict[str, date] = {}
         kline_batch_symbols: set[str] = set()
         funding_batch_symbols: set[str] = set()
+        empty_funding_symbols: set[str] = set()
         all_kline_complete = bool(len(mappings))
         all_funding_complete = bool(len(mappings))
         for row in mappings.sort_values("binance_symbol").itertuples():
@@ -346,6 +364,9 @@ class CryptoQuantPipeline:
             if not funding.empty:
                 funding_batches.append(funding)
                 funding_batch_symbols.add(symbol)
+            elif {"funding_time", "symbol", "funding_rate", "mark_price", "rate_type"}.issubset(funding.columns):
+                funding_batch_symbols.add(symbol)
+                empty_funding_symbols.add(symbol)
             else:
                 all_funding_complete = False
         if kline_batches:
@@ -368,15 +389,19 @@ class CryptoQuantPipeline:
                 store.write_metadata({f"checkpoint.klines.{symbol}": {"requested_start": coverage_start.isoformat(), "requested_end": kline_end.isoformat(), "actual_start": actual_start.isoformat() if actual_start else None, "actual_end": actual_end.isoformat() if actual_end else None, "missing_date_count": missing_count, "complete": complete}})
             full_funding = store.read("funding_events")
             full_funding = full_funding[full_funding["symbol"] == symbol]
-            expected_days = set(pd.date_range(coverage_start, self._funding_complete_end(funding_end_ms), freq="D").date)
-            observed_days = set(pd.to_datetime(full_funding["funding_time"], errors="coerce", utc=True).dt.date.dropna())
-            missing_count = len(expected_days - observed_days)
-            complete = expected_days.issubset(observed_days)
+            if symbol in empty_funding_symbols:
+                missing_count = 0
+                complete = True
+            else:
+                expected_days = set(pd.date_range(coverage_start, self._funding_complete_end(funding_end_ms), freq="D").date)
+                observed_days = set(pd.to_datetime(full_funding["funding_time"], errors="coerce", utc=True).dt.date.dropna())
+                missing_count = len(expected_days - observed_days)
+                complete = expected_days.issubset(observed_days)
             all_funding_complete &= complete
             actual_start_ms = int(pd.Timestamp(full_funding["funding_time"].min()).timestamp() * 1000) if not full_funding.empty else None
             actual_end_ms = int(pd.Timestamp(full_funding["funding_time"].max()).timestamp() * 1000) if not full_funding.empty else None
             if symbol in funding_batch_symbols:
-                store.write_metadata({f"checkpoint.funding.{symbol}": {"requested_start_ms": int(pd.Timestamp(coverage_start, tz="UTC").timestamp() * 1000), "requested_end_ms": funding_end_ms, "actual_start_ms": actual_start_ms, "actual_end_ms": actual_end_ms, "missing_date_count": missing_count, "complete": complete}})
+                store.write_metadata({f"checkpoint.funding.{symbol}": {"requested_start_ms": int(pd.Timestamp(coverage_start, tz="UTC").timestamp() * 1000), "requested_end_ms": funding_end_ms, "actual_start_ms": actual_start_ms, "actual_end_ms": actual_end_ms, "missing_date_count": missing_count, "empty_result": symbol in empty_funding_symbols, "complete": complete}})
         return all_kline_complete, all_funding_complete
 
     @staticmethod

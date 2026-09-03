@@ -112,6 +112,29 @@ def test_backfill_writes_all_seven_tables_and_metadata(tmp_path):
     assert {"schema_version", "pipeline_version", "rules_version", "source_urls", "last_successful_cmc_date", "last_successful_kline_date", "last_successful_funding_time", "last_complete_panel_date", "table_row_counts", "table_date_ranges", "created_at_utc", "updated_at_utc"}.issubset(store.read_metadata())
 
 
+def test_complete_empty_funding_response_is_published_as_complete(tmp_path):
+    _run(tmp_path)
+    store = CryptoQuantStore(_config(tmp_path).store_path)
+    metadata = store.read_metadata()
+    checkpoint = metadata["checkpoint.funding.C00USDT"]
+    assert checkpoint["complete"] is True
+    assert checkpoint["empty_result"] is True
+    assert metadata["last_successful_funding_time"] == int(datetime(2024, 2, 25, 12, tzinfo=timezone.utc).timestamp() * 1000)
+    panel = store.read("research_panel_daily")
+    assert panel["funding_event_count"].eq(0).all()
+    assert panel["funding_rate_mean"].isna().all()
+    assert panel["has_complete_funding"].all()
+
+
+def test_mapping_issues_are_retained_in_metadata(tmp_path):
+    _run(tmp_path)
+    metadata = CryptoQuantStore(_config(tmp_path).store_path).read_metadata()
+    issues = metadata["mapping_issues"]
+    assert issues
+    assert {"cmc_id", "cmc_symbol", "decision_date", "issue"}.issubset(issues[0])
+    assert any(issue["issue"] == "unresolved" for issue in issues)
+
+
 def test_second_identical_update_is_idempotent(tmp_path):
     _run(tmp_path)
     active = tmp_path / "data" / "crypto_quant.h5"
@@ -203,7 +226,7 @@ def test_empty_incremental_sources_do_not_advance_watermarks_or_checkpoints(tmp_
     assert after["last_successful_kline_date"] == before["last_successful_kline_date"]
     assert after["last_successful_funding_time"] == before["last_successful_funding_time"]
     assert after["checkpoint.klines.C00USDT"] == before["checkpoint.klines.C00USDT"]
-    assert "checkpoint.funding.C00USDT" not in after
+    assert after["checkpoint.funding.C00USDT"] == before["checkpoint.funding.C00USDT"]
 
 
 def test_pipeline_clips_adapter_rows_to_requested_ranges(tmp_path):
