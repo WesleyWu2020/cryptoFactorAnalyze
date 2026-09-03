@@ -290,6 +290,11 @@ def test_pipeline_cutoff_replay_matches_full_raw_and_derived_prefix(tmp_path):
         numeric = left.select_dtypes(include="number").columns.intersection(right.select_dtypes(include="number").columns)
         max_abs_diff = max((left[column].fillna(0).to_numpy() - right[column].fillna(0).to_numpy()).__abs__().max(initial=0.0) for column in numeric) if len(numeric) else 0.0
         assert max_abs_diff == 0.0
+        if name == "research_panel_daily":
+            assert left["has_complete_funding"].all()
+            assert not right["has_complete_funding"].any()
+            left = left.drop(columns=["has_complete_funding"])
+            right = right.drop(columns=["has_complete_funding"])
         pd.testing.assert_frame_equal(left, right, check_dtype=False)
 
 
@@ -464,8 +469,8 @@ def test_cmc_snapshot_rejects_duplicate_id_across_same_utc_day_timestamps(tmp_pa
     assert date(2024, 1, 10) not in set(normalized)
 
 
-@pytest.mark.parametrize("invalid_id", [1.9, True])
-def test_cmc_snapshot_rejects_non_integer_cmc_id_before_cast(tmp_path, invalid_id):
+@pytest.mark.parametrize("invalid_id", [0, -1, 1.9, True])
+def test_cmc_snapshot_rejects_non_positive_or_non_integer_cmc_id_before_cast(tmp_path, invalid_id):
     class InvalidId(FakeCmc):
         def fetch_history(self, start, end, on_page=None):
             daily, members = super().fetch_history(start, end, on_page=None)
@@ -503,6 +508,8 @@ def test_funding_internal_natural_day_gap_blocks_completion(tmp_path):
     assert checkpoint["complete"] is False
     assert checkpoint["missing_date_count"] > 0
     assert metadata["last_successful_funding_time"] is None
+    panel = CryptoQuantStore(_config(tmp_path).store_path).read("research_panel_daily")
+    assert panel["has_complete_funding"].eq(False).all()
 
 
 def test_cmc_historical_gap_survives_incremental_overlap(tmp_path):

@@ -69,7 +69,7 @@ def build_research_panel(
     klines: pd.DataFrame,
     funding: pd.DataFrame,
     panel_end: date,
-    funding_complete_through: date,
+    funding_complete_through: date | None,
 ) -> pd.DataFrame:
     """Expand accepted memberships to daily rows and left-join observations."""
     end = pd.Timestamp(panel_end).normalize()
@@ -119,7 +119,10 @@ def build_research_panel(
     funding_daily = aggregate_funding_daily(funding)
     panel = panel.merge(funding_daily.rename(columns={"symbol": "binance_symbol"}), on=["date", "binance_symbol"], how="left")
     panel["funding_event_count"] = panel["funding_event_count"].fillna(0).astype("int64")
-    panel["has_complete_funding"] = panel["date"] <= pd.Timestamp(funding_complete_through).normalize()
+    if funding_complete_through is None:
+        panel["has_complete_funding"] = False
+    else:
+        panel["has_complete_funding"] = panel["date"] <= pd.Timestamp(funding_complete_through).normalize()
     return panel[RESEARCH_PANEL_COLUMNS].sort_values(["date", "binance_symbol"], kind="stable").reset_index(drop=True)
 
 

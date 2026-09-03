@@ -99,6 +99,7 @@ class CryptoQuantPipeline:
                     kline_complete, funding_complete = self._fetch_binance(store, mode, cmc_end, kline_end, funding_end_ms)
             else:
                 exchange = store.read("futures_contracts")
+                funding_complete = self._funding_checkpoints_complete(store)
 
             for name, spec in TABLE_SPECS.items():
                 if name not in store.keys():
@@ -110,7 +111,7 @@ class CryptoQuantPipeline:
                         store.replace(name, pd.DataFrame([seed]))
                         with pd.HDFStore(store.path, mode="a") as hdf:
                             hdf.remove(name, start=0, stop=1)
-            self._build_derived(store, cmc_end, kline_end)
+            self._build_derived(store, cmc_end, kline_end, funding_complete)
             metadata = self._metadata(store, run_at, cmc_end, kline_end, funding_end_ms, cmc_watermark, kline_complete, funding_complete)
             store.write_metadata(metadata)
             report = validate_store(self.config.staging_path)
@@ -241,7 +242,7 @@ class CryptoQuantPipeline:
         ):
             return False
         cmc_ids = pd.to_numeric(snapshot["cmc_id"], errors="coerce")
-        return not cmc_ids.isna().any() and cmc_ids.nunique() == 100
+        return not cmc_ids.isna().any() and (cmc_ids > 0).all() and cmc_ids.nunique() == 100
 
     def _map_contracts(self, store: CryptoQuantStore, exchange: pd.DataFrame) -> pd.DataFrame:
         constituents = store.read("cmc100_constituents")
@@ -378,7 +379,18 @@ class CryptoQuantPipeline:
                 store.write_metadata({f"checkpoint.funding.{symbol}": {"requested_start_ms": int(pd.Timestamp(coverage_start, tz="UTC").timestamp() * 1000), "requested_end_ms": funding_end_ms, "actual_start_ms": actual_start_ms, "actual_end_ms": actual_end_ms, "missing_date_count": missing_count, "complete": complete}})
         return all_kline_complete, all_funding_complete
 
-    def _build_derived(self, store: CryptoQuantStore, cmc_end: date, panel_end: date) -> None:
+    @staticmethod
+    def _funding_checkpoints_complete(store: CryptoQuantStore) -> bool:
+        mappings = store.read("futures_contracts")
+        if mappings.empty:
+            return False
+        metadata = store.read_metadata()
+        return all(
+            metadata.get(f"checkpoint.funding.{symbol}", {}).get("complete") is True
+            for symbol in mappings["binance_symbol"].dropna().astype(str)
+        )
+
+    def _build_derived(self, store: CryptoQuantStore, cmc_end: date, panel_end: date, funding_complete: bool) -> None:
         constituents = store.read("cmc100_constituents")
         mappings = store.read("futures_contracts")
         klines = store.read("klines_daily")
@@ -397,7 +409,8 @@ class CryptoQuantPipeline:
         universe = universe.rename(columns={"weight": "cmc_weight"})
         store.replace("universe_monthly", universe)
         panel_klines = klines.rename(columns={"quote_volume": "quote_asset_volume"}) if "quote_volume" in klines else klines
-        panel = build_research_panel(universe, panel_klines, store.read("funding_events"), panel_end, panel_end)
+        funding_through = panel_end if funding_complete else None
+        panel = build_research_panel(universe, panel_klines, store.read("funding_events"), panel_end, funding_through)
         panel = panel.merge(
             universe[["effective_date", "binance_symbol", "decision_date", "market_cap_rank"]],
             left_on=["universe_effective_date", "binance_symbol"],
