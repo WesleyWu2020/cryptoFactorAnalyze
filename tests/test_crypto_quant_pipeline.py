@@ -227,17 +227,60 @@ def test_pipeline_clips_adapter_rows_to_requested_ranges(tmp_path):
 
 def test_pipeline_cutoff_replay_matches_full_raw_and_derived_prefix(tmp_path):
     full_dir, cutoff_dir = tmp_path / "full", tmp_path / "cutoff"
-    _run(full_dir)
+    class Bounded(FakeBinance):
+        def __init__(self, max_date=None):
+            super().__init__()
+            self.max_date = max_date
+
+        def fetch_klines(self, symbol, start, end):
+            out = super().fetch_klines(symbol, start, end)
+            if self.max_date is not None:
+                out = out[pd.to_datetime(out.date).dt.date <= self.max_date]
+            return out
+
+        def fetch_funding(self, symbol, start_ms, end_ms):
+            start = pd.Timestamp(start_ms, unit="ms", tz="UTC")
+            end = pd.Timestamp(end_ms, unit="ms", tz="UTC")
+            dates = [pd.Timestamp("2024-02-19", tz="UTC") + pd.Timedelta(hours=8), pd.Timestamp("2024-02-24", tz="UTC") + pd.Timedelta(hours=8)]
+            if self.max_date is not None:
+                dates = [value for value in dates if value.date() <= self.max_date]
+            return pd.DataFrame([{"funding_time": value, "symbol": symbol, "funding_rate": 0.0, "mark_price": 1.0, "rate_type": "Regular"} for value in dates if start <= value <= end])
+
+    _run(full_dir, binance=Bounded())
     cmc = FakeCmc()
     cmc.max_return_date = date(2024, 2, 20)
-    _run(cutoff_dir, cmc=cmc)
+    _run(cutoff_dir, cmc=cmc, binance=Bounded(date(2024, 2, 20)))
     full = CryptoQuantStore(_config(full_dir).store_path)
     cut = CryptoQuantStore(_config(cutoff_dir).store_path)
-    for name, column, cutoff in (("cmc100_daily", "date", "2024-02-20"), ("klines_daily", "date", "2024-02-19"), ("universe_monthly", "decision_date", "2024-02-01"), ("research_panel_daily", "date", "2024-02-19")):
+    assert full.read("cmc100_constituents")["date"].max() > pd.Timestamp("2024-02-20")
+    assert full.read("klines_daily")["date"].max() > pd.Timestamp("2024-02-20")
+    assert full.read("funding_events")["funding_time"].max() > pd.Timestamp("2024-02-20", tz="UTC")
+    assert cut.read("cmc100_constituents")["date"].max() <= pd.Timestamp("2024-02-20")
+    assert cut.read("klines_daily")["date"].max() <= pd.Timestamp("2024-02-20")
+    assert cut.read("funding_events")["funding_time"].max() <= pd.Timestamp("2024-02-20", tz="UTC")
+    prefixes = {
+        "cmc100_daily": ("date", pd.Timestamp("2024-02-20")),
+        "cmc100_constituents": ("date", pd.Timestamp("2024-02-20")),
+        "futures_contracts": ("valid_from", pd.Timestamp("2024-02-20")),
+        "klines_daily": ("date", pd.Timestamp("2024-02-19")),
+        "funding_events": ("funding_time", pd.Timestamp("2024-02-20", tz="UTC")),
+        "universe_monthly": ("effective_date", pd.Timestamp("2024-02-20")),
+        "research_panel_daily": ("date", pd.Timestamp("2024-02-19")),
+    }
+    for name, (column, cutoff) in prefixes.items():
         left = full.read(name); right = cut.read(name)
-        left = left[pd.to_datetime(left[column]) <= pd.Timestamp(cutoff)].reset_index(drop=True)
-        right = right[pd.to_datetime(right[column]) <= pd.Timestamp(cutoff)].reset_index(drop=True)
-        pd.testing.assert_frame_equal(left, right)
+        left_values = pd.to_datetime(left[column], utc=True)
+        right_values = pd.to_datetime(right[column], utc=True)
+        left = left[left_values <= cutoff.tz_localize("UTC") if cutoff.tzinfo is None else left_values <= cutoff].reset_index(drop=True)
+        right = right[right_values <= cutoff.tz_localize("UTC") if cutoff.tzinfo is None else right_values <= cutoff].reset_index(drop=True)
+        if name == "futures_contracts":
+            for frame in (left, right):
+                assert frame["valid_from"].notna().all()
+                assert frame["valid_to"].isna().all()
+        numeric = left.select_dtypes(include="number").columns.intersection(right.select_dtypes(include="number").columns)
+        max_abs_diff = max((left[column].fillna(0).to_numpy() - right[column].fillna(0).to_numpy()).__abs__().max(initial=0.0) for column in numeric) if len(numeric) else 0.0
+        assert max_abs_diff == 0.0
+        pd.testing.assert_frame_equal(left, right, check_dtype=False)
 
 
 def test_cmc_checkpoint_uses_actual_clipped_maximum(tmp_path):
