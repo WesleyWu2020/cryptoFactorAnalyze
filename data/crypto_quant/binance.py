@@ -18,6 +18,12 @@ def _datetime_from_ms(value: Any) -> pd.Timestamp:
     return pd.to_datetime(value, unit="ms", utc=True).tz_localize(None)
 
 
+def _cast_columns(frame: pd.DataFrame, dtypes: dict[str, str]) -> pd.DataFrame:
+    for column, dtype in dtypes.items():
+        frame[column] = frame[column].astype(dtype)
+    return frame
+
+
 def normalize_exchange_info(payload: object, fetched_at: pd.Timestamp) -> pd.DataFrame:
     symbols = payload["symbols"]  # type: ignore[index]
     rows = [
@@ -34,7 +40,10 @@ def normalize_exchange_info(payload: object, fetched_at: pd.Timestamp) -> pd.Dat
         if item.get("quoteAsset") == "USDT" and item.get("contractType") == "PERPETUAL"
     ]
     columns = ["binance_symbol", "base_asset", "quote_asset", "contract_type", "onboard_date", "status", "fetched_at_utc"]
-    return pd.DataFrame(rows, columns=columns)
+    return _cast_columns(
+        pd.DataFrame(rows, columns=columns),
+        {"onboard_date": "datetime64[ns]", "fetched_at_utc": "datetime64[ns]"},
+    )
 
 
 def fetch_exchange_info(client: JsonHttpClient, fetched_at: pd.Timestamp | None = None) -> pd.DataFrame:
@@ -50,7 +59,16 @@ def _normalize_klines(rows: list[list[Any]], symbol: str) -> pd.DataFrame:
             _datetime_from_ms(row[0]), symbol, float(row[1]), float(row[2]), float(row[3]), float(row[4]), float(row[5]),
             _datetime_from_ms(row[6]), float(row[7]), int(row[8]), float(row[9]), float(row[10]),
         ])
-    return pd.DataFrame(normalized, columns=columns)
+    return _cast_columns(
+        pd.DataFrame(normalized, columns=columns),
+        {
+            "date": "datetime64[ns]", "close_time": "datetime64[ns]",
+            "open": "float64", "high": "float64", "low": "float64",
+            "close": "float64", "volume": "float64",
+            "quote_asset_volume": "float64", "trade_count": "int64",
+            "taker_buy_base_volume": "float64", "taker_buy_quote_volume": "float64",
+        },
+    )
 
 
 def fetch_daily_klines(client: JsonHttpClient, symbol: str, start: date, end: date) -> pd.DataFrame:
@@ -90,9 +108,14 @@ def fetch_funding_events(client: JsonHttpClient, symbol: str, start_ms: int, end
             raise ValueError("Binance funding cursor did not advance")
         cursor = next_cursor
     columns = ["symbol", "funding_time", "funding_rate", "mark_price", "rate_type"]
-    if not rows:
-        return pd.DataFrame(columns=columns)
-    return pd.DataFrame(rows, columns=columns).drop_duplicates(["funding_time", "symbol", "rate_type"]).sort_values("funding_time").reset_index(drop=True)
+    out = pd.DataFrame(rows, columns=columns)
+    out = _cast_columns(
+        out,
+        {"funding_time": "datetime64[ns]", "funding_rate": "float64", "mark_price": "float64"},
+    )
+    if out.empty:
+        return out
+    return out.drop_duplicates(["funding_time", "symbol", "rate_type"]).sort_values("funding_time").reset_index(drop=True)
 
 
 def has_completed_daily_kline(client: JsonHttpClient, symbol: str, decision_date: date) -> bool:

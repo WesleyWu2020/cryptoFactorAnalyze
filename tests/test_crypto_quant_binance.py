@@ -55,8 +55,14 @@ def test_exchange_info_keeps_only_usdt_perpetuals(exchange_payload):
     assert set(out["binance_symbol"]) == {"BTCUSDT", "ETHUSDT"}
     assert set(out["contract_type"]) == {"PERPETUAL"}
     assert list(out.columns) == ["binance_symbol", "base_asset", "quote_asset", "contract_type", "onboard_date", "status", "fetched_at_utc"]
-    assert pd.api.types.is_datetime64_dtype(out["onboard_date"])
-    assert pd.api.types.is_datetime64_dtype(out["fetched_at_utc"])
+    assert out["onboard_date"].dtype == "datetime64[ns]"
+    assert out["fetched_at_utc"].dtype == "datetime64[ns]"
+
+
+def test_exchange_info_empty_result_has_stable_dtypes():
+    out = normalize_exchange_info({"symbols": []}, fetched_at=pd.Timestamp("2026-09-03"))
+    assert out["onboard_date"].dtype == "datetime64[ns]"
+    assert out["fetched_at_utc"].dtype == "datetime64[ns]"
 
 
 def test_fetch_exchange_info_uses_endpoint_and_normalizes(exchange_payload):
@@ -95,6 +101,16 @@ def test_klines_normalize_ohlc_trade_count_and_taker_fields(kline_payload):
     assert pd.api.types.is_integer_dtype(out["trade_count"])
 
 
+def test_klines_empty_result_has_stable_dtypes():
+    client = SequentialClient([[]])
+    out = fetch_daily_klines(client, "BTCUSDT", date(2024, 1, 1), date(2024, 1, 3))
+    assert out["date"].dtype == "datetime64[ns]"
+    assert out["close_time"].dtype == "datetime64[ns]"
+    for column in ["open", "high", "low", "close", "volume", "quote_asset_volume", "taker_buy_base_volume", "taker_buy_quote_volume"]:
+        assert out[column].dtype == "float64"
+    assert out["trade_count"].dtype == "int64"
+
+
 def test_funding_pagination_advances_one_millisecond_and_normalizes_type(funding_payload):
     full_page = funding_payload * 500
     client = SequentialClient([full_page, []])
@@ -106,6 +122,14 @@ def test_funding_pagination_advances_one_millisecond_and_normalizes_type(funding
     assert pd.api.types.is_float_dtype(out["funding_rate"])
     assert pd.api.types.is_float_dtype(out["mark_price"])
     assert pd.isna(out.loc[out["rate_type"] == "Regular", "mark_price"]).all()
+
+
+def test_funding_empty_result_has_stable_dtypes():
+    client = SequentialClient([[]])
+    out = fetch_funding_events(client, "BTCUSDT", 1704067200000, 1704153600000)
+    assert out["funding_time"].dtype == "datetime64[ns]"
+    assert out["funding_rate"].dtype == "float64"
+    assert out["mark_price"].dtype == "float64"
 
 
 def test_historical_probe_requires_a_completed_t_minus_one_kline(kline_payload):
