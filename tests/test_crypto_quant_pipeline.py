@@ -186,6 +186,23 @@ def test_pipeline_incremental_persistence_uses_bounded_table_reads(tmp_path, mon
     assert reads["funding_events"] < 20
 
 
+def test_incremental_symbol_lookups_are_pre_grouped_once(tmp_path, monkeypatch):
+    """Symbol growth must not add full-frame boolean scans inside the loop."""
+    groupby_columns = []
+    original_groupby = pd.DataFrame.groupby
+
+    def counted_groupby(self, by=None, *args, **kwargs):
+        if by == "symbol":
+            groupby_columns.append(tuple(self.columns))
+        return original_groupby(self, by=by, *args, **kwargs)
+
+    monkeypatch.setattr(pd.DataFrame, "groupby", counted_groupby)
+    _run(tmp_path)
+
+    assert sum("symbol" in columns for columns in groupby_columns) >= 2
+    assert len(groupby_columns) <= 2
+
+
 def test_mapping_issues_are_retained_in_metadata(tmp_path):
     summary = _run(tmp_path)
     metadata = CryptoQuantStore(_config(tmp_path).store_path).read_metadata()

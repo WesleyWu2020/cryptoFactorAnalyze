@@ -335,6 +335,14 @@ class CryptoQuantPipeline:
         old_funding = store.read("funding_events")
         working_klines = old_klines.copy()
         working_funding = old_funding.copy()
+        kline_by_symbol = {
+            str(symbol): frame
+            for symbol, frame in working_klines.groupby("symbol", sort=False)
+        }
+        funding_by_symbol = {
+            str(symbol): frame
+            for symbol, frame in working_funding.groupby("symbol", sort=False)
+        }
         kline_dirty = funding_dirty = False
 
         for name, frame in (("klines_daily", working_klines), ("funding_events", working_funding)):
@@ -462,7 +470,8 @@ class CryptoQuantPipeline:
             elif mode == "backfill" or old_klines.empty:
                 kline_start = support_start
             else:
-                dates = old_klines.loc[old_klines.symbol == symbol, "date"]
+                symbol_klines = kline_by_symbol.get(symbol)
+                dates = symbol_klines["date"] if symbol_klines is not None else pd.Series(dtype="datetime64[ns]")
                 missing_start = _day(min(kline_checkpoint.get("missing_dates", []), default=None))
                 base = missing_start or _day(dates.max()) or support_start
                 kline_start = max(support_start, base - timedelta(days=self.config.binance_overlap_days - 1))
@@ -493,7 +502,8 @@ class CryptoQuantPipeline:
             elif mode == "backfill" or old_funding.empty:
                 funding_start = int(pd.Timestamp(support_start, tz="UTC").timestamp() * 1000)
             else:
-                times = old_funding.loc[old_funding.symbol == symbol, "funding_time"]
+                symbol_funding = funding_by_symbol.get(symbol)
+                times = symbol_funding["funding_time"] if symbol_funding is not None else pd.Series(dtype="datetime64[ns, UTC]")
                 missing_start = _day(min(funding_checkpoint.get("missing_dates", []), default=None))
                 base = int(pd.Timestamp(missing_start, tz="UTC").timestamp() * 1000) if missing_start else int(pd.Timestamp(times.max()).timestamp() * 1000) - 7 * DAY_MS if not times.empty else 0
                 funding_start = max(int(pd.Timestamp(support_start, tz="UTC").timestamp() * 1000), base)
