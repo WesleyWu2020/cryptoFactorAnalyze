@@ -92,15 +92,19 @@ def test_honors_zero_retry_after():
 
 
 def test_does_not_retry_invalid_url():
-    session = FakeSession([requests.exceptions.InvalidURL("invalid URL")])
+    error = requests.exceptions.InvalidURL("invalid URL")
+    session = FakeSession([error])
     sleeps = []
     client = JsonHttpClient(session, max_attempts=3, sleep=sleeps.append)
 
-    with pytest.raises(requests.exceptions.InvalidURL):
+    with pytest.raises(
+        HttpRequestError, match=r"HTTP request failed.*https://example\.test.*attempt 1/3"
+    ) as exc_info:
         client.get_json("https://example.test")
 
     assert session.calls == 1
     assert sleeps == []
+    assert exc_info.value.__cause__ is error
 
 
 def test_raises_after_final_server_error_attempt():

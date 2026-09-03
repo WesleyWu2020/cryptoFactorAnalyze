@@ -48,6 +48,11 @@ class JsonHttpClient:
                     ) from exc
                 self.sleep(self._backoff(attempt))
                 continue
+            except requests.RequestException as exc:
+                raise HttpRequestError(
+                    f"HTTP request failed for {url}; status unavailable; "
+                    f"attempt {attempt + 1}/{self.max_attempts}"
+                ) from exc
 
             status = response.status_code
             if 200 <= status < 300:
