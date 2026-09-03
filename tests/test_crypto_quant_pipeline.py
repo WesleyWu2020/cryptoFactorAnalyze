@@ -85,7 +85,7 @@ class FakeBinance:
 
 def _config(tmp_path):
     root = tmp_path / "data"
-    root.mkdir(exist_ok=True)
+    root.mkdir(parents=True, exist_ok=True)
     return PipelineConfig(
         repo_root=tmp_path,
         store_path=root / "crypto_quant.h5",
@@ -176,3 +176,65 @@ def test_validation_failure_never_publishes_staging(tmp_path):
     with pytest.raises(UniverseBuildError):
         CryptoQuantPipeline(_config(tmp_path), FakeCmc(), FakeBinance(only_49=True)).update(datetime(2024, 2, 25, tzinfo=timezone.utc), reset_staging=True)
     assert hashlib.sha256(active.read_bytes()).hexdigest() == before
+
+
+def test_empty_incremental_sources_do_not_advance_watermarks_or_checkpoints(tmp_path):
+    _run(tmp_path)
+    config = _config(tmp_path)
+    before = CryptoQuantStore(config.store_path).read_metadata()
+
+    class Empty(FakeBinance):
+        def fetch_klines(self, symbol, start, end):
+            self.kline_requests.append((symbol, start, end))
+            return pd.DataFrame()
+
+        def fetch_funding(self, symbol, start_ms, end_ms):
+            self.funding_requests.append((symbol, start_ms, end_ms))
+            return pd.DataFrame()
+
+    CryptoQuantPipeline(config, FakeCmc(), Empty()).update(datetime(2024, 2, 26, tzinfo=timezone.utc))
+    after = CryptoQuantStore(config.store_path).read_metadata()
+    assert after["last_successful_kline_date"] == before["last_successful_kline_date"]
+    assert after["last_successful_funding_time"] == before["last_successful_funding_time"]
+    assert after["checkpoint.klines.C00USDT"] == before["checkpoint.klines.C00USDT"]
+    assert "checkpoint.funding.C00USDT" not in after
+
+
+def test_pipeline_clips_adapter_rows_to_requested_ranges(tmp_path):
+    class Leaky(FakeBinance):
+        def fetch_klines(self, symbol, start, end):
+            out = super().fetch_klines(symbol, start, end)
+            extra = out.iloc[[0]].copy()
+            extra["date"] = pd.Timestamp(start) - pd.Timedelta(days=1)
+            return pd.concat([out, extra], ignore_index=True)
+
+        def fetch_funding(self, symbol, start_ms, end_ms):
+            return pd.DataFrame([
+                {"funding_time": pd.Timestamp(start_ms, unit="ms") - pd.Timedelta(milliseconds=1), "symbol": symbol, "funding_rate": 1.0, "mark_price": 1.0, "rate_type": "Regular"},
+                {"funding_time": pd.Timestamp(start_ms, unit="ms"), "symbol": symbol, "funding_rate": 1.0, "mark_price": 1.0, "rate_type": "Regular"},
+                {"funding_time": pd.Timestamp(end_ms, unit="ms") + pd.Timedelta(milliseconds=1), "symbol": symbol, "funding_rate": 1.0, "mark_price": 1.0, "rate_type": "Regular"},
+            ])
+
+    source = Leaky()
+    _run(tmp_path, binance=source)
+    store = CryptoQuantStore(_config(tmp_path).store_path)
+    klines = store.read("klines_daily")
+    assert all((klines.loc[klines.symbol == symbol, "date"] >= pd.Timestamp(start)).all() and (klines.loc[klines.symbol == symbol, "date"] <= pd.Timestamp(end)).all() for symbol, start, end in source.kline_requests)
+    funding = store.read("funding_events")
+    assert not funding.empty
+    assert funding["funding_time"].min() >= pd.Timestamp("2020-01-01", tz="UTC")
+
+
+def test_pipeline_cutoff_replay_matches_full_raw_and_derived_prefix(tmp_path):
+    full_dir, cutoff_dir = tmp_path / "full", tmp_path / "cutoff"
+    _run(full_dir)
+    cmc = FakeCmc()
+    cmc.max_return_date = date(2024, 2, 20)
+    _run(cutoff_dir, cmc=cmc)
+    full = CryptoQuantStore(_config(full_dir).store_path)
+    cut = CryptoQuantStore(_config(cutoff_dir).store_path)
+    for name, column, cutoff in (("cmc100_daily", "date", "2024-02-20"), ("klines_daily", "date", "2024-02-19"), ("universe_monthly", "decision_date", "2024-02-01"), ("research_panel_daily", "date", "2024-02-19")):
+        left = full.read(name); right = cut.read(name)
+        left = left[pd.to_datetime(left[column]) <= pd.Timestamp(cutoff)].reset_index(drop=True)
+        right = right[pd.to_datetime(right[column]) <= pd.Timestamp(cutoff)].reset_index(drop=True)
+        pd.testing.assert_frame_equal(left, right)
