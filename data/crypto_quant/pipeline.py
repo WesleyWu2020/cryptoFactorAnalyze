@@ -159,11 +159,11 @@ class CryptoQuantPipeline:
             members = self._clip_date_frame(members, "date", start, end)
             if not daily.empty:
                 store.upsert("cmc100_daily", daily)
-                prefix = self._longest_daily_prefix(store.read("cmc100_daily"), self.config.universe_start, end)
-                if prefix is not None:
-                    store.write_metadata({"checkpoint.cmc_through": prefix.isoformat()})
             if not members.empty:
                 store.upsert("cmc100_constituents", members)
+            prefix = self._cmc_common_prefix(store, end)
+            if prefix is not None:
+                store.write_metadata({"checkpoint.cmc_through": prefix.isoformat()})
 
         daily, members = self.cmc_source.fetch_history(start, end, on_page=on_page)
         daily = self._clip_date_frame(daily, "date", start, end)
@@ -172,7 +172,7 @@ class CryptoQuantPipeline:
             store.upsert("cmc100_daily", daily)
         if not members.empty:
             store.upsert("cmc100_constituents", members)
-        return self._longest_daily_prefix(store.read("cmc100_daily"), self.config.universe_start, end)
+        return self._cmc_common_prefix(store, end)
 
     def _map_contracts(self, store: CryptoQuantStore, exchange: pd.DataFrame) -> pd.DataFrame:
         constituents = store.read("cmc100_constituents")
@@ -209,6 +209,16 @@ class CryptoQuantPipeline:
         while current <= end and current in observed:
             current += timedelta(days=1)
         return current - timedelta(days=1) if current > start else None
+
+    def _cmc_common_prefix(self, store: CryptoQuantStore, end: date) -> date | None:
+        daily_prefix = self._longest_daily_prefix(store.read("cmc100_daily"), self.config.universe_start, end)
+        members = store.read("cmc100_constituents")
+        if members.empty or "date" not in members:
+            return None
+        member_prefix = self._longest_daily_prefix(members, self.config.universe_start, end)
+        if daily_prefix is None or member_prefix is None:
+            return None
+        return min(daily_prefix, member_prefix)
 
     @staticmethod
     def _funding_complete_end(end_ms: int) -> date:

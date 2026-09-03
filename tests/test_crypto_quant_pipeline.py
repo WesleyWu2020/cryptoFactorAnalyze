@@ -337,6 +337,25 @@ def test_cmc_internal_gap_only_advances_longest_contiguous_prefix(tmp_path):
     assert metadata["last_successful_cmc_date"] == "2024-01-09"
 
 
+@pytest.mark.parametrize("missing_table", ["daily", "members"])
+def test_cmc_asymmetric_table_gap_blocks_common_watermark_prefix(tmp_path, missing_table):
+    class AsymmetricGap(FakeCmc):
+        def fetch_history(self, start, end, on_page=None):
+            daily, members = super().fetch_history(start, end, on_page=None)
+            if missing_table == "daily":
+                daily = daily[daily.date != pd.Timestamp("2024-01-10")]
+            else:
+                members = members[members.date != pd.Timestamp("2024-01-10")]
+            if on_page:
+                on_page(daily, members, end)
+            return daily, members
+
+    _run(tmp_path, cmc=AsymmetricGap())
+    metadata = CryptoQuantStore(_config(tmp_path).store_path).read_metadata()
+    assert metadata["checkpoint.cmc_through"] == "2024-01-09"
+    assert metadata["last_successful_cmc_date"] == "2024-01-09"
+
+
 def test_funding_internal_natural_day_gap_blocks_completion(tmp_path):
     class GapFunding(FakeBinance):
         def fetch_funding(self, symbol, start_ms, end_ms):
