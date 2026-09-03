@@ -385,7 +385,9 @@ class CryptoQuantPipeline:
                 store.write_metadata({f"checkpoint.klines.{symbol}": {"requested_start": coverage_start.isoformat(), "requested_end": kline_end.isoformat(), "actual_start": actual_start.isoformat() if actual_start else None, "actual_end": actual_end.isoformat() if actual_end else None, "missing_date_count": kline_missing, "missing_dates": [value.isoformat() for value in kline_missing_dates], "complete": kline_complete}})
 
             full_funding = working_funding[working_funding["symbol"] == symbol]
-            if empty_funding_response and prior_metadata.get(f"checkpoint.funding.{symbol}", {}).get("complete") is not False:
+            prior_funding_checkpoint = prior_metadata.get(f"checkpoint.funding.{symbol}")
+            can_confirm_empty_funding = empty_funding_response and prior_funding_checkpoint is None and full_funding.empty
+            if can_confirm_empty_funding:
                 funding_missing = 0
                 funding_complete = True
             else:

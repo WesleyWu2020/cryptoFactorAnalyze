@@ -128,6 +128,27 @@ def test_complete_empty_funding_response_is_published_as_complete(tmp_path):
     assert panel["has_complete_funding"].all()
 
 
+def test_completed_funding_checkpoint_does_not_hide_empty_extension(tmp_path):
+    _run(tmp_path)
+    config = _config(tmp_path)
+    before = CryptoQuantStore(config.store_path).read_metadata()
+
+    class EmptyFunding(FakeBinance):
+        def fetch_funding(self, symbol, start_ms, end_ms):
+            return pd.DataFrame(columns=["funding_time", "symbol", "funding_rate", "mark_price", "rate_type"])
+
+    CryptoQuantPipeline(config, FakeCmc(), EmptyFunding()).update(
+        datetime(2024, 2, 26, 12, tzinfo=timezone.utc)
+    )
+    store = CryptoQuantStore(config.store_path)
+    metadata = store.read_metadata()
+    checkpoint = metadata["checkpoint.funding.C00USDT"]
+    assert checkpoint["complete"] is False
+    assert checkpoint["missing_date_count"] > 0
+    assert metadata["last_successful_funding_time"] == before["last_successful_funding_time"]
+    assert store.read("research_panel_daily")["has_complete_funding"].eq(False).all()
+
+
 def test_summary_does_not_report_kline_end_when_kline_coverage_is_incomplete(tmp_path):
     class PartialKline(FakeBinance):
         def fetch_klines(self, symbol, start, end):
