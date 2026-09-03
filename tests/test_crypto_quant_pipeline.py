@@ -126,6 +126,29 @@ def test_complete_empty_funding_response_is_published_as_complete(tmp_path):
     assert panel["has_complete_funding"].all()
 
 
+def test_summary_does_not_report_kline_end_when_kline_coverage_is_incomplete(tmp_path):
+    class PartialKline(FakeBinance):
+        def fetch_klines(self, symbol, start, end):
+            if symbol == SYMBOLS[0]:
+                self.kline_requests.append((symbol, start, end))
+                out = super().fetch_klines(symbol, start, end)
+                return out[out.date != pd.Timestamp("2024-02-24")]
+            return super().fetch_klines(symbol, start, end)
+
+    summary = _run(tmp_path, binance=PartialKline())
+    assert summary.last_complete_kline_date is None
+    assert summary.warnings
+    assert CryptoQuantStore(_config(tmp_path).store_path).read_metadata()["validation_warnings"]
+
+
+def test_pipeline_incremental_persistence_does_not_use_full_table_upsert(tmp_path, monkeypatch):
+    def fail_upsert(*args, **kwargs):
+        raise AssertionError("incremental pipeline must not upsert full tables per symbol")
+
+    monkeypatch.setattr(CryptoQuantStore, "upsert", fail_upsert)
+    _run(tmp_path)
+
+
 def test_mapping_issues_are_retained_in_metadata(tmp_path):
     _run(tmp_path)
     metadata = CryptoQuantStore(_config(tmp_path).store_path).read_metadata()

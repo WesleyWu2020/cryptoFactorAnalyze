@@ -109,6 +109,16 @@ def test_panel_distinguishes_complete_empty_funding_from_incomplete_coverage():
     assert incomplete_day["has_complete_funding"].eq(False).all()
 
 
+def test_aggregate_funding_daily_normalizes_string_rates():
+    events = pd.DataFrame([{
+        "funding_time": pd.Timestamp("2024-01-02 08:00", tz="UTC"),
+        "symbol": "BTCUSDT", "funding_rate": "0.001", "mark_price": "100", "rate_type": "Regular",
+    }])
+    daily = aggregate_funding_daily(events)
+    assert daily.loc[0, "funding_rate_mean"] == 0.001
+    assert daily["funding_rate_mean"].dtype.kind == "f"
+
+
 def test_panel_starts_on_first_effective_date_and_complete_date_requires_all_klines():
     universe, klines, funding, _ = _panel_inputs()
     universe["decision_date"] = pd.Timestamp("2024-01-01")

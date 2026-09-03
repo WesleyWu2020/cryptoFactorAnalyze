@@ -43,6 +43,7 @@ def aggregate_funding_daily(events: pd.DataFrame) -> pd.DataFrame:
     if event_symbol != "symbol":
         data = data.rename(columns={event_symbol: "symbol"})
     data["funding_time"] = _utc_naive(data["funding_time"])
+    data["funding_rate"] = pd.to_numeric(data["funding_rate"], errors="raise").astype("float64")
     data = data.dropna(subset=["funding_time", "symbol"])
     data["date"] = data["funding_time"].dt.normalize()
     data = data.sort_values(["date", "symbol", "funding_time"], kind="stable")

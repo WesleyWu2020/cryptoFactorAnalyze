@@ -116,6 +116,13 @@ class CryptoQuantStore:
         with self._write_lock():
             self._upsert_unlocked(name, frame)
 
+    def append(self, name: str, frame: pd.DataFrame) -> None:
+        """Append already fetched rows without reading/rebuilding the full table."""
+        if frame.empty:
+            return
+        with self._write_lock():
+            self._write(name, frame, append=True)
+
     def read_metadata(self) -> dict[str, object]:
         frame = self.read("_metadata")
         return {row.key: json.loads(row.value) for row in frame.itertuples()}

@@ -121,7 +121,10 @@ class CryptoQuantPipeline:
             counts = {name: len(store.read(name)) for name in TABLE_SPECS}
             panel = store.read("research_panel_daily")
             complete = last_complete_panel_date(panel)
-            return RunSummary(mode, run_at, self.config.store_path, kline_end, complete.date() if complete is not None else None, counts, tuple())
+            warnings = tuple(f"{issue.code}: {issue.detail}" for issue in report.issues if issue.level == "warning")
+            store.write_metadata({"validation_warnings": list(warnings)})
+            last_kline = _day(metadata.get("last_successful_kline_date"))
+            return RunSummary(mode, run_at, self.config.store_path, last_kline, complete.date() if complete is not None else None, counts, warnings)
 
     @staticmethod
     def _empty_frame(name: str) -> pd.DataFrame:
@@ -324,6 +327,22 @@ class CryptoQuantPipeline:
         constituents = store.read("cmc100_constituents")
         old_klines = store.read("klines_daily")
         old_funding = store.read("funding_events")
+        working_klines = old_klines.copy()
+        working_funding = old_funding.copy()
+        kline_dirty = funding_dirty = False
+
+        def merge_working(current: pd.DataFrame, incoming: pd.DataFrame, name: str) -> pd.DataFrame:
+            combined = pd.concat([current, incoming], ignore_index=True)
+            combined = combined.drop_duplicates(TABLE_SPECS[name].key, keep="last").reset_index(drop=True)
+            numeric_columns = {
+                "klines_daily": ("open", "high", "low", "close", "volume", "quote_volume", "trade_count", "taker_buy_base_volume", "taker_buy_quote_volume"),
+                "funding_events": ("funding_rate", "mark_price"),
+            }.get(name, ())
+            for column in numeric_columns:
+                if column in combined:
+                    combined[column] = pd.to_numeric(combined[column], errors="raise")
+            return combined
+
         kline_batch_symbols: set[str] = set()
         funding_batch_symbols: set[str] = set()
         all_kline_complete = bool(len(mappings))
@@ -331,8 +350,7 @@ class CryptoQuantPipeline:
         prior_metadata = store.read_metadata()
 
         def record_coverage(symbol: str, coverage_start: date, kline_received: bool, funding_received: bool, empty_funding_response: bool) -> tuple[bool, bool]:
-            full_klines = store.read("klines_daily")
-            full_klines = full_klines[full_klines["symbol"] == symbol]
+            full_klines = working_klines[working_klines["symbol"] == symbol]
             expected_klines = set(pd.date_range(coverage_start, kline_end, freq="D").date)
             observed_klines = set(pd.to_datetime(full_klines["date"], errors="coerce").dt.date.dropna())
             kline_missing = len(expected_klines - observed_klines)
@@ -342,8 +360,7 @@ class CryptoQuantPipeline:
             if kline_received:
                 store.write_metadata({f"checkpoint.klines.{symbol}": {"requested_start": coverage_start.isoformat(), "requested_end": kline_end.isoformat(), "actual_start": actual_start.isoformat() if actual_start else None, "actual_end": actual_end.isoformat() if actual_end else None, "missing_date_count": kline_missing, "complete": kline_complete}})
 
-            full_funding = store.read("funding_events")
-            full_funding = full_funding[full_funding["symbol"] == symbol]
+            full_funding = working_funding[working_funding["symbol"] == symbol]
             if empty_funding_response and prior_metadata.get(f"checkpoint.funding.{symbol}", {}).get("complete") is not False:
                 funding_missing = 0
                 funding_complete = True
@@ -374,7 +391,9 @@ class CryptoQuantPipeline:
             klines = self.binance_source.fetch_klines(symbol, kline_start, kline_end)
             klines = self._clip_date_frame(klines, "date", kline_start, kline_end)
             if not klines.empty:
-                store.upsert("klines_daily", klines)
+                store.append("klines_daily", klines)
+                working_klines = merge_working(working_klines, klines, "klines_daily")
+                kline_dirty = True
                 kline_batch_symbols.add(symbol)
                 kline_status, _ = record_coverage(symbol, support_start, True, False, False)
                 all_kline_complete &= kline_status
@@ -390,7 +409,9 @@ class CryptoQuantPipeline:
             funding = self._clip_funding(funding, funding_start, funding_end_ms)
             empty_funding_response = False
             if not funding.empty:
-                store.upsert("funding_events", funding)
+                store.append("funding_events", funding)
+                working_funding = merge_working(working_funding, funding, "funding_events")
+                funding_dirty = True
                 funding_batch_symbols.add(symbol)
             elif {"funding_time", "symbol", "funding_rate", "mark_price", "rate_type"}.issubset(funding.columns):
                 funding_batch_symbols.add(symbol)
@@ -401,6 +422,10 @@ class CryptoQuantPipeline:
                 kline_status, funding_status = record_coverage(symbol, support_start, symbol in kline_batch_symbols, symbol in funding_batch_symbols, empty_funding_response)
                 all_kline_complete &= kline_status
                 all_funding_complete &= funding_status
+        if kline_dirty:
+            store.replace("klines_daily", working_klines)
+        if funding_dirty:
+            store.replace("funding_events", working_funding)
         return all_kline_complete, all_funding_complete
 
     @staticmethod
