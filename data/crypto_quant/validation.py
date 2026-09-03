@@ -114,6 +114,22 @@ def _validate_universe(frames: Mapping[str, pd.DataFrame], metadata: Mapping[str
             if early.any():
                 row = universe.loc[early].iloc[0]
                 _issue(issues, "early_effective_date", f"decision_date={row['decision_date']!s}, effective_date={row['effective_date']!s}, symbol={row[symbols]!s}")
+        if {"effective_date", "effective_end_date"}.issubset(universe.columns):
+            starts = pd.to_datetime(universe["effective_date"], errors="coerce").dt.normalize()
+            ends = pd.to_datetime(universe["effective_end_date"], errors="coerce").dt.normalize()
+            invalid = starts.notna() & ends.notna() & (ends < starts)
+            if invalid.any():
+                row = universe.loc[invalid].iloc[0]
+                _issue(issues, "invalid_effective_interval", f"effective_date={row['effective_date']!s}, effective_end_date={row['effective_end_date']!s}, symbol={row[symbols]!s}")
+            intervals = universe.assign(_start=starts, _end=ends).sort_values([symbols, "_start"], kind="stable")
+            for symbol, group in intervals.groupby(symbols, sort=False):
+                previous_end = pd.NaT
+                for _, row in group.iterrows():
+                    if pd.notna(previous_end) and pd.notna(row["_start"]) and row["_start"] <= previous_end:
+                        _issue(issues, "overlapping_universe", f"symbol={symbol!s}, effective_date={row['effective_date']!s}")
+                        break
+                    if pd.notna(row["_end"]):
+                        previous_end = row["_end"] if pd.isna(previous_end) else max(previous_end, row["_end"])
 
         constituents = frames.get("cmc100_constituents", pd.DataFrame())
         if not constituents.empty and {"date", "cmc_id"}.issubset(constituents.columns) and "cmc_id" in universe:
@@ -136,7 +152,13 @@ def _validate_universe(frames: Mapping[str, pd.DataFrame], metadata: Mapping[str
 def _validate_funding(funding: pd.DataFrame, issues: list[ValidationIssue]) -> None:
     if funding.empty or "funding_time" not in funding:
         return
-    times = pd.to_datetime(funding["funding_time"], errors="coerce", utc=True)
+    times = pd.to_datetime(funding["funding_time"], errors="coerce", utc=True, format="mixed")
+    invalid = times.isna()
+    if invalid.any():
+        _issue(issues, "invalid_funding_timestamp", f"index={funding.index[invalid].tolist()[0]!s}, value={funding.loc[invalid].iloc[0]['funding_time']!s}")
+        times = times[~invalid]
+    if times.empty:
+        return
     symbol_column = _symbol_column(funding)
     groups = funding.assign(_funding_time=times).groupby(symbol_column, sort=False) if symbol_column else [(None, funding.assign(_funding_time=times))]
     for symbol, group in groups:
@@ -146,7 +168,7 @@ def _validate_funding(funding: pd.DataFrame, issues: list[ValidationIssue]) -> N
             break
 
 
-def _validate_panel(panel: pd.DataFrame, issues: list[ValidationIssue]) -> None:
+def _validate_panel(panel: pd.DataFrame, universe: pd.DataFrame, issues: list[ValidationIssue]) -> None:
     if panel.empty:
         return
     if {"date", "binance_symbol"}.issubset(panel.columns):
@@ -154,6 +176,17 @@ def _validate_panel(panel: pd.DataFrame, issues: list[ValidationIssue]) -> None:
             count = group["binance_symbol"].nunique()
             if count != 50:
                 _issue(issues, "panel_universe_size", f"date={timestamp!s}, memberships={count}")
+        if not universe.empty and {"effective_date", "effective_end_date"}.issubset(universe.columns):
+            panel_dates = pd.to_datetime(panel["date"], errors="coerce").dt.normalize()
+            universe_starts = pd.to_datetime(universe["effective_date"], errors="coerce").dt.normalize()
+            universe_ends = pd.to_datetime(universe["effective_end_date"], errors="coerce").dt.normalize()
+            universe_symbol = _symbol_column(universe)
+            if universe_symbol:
+                for index, row in panel.iterrows():
+                    active = (universe[universe_symbol] == row["binance_symbol"]) & (universe_starts <= panel_dates.loc[index]) & (universe_ends.isna() | (universe_ends >= panel_dates.loc[index]))
+                    if not active.any():
+                        _issue(issues, "panel_outside_universe", f"date={row['date']!s}, symbol={row['binance_symbol']!s}")
+                        break
     for column, code in (("has_complete_kline", "incomplete_kline"), ("has_complete_funding", "incomplete_funding")):
         if column in panel and (~panel[column].fillna(False).astype(bool)).any():
             first = pd.to_datetime(panel.loc[~panel[column].fillna(False).astype(bool), "date"]).min()
@@ -167,15 +200,30 @@ def validate_frames(frames: Mapping[str, pd.DataFrame], metadata: Mapping[str, o
     _validate_klines(frames.get("klines_daily", pd.DataFrame()), issues)
     _validate_universe(frames, metadata, issues)
     _validate_funding(frames.get("funding_events", pd.DataFrame()), issues)
-    _validate_panel(frames.get("research_panel_daily", pd.DataFrame()), issues)
+    _validate_panel(
+        frames.get("research_panel_daily", pd.DataFrame()),
+        frames.get("universe_monthly", pd.DataFrame()),
+        issues,
+    )
     return ValidationReport(tuple(issues))
 
 
 def validate_store(path: Path) -> ValidationReport:
     """Read a HDF5 store and validate all available tables and metadata."""
-    store = CryptoQuantStore(Path(path))
+    path = Path(path)
+    if not path.exists():
+        return ValidationReport((ValidationIssue("error", "missing_store", f"store path does not exist: {path}"),))
+    store = CryptoQuantStore(path)
+    keys = store.keys()
+    issues: list[ValidationIssue] = []
+    if not keys:
+        issues.append(ValidationIssue("error", "empty_store", f"store has no tables: {path}"))
     frames = {name: store.read(name) for name in TABLE_SPECS}
-    return validate_frames(frames, store.read_metadata())
+    for name in TABLE_SPECS:
+        if name not in keys:
+            issues.append(ValidationIssue("error", "missing_table", name))
+    report = validate_frames(frames, store.read_metadata())
+    return ValidationReport(tuple(issues) + tuple(report.issues))
 
 
 __all__ = ["StoreValidationError", "ValidationIssue", "ValidationReport", "validate_frames", "validate_store"]

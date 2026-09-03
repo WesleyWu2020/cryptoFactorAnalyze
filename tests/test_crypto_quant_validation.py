@@ -1,5 +1,6 @@
 from datetime import date
 
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -7,6 +8,7 @@ from data.crypto_quant.validation import (
     StoreValidationError,
     ValidationIssue,
     validate_frames,
+    validate_store,
 )
 from data.crypto_quant.panel import build_research_panel
 from data.crypto_quant.universe import build_monthly_universe
@@ -160,6 +162,54 @@ def test_full_vs_cutoff_derived_builders_have_no_future_leak(capsys):
     full_p = full_panel[full_panel["date"] <= cutoff].reset_index(drop=True)
     pd.testing.assert_frame_equal(full_u, cut_universe.reset_index(drop=True), check_exact=False, atol=1e-12, rtol=0)
     pd.testing.assert_frame_equal(full_p, cut_panel.reset_index(drop=True), check_exact=False, atol=1e-12, rtol=0)
-    max_abs_diff = 0.0
+    numeric_full = full_p.select_dtypes(include="number").to_numpy(dtype=float)
+    numeric_cut = cut_panel.select_dtypes(include="number").to_numpy(dtype=float)
+    numeric_delta = np.nan_to_num(numeric_full, nan=0.0) - np.nan_to_num(numeric_cut, nan=0.0)
+    max_abs_diff = float(np.abs(numeric_delta).max(initial=0.0))
     print(f"max_abs_diff={max_abs_diff}")
-    assert "max_abs_diff=0.0" in capsys.readouterr().out
+    assert max_abs_diff <= 1e-12
+    assert f"max_abs_diff={max_abs_diff}" in capsys.readouterr().out
+
+
+def test_validate_store_rejects_missing_and_empty_stores(tmp_path):
+    missing = validate_store(tmp_path / "missing.h5")
+    assert not missing.ok
+    assert "missing_store" in _issue_codes(missing)
+
+    empty_path = tmp_path / "empty.h5"
+    empty_path.touch()
+    empty = validate_store(empty_path)
+    assert not empty.ok
+    assert {"empty_store", "missing_table"}.issubset(_issue_codes(empty))
+
+
+def test_panel_members_must_be_active_in_universe_interval():
+    frames = _valid_store_frames()
+    frames["universe_monthly"]["effective_end_date"] = pd.Timestamp("2024-01-02")
+    frames["research_panel_daily"].loc[:, "date"] = pd.Timestamp("2024-01-03")
+    report = validate_frames(frames, {})
+    assert "panel_outside_universe" in _issue_codes(report)
+
+
+def test_universe_intervals_must_be_ordered_and_non_overlapping():
+    frames = _valid_store_frames()
+    universe = frames["universe_monthly"]
+    universe.loc[0, "effective_end_date"] = pd.Timestamp("2024-01-01")
+    universe.loc[1, "effective_date"] = pd.Timestamp("2024-01-02")
+    universe.loc[1, "effective_end_date"] = pd.Timestamp("2024-01-03")
+    universe.loc[2, "effective_end_date"] = pd.Timestamp("2024-01-03")
+    universe.loc[3, "effective_date"] = pd.Timestamp("2024-01-02")
+    universe.loc[3, "effective_end_date"] = pd.Timestamp("2024-01-04")
+    universe.loc[3, "binance_symbol"] = universe.loc[1, "binance_symbol"]
+    report = validate_frames(frames, {})
+    assert "invalid_effective_interval" in _issue_codes(report)
+    assert "overlapping_universe" in _issue_codes(report)
+
+
+def test_invalid_funding_timestamps_are_errors():
+    frames = _valid_store_frames()
+    funding = frames["funding_events"].astype({"funding_time": object})
+    funding.loc[0, "funding_time"] = "not-a-timestamp"
+    frames["funding_events"] = funding
+    report = validate_frames(frames, {})
+    assert "invalid_funding_timestamp" in _issue_codes(report)
