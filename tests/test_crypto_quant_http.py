@@ -29,6 +29,11 @@ class FakeSession:
         return response
 
 
+class FalseyFakeSession(FakeSession):
+    def __bool__(self):
+        return False
+
+
 def test_retries_429_using_retry_after():
     session = FakeSession([
         FakeResponse(429, {}, headers={"Retry-After": "2"}),
@@ -77,6 +82,20 @@ def test_retries_connection_error_with_exponential_backoff():
     assert sleeps == [1.25]
 
 
+def test_retries_timeout_then_succeeds():
+    session = FakeSession([
+        requests.exceptions.Timeout("timed out"),
+        FakeResponse(200, {"ok": True}),
+    ])
+    sleeps = []
+    client = JsonHttpClient(
+        session, max_attempts=2, sleep=sleeps.append, random_fn=lambda: 0
+    )
+
+    assert client.get_json("https://example.test") == {"ok": True}
+    assert sleeps == [1.0]
+
+
 def test_honors_zero_retry_after():
     session = FakeSession([
         FakeResponse(429, {}, headers={"Retry-After": "0"}),
@@ -105,6 +124,15 @@ def test_does_not_retry_invalid_url():
     assert session.calls == 1
     assert sleeps == []
     assert exc_info.value.__cause__ is error
+
+
+def test_uses_falsey_injected_session():
+    session = FalseyFakeSession([FakeResponse(200, {"ok": True})])
+
+    assert JsonHttpClient(session, max_attempts=1).get_json("https://example.test") == {
+        "ok": True
+    }
+    assert session.calls == 1
 
 
 def test_raises_after_final_server_error_attempt():

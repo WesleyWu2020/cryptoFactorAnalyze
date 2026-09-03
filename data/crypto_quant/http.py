@@ -26,7 +26,7 @@ class JsonHttpClient:
     ) -> None:
         if max_attempts < 1:
             raise ValueError("max_attempts must be positive")
-        self.session = session or requests.Session()
+        self.session = session if session is not None else requests.Session()
         self.timeout = timeout
         self.max_attempts = max_attempts
         self.base_backoff = base_backoff
@@ -37,10 +37,13 @@ class JsonHttpClient:
     def get_json(
         self, url: str, params: Mapping[str, object] | None = None
     ) -> object:
+        request_params = dict(params) if params is not None else None
         for attempt in range(self.max_attempts):
             try:
-                response = self.session.get(url, params=params, timeout=self.timeout)
-            except requests.ConnectionError as exc:
+                response = self.session.get(
+                    url, params=request_params, timeout=self.timeout
+                )
+            except (requests.ConnectionError, requests.Timeout) as exc:
                 if attempt == self.max_attempts - 1:
                     raise HttpRequestError(
                         f"HTTP request failed for {url}; status unavailable; "
