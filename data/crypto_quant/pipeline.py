@@ -211,14 +211,27 @@ class CryptoQuantPipeline:
         return current - timedelta(days=1) if current > start else None
 
     def _cmc_common_prefix(self, store: CryptoQuantStore, end: date) -> date | None:
-        daily_prefix = self._longest_daily_prefix(store.read("cmc100_daily"), self.config.universe_start, end)
+        daily = store.read("cmc100_daily")
         members = store.read("cmc100_constituents")
-        if members.empty or "date" not in members:
+        if daily.empty or members.empty or "date" not in daily or "date" not in members:
             return None
-        member_prefix = self._longest_daily_prefix(members, self.config.universe_start, end)
-        if daily_prefix is None or member_prefix is None:
+        daily_dates = set(pd.to_datetime(daily["date"], errors="coerce", utc=True).dt.date.dropna())
+        member_dates = pd.to_datetime(members["date"], errors="coerce", utc=True).dt.date
+        required = {"date", "cmc_id", "symbol", "name", "weight"}
+        if not required.issubset(members.columns):
             return None
-        return min(daily_prefix, member_prefix)
+        current = self.config.universe_start
+        while current <= end:
+            if current not in daily_dates:
+                break
+            snapshot = members.loc[member_dates == current]
+            valid = not snapshot.empty and len(snapshot) >= 100
+            valid &= not snapshot.duplicated(["date", "cmc_id"]).any()
+            valid &= not snapshot[list(required)].isna().any().any()
+            if not valid:
+                break
+            current += timedelta(days=1)
+        return current - timedelta(days=1) if current > self.config.universe_start else None
 
     @staticmethod
     def _funding_complete_end(end_ms: int) -> date:

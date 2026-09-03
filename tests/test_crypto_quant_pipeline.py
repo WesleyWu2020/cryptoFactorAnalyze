@@ -20,10 +20,10 @@ def _cmc_frame(start=date(2024, 1, 1), end=date(2024, 2, 25), extra=False):
     daily = pd.DataFrame({"date": days, "index_value": 100.0, "source_update_time": days, "fetched_at_utc": pd.Timestamp("2024-02-25", tz="UTC")})
     rows = []
     for day in days:
-        for i in range(50):
+        for i in range(100):
             rows.append({"date": day, "cmc_id": i + 1, "symbol": f"C{i:02d}", "name": f"Coin {i:02d}", "weight": 50 - i})
     if extra:
-        rows.append({"date": pd.Timestamp("2024-07-01"), "cmc_id": 51, "symbol": "NEW", "name": "New", "weight": 1})
+        rows.append({"date": pd.Timestamp("2024-07-01"), "cmc_id": 101, "symbol": "NEW", "name": "New", "weight": 1})
     return daily, pd.DataFrame(rows)
 
 
@@ -74,6 +74,8 @@ class FakeBinance:
         self.kline_requests.append((symbol, start, end))
         if symbol == self.fail_symbol:
             raise RuntimeError("selected symbol failure")
+        if symbol not in SYMBOLS and symbol != "NEWUSDT":
+            return pd.DataFrame()
         if self.only_49 and symbol == SYMBOLS[-1]:
             return pd.DataFrame()
         return _klines([symbol], start, end)
@@ -131,7 +133,7 @@ def test_update_refetches_ten_cmc_days_and_seven_binance_days(tmp_path):
     pipeline = CryptoQuantPipeline(_config(tmp_path), cmc, binance)
     pipeline.update(datetime(2024, 2, 25, 0, 20, tzinfo=timezone.utc))
     assert cmc.ranges[-1][0] == date(2024, 2, 11)
-    assert min(start for _, start, _ in binance.kline_requests) == date(2024, 2, 14)
+    assert min(start for _, start, end in binance.kline_requests if start < end) == date(2024, 2, 14)
 
 
 def test_new_candidate_receives_180_day_support_backfill(tmp_path):
@@ -204,6 +206,8 @@ def test_pipeline_clips_adapter_rows_to_requested_ranges(tmp_path):
     class Leaky(FakeBinance):
         def fetch_klines(self, symbol, start, end):
             out = super().fetch_klines(symbol, start, end)
+            if out.empty:
+                return out
             extra = out.iloc[[0]].copy()
             extra["date"] = pd.Timestamp(start) - pd.Timedelta(days=1)
             return pd.concat([out, extra], ignore_index=True)
@@ -235,6 +239,8 @@ def test_pipeline_cutoff_replay_matches_full_raw_and_derived_prefix(tmp_path):
         def fetch_klines(self, symbol, start, end):
             out = super().fetch_klines(symbol, start, end)
             if self.max_date is not None:
+                if out.empty:
+                    return out
                 out = out[pd.to_datetime(out.date).dt.date <= self.max_date]
             return out
 
@@ -351,6 +357,21 @@ def test_cmc_asymmetric_table_gap_blocks_common_watermark_prefix(tmp_path, missi
             return daily, members
 
     _run(tmp_path, cmc=AsymmetricGap())
+    metadata = CryptoQuantStore(_config(tmp_path).store_path).read_metadata()
+    assert metadata["checkpoint.cmc_through"] == "2024-01-09"
+    assert metadata["last_successful_cmc_date"] == "2024-01-09"
+
+
+def test_cmc_partial_snapshot_truncates_common_watermark_prefix(tmp_path):
+    class PartialSnapshot(FakeCmc):
+        def fetch_history(self, start, end, on_page=None):
+            daily, members = super().fetch_history(start, end, on_page=None)
+            members = members[~((members.date == pd.Timestamp("2024-01-10")) & (members.cmc_id == 100))]
+            if on_page:
+                on_page(daily, members, end)
+            return daily, members
+
+    _run(tmp_path, cmc=PartialSnapshot())
     metadata = CryptoQuantStore(_config(tmp_path).store_path).read_metadata()
     assert metadata["checkpoint.cmc_through"] == "2024-01-09"
     assert metadata["last_successful_cmc_date"] == "2024-01-09"
