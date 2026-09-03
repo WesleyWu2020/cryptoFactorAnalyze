@@ -241,7 +241,7 @@ def test_pipeline_cutoff_replay_matches_full_raw_and_derived_prefix(tmp_path):
         def fetch_funding(self, symbol, start_ms, end_ms):
             start = pd.Timestamp(start_ms, unit="ms", tz="UTC")
             end = pd.Timestamp(end_ms, unit="ms", tz="UTC")
-            dates = [pd.Timestamp("2024-02-19", tz="UTC") + pd.Timedelta(hours=8), pd.Timestamp("2024-02-24", tz="UTC") + pd.Timedelta(hours=8)]
+            dates = [value + pd.Timedelta(hours=8) for value in pd.date_range(start.normalize(), end.normalize(), freq="D", tz="UTC")]
             if self.max_date is not None:
                 dates = [value for value in dates if value.date() <= self.max_date]
             return pd.DataFrame([{"funding_time": value, "symbol": symbol, "funding_rate": 0.0, "mark_price": 1.0, "rate_type": "Regular"} for value in dates if start <= value <= end])
@@ -257,13 +257,13 @@ def test_pipeline_cutoff_replay_matches_full_raw_and_derived_prefix(tmp_path):
     assert full.read("funding_events")["funding_time"].max() > pd.Timestamp("2024-02-20", tz="UTC")
     assert cut.read("cmc100_constituents")["date"].max() <= pd.Timestamp("2024-02-20")
     assert cut.read("klines_daily")["date"].max() <= pd.Timestamp("2024-02-20")
-    assert cut.read("funding_events")["funding_time"].max() <= pd.Timestamp("2024-02-20", tz="UTC")
+    assert cut.read("funding_events")["funding_time"].max() <= pd.Timestamp("2024-02-20 23:59:59", tz="UTC")
     prefixes = {
         "cmc100_daily": ("date", pd.Timestamp("2024-02-20")),
         "cmc100_constituents": ("date", pd.Timestamp("2024-02-20")),
         "futures_contracts": ("valid_from", pd.Timestamp("2024-02-20")),
         "klines_daily": ("date", pd.Timestamp("2024-02-19")),
-        "funding_events": ("funding_time", pd.Timestamp("2024-02-20", tz="UTC")),
+        "funding_events": ("funding_time", pd.Timestamp("2024-02-20 23:59:59", tz="UTC")),
         "universe_monthly": ("effective_date", pd.Timestamp("2024-02-20")),
         "research_panel_daily": ("date", pd.Timestamp("2024-02-19")),
     }
@@ -313,11 +313,41 @@ def test_funding_watermark_uses_completed_natural_day_not_exact_event_end(tmp_pa
         def fetch_funding(self, symbol, start_ms, end_ms):
             start = pd.Timestamp(start_ms, unit="ms", tz="UTC")
             end_day = pd.Timestamp(end_ms, unit="ms", tz="UTC").normalize()
-            return pd.DataFrame([
-                {"funding_time": start, "symbol": symbol, "funding_rate": 0.0, "mark_price": 1.0, "rate_type": "Regular"},
-                {"funding_time": end_day + pd.Timedelta(hours=8), "symbol": symbol, "funding_rate": 0.0, "mark_price": 1.0, "rate_type": "Regular"},
-            ])
+            dates = [value + pd.Timedelta(hours=8) for value in pd.date_range(start.normalize(), end_day, freq="D")]
+            return pd.DataFrame([{"funding_time": value, "symbol": symbol, "funding_rate": 0.0, "mark_price": 1.0, "rate_type": "Regular"} for value in dates])
 
     _run(tmp_path, binance=DailyFunding())
     metadata = CryptoQuantStore(_config(tmp_path).store_path).read_metadata()
     assert metadata["last_successful_funding_time"] == int(datetime(2024, 2, 25, 12, tzinfo=timezone.utc).timestamp() * 1000)
+
+
+def test_cmc_internal_gap_only_advances_longest_contiguous_prefix(tmp_path):
+    class GapCmc(FakeCmc):
+        def fetch_history(self, start, end, on_page=None):
+            daily, members = super().fetch_history(start, end, on_page=None)
+            daily = daily[daily.date != pd.Timestamp("2024-01-10")]
+            members = members[members.date != pd.Timestamp("2024-01-10")]
+            if on_page:
+                on_page(daily, members, end)
+            return daily, members
+
+    _run(tmp_path, cmc=GapCmc())
+    metadata = CryptoQuantStore(_config(tmp_path).store_path).read_metadata()
+    assert metadata["checkpoint.cmc_through"] == "2024-01-09"
+    assert metadata["last_successful_cmc_date"] == "2024-01-09"
+
+
+def test_funding_internal_natural_day_gap_blocks_completion(tmp_path):
+    class GapFunding(FakeBinance):
+        def fetch_funding(self, symbol, start_ms, end_ms):
+            start = pd.Timestamp(start_ms, unit="ms", tz="UTC")
+            end = pd.Timestamp(end_ms, unit="ms", tz="UTC")
+            dates = [value + pd.Timedelta(hours=8) for value in pd.date_range(start.normalize(), end.normalize(), freq="D") if value.date() != date(2024, 1, 10)]
+            return pd.DataFrame([{"funding_time": value, "symbol": symbol, "funding_rate": 0.0, "mark_price": 1.0, "rate_type": "Regular"} for value in dates])
+
+    _run(tmp_path, binance=GapFunding())
+    metadata = CryptoQuantStore(_config(tmp_path).store_path).read_metadata()
+    checkpoint = metadata["checkpoint.funding.C00USDT"]
+    assert checkpoint["complete"] is False
+    assert checkpoint["missing_date_count"] > 0
+    assert metadata["last_successful_funding_time"] is None

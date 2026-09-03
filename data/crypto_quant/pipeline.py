@@ -159,7 +159,9 @@ class CryptoQuantPipeline:
             members = self._clip_date_frame(members, "date", start, end)
             if not daily.empty:
                 store.upsert("cmc100_daily", daily)
-                store.write_metadata({"checkpoint.cmc_through": _day(daily["date"].max()).isoformat()})
+                prefix = self._longest_daily_prefix(store.read("cmc100_daily"), start, end)
+                if prefix is not None:
+                    store.write_metadata({"checkpoint.cmc_through": prefix.isoformat()})
             if not members.empty:
                 store.upsert("cmc100_constituents", members)
 
@@ -170,7 +172,7 @@ class CryptoQuantPipeline:
             store.upsert("cmc100_daily", daily)
         if not members.empty:
             store.upsert("cmc100_constituents", members)
-        return _day(daily["date"].max()) if not daily.empty else None
+        return self._longest_daily_prefix(store.read("cmc100_daily"), start, end)
 
     def _map_contracts(self, store: CryptoQuantStore, exchange: pd.DataFrame) -> pd.DataFrame:
         constituents = store.read("cmc100_constituents")
@@ -197,6 +199,16 @@ class CryptoQuantPipeline:
         start = pd.to_datetime(start_ms, unit="ms", utc=True)
         end = pd.to_datetime(end_ms, unit="ms", utc=True)
         return frame.loc[values.between(start, end)].copy()
+
+    @staticmethod
+    def _longest_daily_prefix(frame: pd.DataFrame, start: date, end: date) -> date | None:
+        if frame.empty or "date" not in frame:
+            return None
+        observed = set(pd.to_datetime(frame["date"], errors="coerce", utc=True).dt.date.dropna())
+        current = start
+        while current <= end and current in observed:
+            current += timedelta(days=1)
+        return current - timedelta(days=1) if current > start else None
 
     def _fetch_binance(self, store: CryptoQuantStore, mode: str, cmc_end: date, kline_end: date, funding_end_ms: int) -> tuple[bool, bool]:
         mappings = store.read("futures_contracts")
@@ -247,11 +259,14 @@ class CryptoQuantPipeline:
                 actual_end = int(pd.Timestamp(funding["funding_time"].max()).timestamp() * 1000)
                 requested_start_day = pd.Timestamp(funding_start, unit="ms", tz="UTC").date()
                 requested_end_day = pd.Timestamp(funding_end_ms, unit="ms", tz="UTC").date()
-                actual_start_day = pd.to_datetime(funding["funding_time"], utc=True).min().date()
-                actual_end_day = pd.to_datetime(funding["funding_time"], utc=True).max().date()
-                complete = actual_start_day <= requested_start_day and actual_end_day >= requested_end_day
+                expected_days = set(pd.date_range(requested_start_day, requested_end_day, freq="D").date)
+                observed_days = set(pd.to_datetime(funding["funding_time"], utc=True).dt.date)
+                missing_count = len(expected_days - observed_days)
+                actual_start_day = min(observed_days)
+                actual_end_day = max(observed_days)
+                complete = actual_start_day <= requested_start_day and actual_end_day >= requested_end_day and missing_count == 0
                 all_funding_complete &= complete
-                store.write_metadata({f"checkpoint.funding.{symbol}": {"requested_start_ms": funding_start, "requested_end_ms": funding_end_ms, "actual_start_ms": actual_start, "actual_end_ms": actual_end, "complete": complete}})
+                store.write_metadata({f"checkpoint.funding.{symbol}": {"requested_start_ms": funding_start, "requested_end_ms": funding_end_ms, "actual_start_ms": actual_start, "actual_end_ms": actual_end, "missing_date_count": missing_count, "complete": complete}})
             else:
                 all_funding_complete = False
         if kline_batches:
