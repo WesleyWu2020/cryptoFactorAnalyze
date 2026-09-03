@@ -1,0 +1,79 @@
+# Python相关
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+*.egg-info/
+.installed.cfg
+*.egg
+.pytest_cache/
+.coverage
+htmlcov/
+
+# 虚拟环境
+venv/
+ENV/
+env/
+.env
+.venv
+
+# IDE相关
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+.ipynb_checkpoints
+
+# 项目特定文件
+# 可能包含敏感信息的配置文件
+config.ini
+secrets.py
+api_keys.py
+credentials.json
+
+# 大型数据文件和临时文件
+*.csv
+*.xlsx
+*.parquet
+*.h5
+*.pkl
+*.db
+*.sqlite
+temp/
+tmp/
+
+# 日志文件
+logs/
+*.log
+
+# 排除特定的数据文件夹，但保留示例或必要的数据文件
+# 如果您希望追踪某些特定的数据文件，可以使用!符号
+data/factor_data/*
+data/kline_data/*
+# 排除报告文件夹，但保留示例
+reports/*
+!reports/README.md
+!reports/sample_report.html
+
+# 备份文件
+*~
+*.bak
+*.backup
+
+# Portfolio layer outputs
+portfolio/output/
+.worktrees/

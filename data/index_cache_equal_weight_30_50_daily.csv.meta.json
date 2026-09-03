@@ -1,0 +1,21 @@
+{
+  "dataset": "index_cache_equal_weight_30_50_daily.csv",
+  "schema_version": "v1",
+  "source": "liquidity_top50_index_daily_cache",
+  "row_count": 1939,
+  "date_min": "2021-01-01",
+  "date_max": "2026-04-23",
+  "rebalance_days": 64,
+  "updated_at_utc": "2026-04-23T03:00:52Z",
+  "columns": [
+    "date",
+    "index_value",
+    "daily_return",
+    "components_count",
+    "is_rebalance_day",
+    "decision_date",
+    "effective_date",
+    "components",
+    "weights"
+  ]
+}

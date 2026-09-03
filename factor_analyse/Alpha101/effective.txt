@@ -1,0 +1,5 @@
+一、ALpha5:     # 策略1: 使用相对价格归一化 (推荐)
+    create_alpha5_factor(vwap_window=20, rebalance_period=20, price_normalization='relative_price')
+
+二、ALpha41:   # 标准参数 (短期价格偏离因子)
+    create_alpha41_factor(vwap_window=20, rebalance_period=10)

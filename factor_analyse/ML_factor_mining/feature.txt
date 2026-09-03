@@ -1,0 +1,161 @@
+    1累积主买/累积主卖比率因子 —— 无未来函数版本 
+    定义：
+    - 主动买盘 = taker_buy_quote
+    - 主动卖盘 = quote_volume - taker_buy_quote
+    逻辑：
+    1. 统计过去window个交易日
+    2. 收盘为涨的日期：累积主动买盘
+    3. 收盘为负的日期：累积主动卖盘
+    4. 因子 = 累积主买 / 累积主卖
+    
+    """
+    2. 买入稳定因子（主动买入/成交额 的稳定性）
+    - 定义: buy_ratio = taker_buy_quote / quote_volume
+    - 计算: N日均值、N日标准差，稳定性 = 均值 / 标准差
+    - 输出: 截面去极值 + 排名到[-1,1] 的 factor，与 future_ret
+    """
+    """
+    3. 方向动量因子:
+      up_momentum = sum(max(0, close_t - close_{t-1})) for t in [1, window]
+      down_momentum = sum(max(0, close_{t-1} - close_t)) for t in [1, window]
+      factor_raw = up_momentum / (down_momentum + eps)
+    """
+    """
+    4. 定向波动率因子:
+      up_volatility = (high - open) / open
+      down_volatility = (open - low) / open
+      up_roc = (high_t - open_{t-window}) / open_{t-window}
+      down_roc = (open_{t-window} - low_t) / open_{t-window}
+      factor_raw = (up_roc / MA(up_volatility, window)) - (down_roc / MA(down_volatility, window))
+    """
+    """
+    5. 高波动性动量:
+      roc = pct_change(window)
+      TR = max(high-low, |high-close_prev|, |low-close_prev|)
+      ATR = MA(TR, atr_window)
+      range_pct = (high-low)/close
+      hv_momentum = roc*ATR (product) 或 roc/range_pct (ratio)
+    """
+    """
+    6. 动量-主动买入极值:
+      momentum = close/close.shift(window) - 1
+      在每个rolling窗口内，按 taker_buy_quote 排序，Top10 动量和 / Bottom10 动量和
+    """
+    """
+    7. 创建动量-成交量极值分组因子 (Momentum Volume Extreme)
+    严格避免未来函数，只使用上一期已出现的token
+    
+    参数:
+    window: 计算窗口，默认为20天
+    rebalance_period: 调仓周期，默认为3天
+
+    逻辑:
+    - 计算20日动量
+    - 在每个rolling window内，按成交量排序
+    - 取最大10天的动量加总，除以最小10天的动量加总，作为该日因子值
+    - 🔥 关键：结合历史市值排名，确保只使用上一期已出现的token
+    """
+    """
+    8. 因子名称: net_order_flow（无未来函数版本）
+
+    思路 —— 订单不平衡/净主动买卖流量
+      ① 计算 daily_flow = taker_buy_quote - taker_sell_quote
+         • 若没有 taker_sell_quote，则用 quote_volume - taker_buy_quote 近似
+      ② 在过去 window 天内累计: net_flow = Σ(daily_flow) / Σ(quote_volume 或 taker_buy_quote)
+      ③ 因子值 = net_flow
+    """
+    """
+    9. 涨跌距离/路径（价格路径效率，方向性）
+    定义:
+      net_ret  = close/close.shift(window) - 1
+      path_len = sum_{t-window+1..t} |pct_change(close)|
+      ppe_raw  = net_ret / path_len   # 路径效率，方向性，约[-1, 1]
+    含义:
+      同期净涨跌相对“走过的路径”越高，路径效率越高；噪声少、趋势更干净。
+    """
+    """
+    10. 因子名称: rolling_corr_buyquote（无未来函数版本）
+
+    思路 —— 过去 window 日内:
+      ① 计算收益率 ret = log(close_t / close_{t-1})
+      ② 计算 ret 与 taker_buy_quote 的滚动相关系数 corr_t
+      ③ 计算同窗口内成交量的平均值 vol̄_t
+      ④ 因子值 = corr_t × log(1 + vol̄_t)
+
+    经济含义:
+      若主动买单成交额与价格同步上升且在高流动性阶段出现，则因子为正，代表买方力量强。
+    """
+    """
+    11. RSI 截面排序因子 (RSI Cross-Sectional Rank Factor) —— 无未来函数版本
+    
+    思路:
+    1. 计算传统RSI: RSI = 100 - (100 / (1 + RS))
+       - RS = 平均上涨幅度 / 平均下跌幅度
+       - 使用指数移动平均计算，避免未来函数
+    2. 横截面排名: 对每个日期的RSI值进行排名
+    3. 标准化: 将排名转换为[-1, 1]区间
+    
+    参数:
+    - window: RSI计算窗口，默认14天
+    - rebalance_period: 调仓周期，默认5天
+    
+    - 平均持有期: 5-10天
+    """
+    """
+    12. TBQ极值效率:
+      roc = (close/close.shift(window) - 1)
+      range_pct = ((high-low)/close.shift(1)).rolling(window).mean()
+      vol_eff = roc / range_pct
+      在每个rolling窗口内，按 taker_buy_quote 排序，Top10 vol_eff 和 / Bottom10 vol_eff 和
+    """
+    """
+    13. Top-Bottom Trades Ratio 因子 —— 无未来函数版本
+
+    定义:
+      - 主动买盘 buy = taker_buy_quote
+      - 主动卖盘 sell = quote_volume - taker_buy_quote
+      - ratio = buy / sell
+      - 对于每个日期，取过去 window 天：
+          * 按 trades_count 排序
+          * 前 k_top 天的 ratio 之和 / 后 k_bottom 天的 ratio 之和
+
+    参数:
+      - window: 滚动窗口长度 (默认 20)
+      - k_top: 取 trades_count 排名前 k_top 的天数累积 (默认 10)
+      - k_bottom: 取 trades_count 排名后 k_bottom 的天数累积 (默认 10)
+      - rebalance_period: 调仓周期 (默认 3)
+      - availability_lookback_days: 可用性窗口 (默认 90)
+    """
+    """
+    14. 波动效率 (Volatility Efficiency) —— 无未来函数版本
+      roc = close/close.shift(window) - 1
+      range_pct = mean( (high - low) / close.shift(1), window )
+      vol_eff = roc / range_pct
+    """
+    """
+    15. 波动率-订单流:
+      roc = (close/close.shift(window) - 1)
+      range_pct = ((high-low)/close.shift(1)).rolling(window).mean()
+      vol_eff = roc / range_pct
+      avg_trade_size = quote_volume / trades_count
+      trades_ratio = trades_count / MA(trades_count, window)
+      avg_trade_size_ratio = avg_trade_size / MA(avg_trade_size, window)
+      order_flow = trades_ratio / avg_trade_size_ratio
+      vof_raw = vol_eff * order_flow
+    """
+    """
+    16. 计算量稳因子（成交量稳定性）
+    参数:
+        data : 包含加密货币数据的DataFrame（需按时间排序）
+        lookback_days : 回溯期（默认20天）
+        volume_col : 成交量列名（默认'quote_volume'）
+        trades_col : 交易笔数列名（默认'trades_count'）
+    
+    返回:
+        volume_stability : 量稳因子值（pd.Series）
+    """
+    """
+    17. 成交量切分-主动买入Base 极值:
+      taker_buy_base_momentum = rolling_sum(taker_buy_base, 10)
+      在每个rolling窗口内，按 volume 排序，Top10 TBBase_Mom 和 / Bottom10 TBBase_Mom 和
+    """

@@ -1,0 +1,5 @@
+Return_Skew_Reversal_Factor
+Retail_Activity_Divergence_Factor
+Volume_Stability_Factor
+Retail_FOMO_Ratio_Factor
+Retail_Friction_Illiquidity_Factor
