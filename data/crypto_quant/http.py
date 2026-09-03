@@ -40,7 +40,7 @@ class JsonHttpClient:
         for attempt in range(self.max_attempts):
             try:
                 response = self.session.get(url, params=params, timeout=self.timeout)
-            except requests.RequestException as exc:
+            except requests.ConnectionError as exc:
                 if attempt == self.max_attempts - 1:
                     raise HttpRequestError(
                         f"HTTP request failed for {url}; status unavailable; "

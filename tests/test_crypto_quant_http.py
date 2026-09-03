@@ -19,8 +19,10 @@ class FakeResponse:
 class FakeSession:
     def __init__(self, responses):
         self.responses = iter(responses)
+        self.calls = 0
 
     def get(self, url, *, params=None, timeout=None):
+        self.calls += 1
         response = next(self.responses)
         if isinstance(response, Exception):
             raise response
@@ -87,3 +89,29 @@ def test_honors_zero_retry_after():
 
     assert client.get_json("https://example.test") == {"ok": True}
     assert sleeps == [0.0]
+
+
+def test_does_not_retry_invalid_url():
+    session = FakeSession([requests.exceptions.InvalidURL("invalid URL")])
+    sleeps = []
+    client = JsonHttpClient(session, max_attempts=3, sleep=sleeps.append)
+
+    with pytest.raises(requests.exceptions.InvalidURL):
+        client.get_json("https://example.test")
+
+    assert session.calls == 1
+    assert sleeps == []
+
+
+def test_raises_after_final_server_error_attempt():
+    session = FakeSession([FakeResponse(503, {}), FakeResponse(503, {})])
+    sleeps = []
+    client = JsonHttpClient(
+        session, max_attempts=2, sleep=sleeps.append, random_fn=lambda: 0
+    )
+
+    with pytest.raises(HttpRequestError, match=r"HTTP 503.*attempt 2/2"):
+        client.get_json("https://example.test")
+
+    assert session.calls == 2
+    assert sleeps == [1.0]
