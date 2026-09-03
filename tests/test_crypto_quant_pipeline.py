@@ -18,11 +18,15 @@ SYMBOLS = [f"C{i:02d}USDT" for i in range(50)]
 def _cmc_frame(start=date(2024, 1, 1), end=date(2024, 2, 25), extra=False):
     days = pd.date_range(start, end, freq="D")
     daily = pd.DataFrame({"date": days, "index_value": 100.0, "source_update_time": days, "fetched_at_utc": pd.Timestamp("2024-02-25", tz="UTC")})
+    if extra:
+        daily = pd.concat([daily, pd.DataFrame([{"date": pd.Timestamp("2024-07-01"), "index_value": 100.0, "source_update_time": pd.Timestamp("2024-07-01"), "fetched_at_utc": pd.Timestamp("2024-02-25", tz="UTC")}])], ignore_index=True)
     rows = []
     for day in days:
         for i in range(100):
             rows.append({"date": day, "cmc_id": i + 1, "symbol": f"C{i:02d}", "name": f"Coin {i:02d}", "weight": 50 - i})
     if extra:
+        for i in range(99):
+            rows.append({"date": pd.Timestamp("2024-07-01"), "cmc_id": i + 1, "symbol": f"C{i:02d}", "name": f"Coin {i:02d}", "weight": 50 - i})
         rows.append({"date": pd.Timestamp("2024-07-01"), "cmc_id": 101, "symbol": "NEW", "name": "New", "weight": 1})
     return daily, pd.DataFrame(rows)
 
@@ -379,6 +383,7 @@ def test_cmc_partial_snapshot_truncates_common_watermark_prefix(tmp_path):
 
 def test_cmc_incremental_partial_snapshot_replaces_old_date_before_validation(tmp_path):
     _run(tmp_path)
+    before = CryptoQuantStore(_config(tmp_path).store_path).read_metadata()
     class PartialUpdate(FakeCmc):
         def fetch_history(self, start, end, on_page=None):
             daily, members = super().fetch_history(start, end, on_page=None)
@@ -390,8 +395,31 @@ def test_cmc_incremental_partial_snapshot_replaces_old_date_before_validation(tm
     config = _config(tmp_path)
     CryptoQuantPipeline(config, PartialUpdate(), FakeBinance()).update(datetime(2024, 2, 26, tzinfo=timezone.utc))
     metadata = CryptoQuantStore(config.store_path).read_metadata()
-    assert metadata["last_successful_cmc_date"] == "2024-02-19"
-    assert metadata["checkpoint.cmc_through"] == "2024-02-19"
+    assert metadata["last_successful_cmc_date"] == before["last_successful_cmc_date"]
+    assert metadata["checkpoint.cmc_through"] == before["checkpoint.cmc_through"]
+    members = CryptoQuantStore(config.store_path).read("cmc100_constituents")
+    assert len(members[members.date == pd.Timestamp("2024-02-20")]) == 100
+
+
+def test_empty_cmc_incremental_response_preserves_existing_history(tmp_path):
+    _run(tmp_path)
+    config = _config(tmp_path)
+    before = CryptoQuantStore(config.store_path)
+    before_daily = before.read("cmc100_daily")
+    before_members = before.read("cmc100_constituents")
+
+    class EmptyCmc(FakeCmc):
+        def fetch_history(self, start, end, on_page=None):
+            daily = self.daily.iloc[0:0].copy()
+            members = self.members.iloc[0:0].copy()
+            if on_page:
+                on_page(daily, members, end)
+            return daily, members
+
+    CryptoQuantPipeline(config, EmptyCmc(), FakeBinance()).update(datetime(2024, 2, 26, tzinfo=timezone.utc))
+    after = CryptoQuantStore(config.store_path)
+    pd.testing.assert_frame_equal(before_daily, after.read("cmc100_daily"))
+    pd.testing.assert_frame_equal(before_members, after.read("cmc100_constituents"))
 
 
 def test_cmc_snapshot_with_101_unique_members_is_not_complete(tmp_path):
