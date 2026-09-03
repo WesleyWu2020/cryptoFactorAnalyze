@@ -35,6 +35,11 @@ def load_mapping_rules(path: Path) -> MappingRules:
     blocked = payload.get("blocked_cmc_ids", [])
     if not isinstance(blocked, list):
         raise ValueError("blocked_cmc_ids must be a list")
+    for override in overrides:
+        start = _as_date(override.get("valid_from"))
+        end = _as_date(override.get("valid_to"))
+        if start is not None and end is not None and start > end:
+            raise ValueError("override valid_from must be on or before valid_to")
     return MappingRules(
         version=payload["version"],
         stablecoin_symbols=_symbols(payload.get("stablecoin_symbols", [])),

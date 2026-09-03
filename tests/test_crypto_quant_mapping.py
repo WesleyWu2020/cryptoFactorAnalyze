@@ -134,3 +134,16 @@ def test_rules_are_versioned_and_case_insensitive(tmp_path):
     assert rules.version == "v"
     assert rules.stablecoin_symbols == frozenset({"USDT"})
     assert rules.wrapper_symbols == frozenset({"WBTC"})
+
+
+def test_rules_reject_reverse_override_validity_window(tmp_path):
+    path = tmp_path / "rules.json"
+    path.write_text(json.dumps({
+        "version": "v",
+        "stablecoin_symbols": [],
+        "wrapper_symbols": [],
+        "overrides": [{"cmc_id": 1, "binance_symbol": "BTCUSDT", "valid_from": "2026-09-02", "valid_to": "2026-09-01"}],
+        "blocked_cmc_ids": [],
+    }))
+    with pytest.raises(ValueError, match="valid_from.*valid_to"):
+        load_mapping_rules(path)
