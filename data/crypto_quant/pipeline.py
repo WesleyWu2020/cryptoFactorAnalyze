@@ -73,7 +73,7 @@ class CryptoQuantPipeline:
         return self._run("rebuild", as_of, reset_staging=reset_staging, derived_only=True)
 
     def _fingerprint(self, mode: str) -> str:
-        payload = {"mode": mode, "schema_version": 1, "rules_version": load_mapping_rules(self.config.rules_path).version, "target": str(self.config.store_path)}
+        payload = {"mode": mode, "schema_version": 1, "rules_version": load_mapping_rules(self.config.rules_path).version, "target": str(Path(self.config.store_path).expanduser().resolve())}
         return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
 
     def _run(self, mode: str, as_of: datetime, *, reset_staging: bool, derived_only: bool = False) -> RunSummary:
@@ -324,14 +324,40 @@ class CryptoQuantPipeline:
         constituents = store.read("cmc100_constituents")
         old_klines = store.read("klines_daily")
         old_funding = store.read("funding_events")
-        kline_batches: list[pd.DataFrame] = []
-        funding_batches: list[pd.DataFrame] = []
-        coverage_starts: dict[str, date] = {}
         kline_batch_symbols: set[str] = set()
         funding_batch_symbols: set[str] = set()
-        empty_funding_symbols: set[str] = set()
         all_kline_complete = bool(len(mappings))
         all_funding_complete = bool(len(mappings))
+        prior_metadata = store.read_metadata()
+
+        def record_coverage(symbol: str, coverage_start: date, kline_received: bool, funding_received: bool, empty_funding_response: bool) -> tuple[bool, bool]:
+            full_klines = store.read("klines_daily")
+            full_klines = full_klines[full_klines["symbol"] == symbol]
+            expected_klines = set(pd.date_range(coverage_start, kline_end, freq="D").date)
+            observed_klines = set(pd.to_datetime(full_klines["date"], errors="coerce").dt.date.dropna())
+            kline_missing = len(expected_klines - observed_klines)
+            actual_start = _day(full_klines["date"].min()) if not full_klines.empty else None
+            actual_end = _day(full_klines["date"].max()) if not full_klines.empty else None
+            kline_complete = actual_start == coverage_start and actual_end == kline_end and kline_missing == 0
+            if kline_received:
+                store.write_metadata({f"checkpoint.klines.{symbol}": {"requested_start": coverage_start.isoformat(), "requested_end": kline_end.isoformat(), "actual_start": actual_start.isoformat() if actual_start else None, "actual_end": actual_end.isoformat() if actual_end else None, "missing_date_count": kline_missing, "complete": kline_complete}})
+
+            full_funding = store.read("funding_events")
+            full_funding = full_funding[full_funding["symbol"] == symbol]
+            if empty_funding_response and prior_metadata.get(f"checkpoint.funding.{symbol}", {}).get("complete") is not False:
+                funding_missing = 0
+                funding_complete = True
+            else:
+                expected_funding = set(pd.date_range(coverage_start, self._funding_complete_end(funding_end_ms), freq="D").date)
+                observed_funding = set(pd.to_datetime(full_funding["funding_time"], errors="coerce", utc=True).dt.date.dropna())
+                funding_missing = len(expected_funding - observed_funding)
+                funding_complete = expected_funding.issubset(observed_funding)
+            actual_start_ms = int(pd.Timestamp(full_funding["funding_time"].min()).timestamp() * 1000) if not full_funding.empty else None
+            actual_end_ms = int(pd.Timestamp(full_funding["funding_time"].max()).timestamp() * 1000) if not full_funding.empty else None
+            if funding_received:
+                store.write_metadata({f"checkpoint.funding.{symbol}": {"requested_start_ms": int(pd.Timestamp(coverage_start, tz="UTC").timestamp() * 1000), "requested_end_ms": funding_end_ms, "actual_start_ms": actual_start_ms, "actual_end_ms": actual_end_ms, "missing_date_count": funding_missing, "empty_result": empty_funding_response, "complete": funding_complete}})
+            return kline_complete, funding_complete
+
         for row in mappings.sort_values("binance_symbol").itertuples():
             symbol = row.binance_symbol
             observed = constituents.loc[constituents.cmc_id == row.cmc_id, "date"]
@@ -347,9 +373,8 @@ class CryptoQuantPipeline:
                 kline_start = max(support_start, (_day(dates.max()) or support_start) - timedelta(days=self.config.binance_overlap_days - 1))
             klines = self.binance_source.fetch_klines(symbol, kline_start, kline_end)
             klines = self._clip_date_frame(klines, "date", kline_start, kline_end)
-            coverage_starts[symbol] = support_start
             if not klines.empty:
-                kline_batches.append(klines)
+                store.upsert("klines_daily", klines)
                 kline_batch_symbols.add(symbol)
             else:
                 all_kline_complete = False
@@ -361,47 +386,19 @@ class CryptoQuantPipeline:
                 funding_start = max(int(pd.Timestamp(support_start, tz="UTC").timestamp() * 1000), int(pd.Timestamp(times.max()).timestamp() * 1000) - 7 * DAY_MS if not times.empty else 0)
             funding = self.binance_source.fetch_funding(symbol, funding_start, funding_end_ms)
             funding = self._clip_funding(funding, funding_start, funding_end_ms)
+            empty_funding_response = False
             if not funding.empty:
-                funding_batches.append(funding)
+                store.upsert("funding_events", funding)
                 funding_batch_symbols.add(symbol)
             elif {"funding_time", "symbol", "funding_rate", "mark_price", "rate_type"}.issubset(funding.columns):
                 funding_batch_symbols.add(symbol)
-                empty_funding_symbols.add(symbol)
+                empty_funding_response = True
             else:
                 all_funding_complete = False
-        if kline_batches:
-            store.upsert("klines_daily", pd.concat(kline_batches, ignore_index=True))
-        if funding_batches:
-            store.upsert("funding_events", pd.concat(funding_batches, ignore_index=True))
-        for symbol, coverage_start in coverage_starts.items():
-            if symbol not in kline_batch_symbols and symbol not in funding_batch_symbols:
-                continue
-            full_klines = store.read("klines_daily")
-            full_klines = full_klines[full_klines["symbol"] == symbol]
-            expected = set(pd.date_range(coverage_start, kline_end, freq="D").date)
-            observed = set(pd.to_datetime(full_klines["date"], errors="coerce").dt.date.dropna())
-            missing_count = len(expected - observed)
-            actual_start = _day(full_klines["date"].min()) if not full_klines.empty else None
-            actual_end = _day(full_klines["date"].max()) if not full_klines.empty else None
-            complete = actual_start == coverage_start and actual_end == kline_end and missing_count == 0
-            all_kline_complete &= complete
-            if symbol in kline_batch_symbols:
-                store.write_metadata({f"checkpoint.klines.{symbol}": {"requested_start": coverage_start.isoformat(), "requested_end": kline_end.isoformat(), "actual_start": actual_start.isoformat() if actual_start else None, "actual_end": actual_end.isoformat() if actual_end else None, "missing_date_count": missing_count, "complete": complete}})
-            full_funding = store.read("funding_events")
-            full_funding = full_funding[full_funding["symbol"] == symbol]
-            if symbol in empty_funding_symbols:
-                missing_count = 0
-                complete = True
-            else:
-                expected_days = set(pd.date_range(coverage_start, self._funding_complete_end(funding_end_ms), freq="D").date)
-                observed_days = set(pd.to_datetime(full_funding["funding_time"], errors="coerce", utc=True).dt.date.dropna())
-                missing_count = len(expected_days - observed_days)
-                complete = expected_days.issubset(observed_days)
-            all_funding_complete &= complete
-            actual_start_ms = int(pd.Timestamp(full_funding["funding_time"].min()).timestamp() * 1000) if not full_funding.empty else None
-            actual_end_ms = int(pd.Timestamp(full_funding["funding_time"].max()).timestamp() * 1000) if not full_funding.empty else None
-            if symbol in funding_batch_symbols:
-                store.write_metadata({f"checkpoint.funding.{symbol}": {"requested_start_ms": int(pd.Timestamp(coverage_start, tz="UTC").timestamp() * 1000), "requested_end_ms": funding_end_ms, "actual_start_ms": actual_start_ms, "actual_end_ms": actual_end_ms, "missing_date_count": missing_count, "empty_result": symbol in empty_funding_symbols, "complete": complete}})
+            if symbol in kline_batch_symbols or symbol in funding_batch_symbols:
+                kline_status, funding_status = record_coverage(symbol, support_start, symbol in kline_batch_symbols, symbol in funding_batch_symbols, empty_funding_response)
+                all_kline_complete &= kline_status
+                all_funding_complete &= funding_status
         return all_kline_complete, all_funding_complete
 
     @staticmethod

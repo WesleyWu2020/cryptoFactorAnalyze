@@ -135,6 +135,15 @@ def test_mapping_issues_are_retained_in_metadata(tmp_path):
     assert any(issue["issue"] == "unresolved" for issue in issues)
 
 
+def test_fingerprint_is_stable_for_relative_and_absolute_target_paths(tmp_path):
+    absolute = _config(tmp_path)
+    relative = _config(tmp_path)
+    target = __import__("pathlib").Path.cwd() / "fingerprint-target.h5"
+    object.__setattr__(absolute, "store_path", target)
+    object.__setattr__(relative, "store_path", __import__("pathlib").Path("fingerprint-target.h5"))
+    assert CryptoQuantPipeline(absolute, FakeCmc(), FakeBinance())._fingerprint("backfill") == CryptoQuantPipeline(relative, FakeCmc(), FakeBinance())._fingerprint("backfill")
+
+
 def test_second_identical_update_is_idempotent(tmp_path):
     _run(tmp_path)
     active = tmp_path / "data" / "crypto_quant.h5"
@@ -196,6 +205,21 @@ def test_api_failure_keeps_active_sha256_unchanged_and_staging_resumable(tmp_pat
         CryptoQuantPipeline(_config(tmp_path), FakeCmc(), FakeBinance(fail_symbol=SYMBOLS[2])).update(datetime(2024, 2, 25, tzinfo=timezone.utc))
     assert hashlib.sha256(active.read_bytes()).hexdigest() == before
     assert CryptoQuantStore(tmp_path / "data" / ".crypto_quant.staging.h5").read_metadata().get("checkpoint.klines.C00USDT") is not None
+
+
+def test_fresh_backfill_failure_persists_completed_symbols_in_staging(tmp_path):
+    config = _config(tmp_path)
+    with pytest.raises(RuntimeError):
+        CryptoQuantPipeline(config, FakeCmc(), FakeBinance(fail_symbol=SYMBOLS[2])).backfill(
+            datetime(2024, 2, 25, tzinfo=timezone.utc)
+        )
+    assert not config.store_path.exists()
+    staging = CryptoQuantStore(config.staging_path)
+    klines = staging.read("klines_daily")
+    assert not klines[klines.symbol == SYMBOLS[0]].empty
+    assert not klines[klines.symbol == SYMBOLS[1]].empty
+    assert staging.read_metadata().get("checkpoint.klines.C00USDT") is not None
+    assert staging.read_metadata().get("checkpoint.klines.C01USDT") is not None
 
 
 def test_validation_failure_never_publishes_staging(tmp_path):
@@ -590,3 +614,27 @@ def test_funding_historical_gap_survives_incremental_overlap(tmp_path):
     metadata = CryptoQuantStore(config.store_path).read_metadata()
     assert metadata["last_successful_funding_time"] is None
     assert metadata["checkpoint.funding.C00USDT"]["complete"] is False
+
+
+def test_empty_funding_response_does_not_hide_historical_gap(tmp_path):
+    class GapFunding(FakeBinance):
+        def fetch_funding(self, symbol, start_ms, end_ms):
+            start = pd.Timestamp(start_ms, unit="ms", tz="UTC")
+            end = pd.Timestamp(end_ms, unit="ms", tz="UTC")
+            dates = [value + pd.Timedelta(hours=8) for value in pd.date_range(start.normalize(), end.normalize(), freq="D") if value.date() != date(2024, 1, 10)]
+            return pd.DataFrame([{"funding_time": value, "symbol": symbol, "funding_rate": 0.0, "mark_price": 1.0, "rate_type": "Regular"} for value in dates])
+
+    class EmptyFunding(FakeBinance):
+        def fetch_funding(self, symbol, start_ms, end_ms):
+            return pd.DataFrame(columns=["funding_time", "symbol", "funding_rate", "mark_price", "rate_type"])
+
+    _run(tmp_path, binance=GapFunding())
+    config = _config(tmp_path)
+    CryptoQuantPipeline(config, FakeCmc(), EmptyFunding()).update(datetime(2024, 2, 26, tzinfo=timezone.utc))
+    store = CryptoQuantStore(config.store_path)
+    checkpoint = store.read_metadata()["checkpoint.funding.C00USDT"]
+    assert checkpoint["complete"] is False
+    assert checkpoint["empty_result"] is True
+    assert checkpoint["missing_date_count"] > 0
+    assert store.read_metadata()["last_successful_funding_time"] is None
+    assert store.read("research_panel_daily")["has_complete_funding"].eq(False).all()
