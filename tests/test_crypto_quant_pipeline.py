@@ -222,6 +222,28 @@ def test_fresh_backfill_failure_persists_completed_symbols_in_staging(tmp_path):
     assert staging.read_metadata().get("checkpoint.klines.C01USDT") is not None
 
 
+def test_funding_failure_keeps_current_symbol_kline_checkpoint_in_staging(tmp_path):
+    class FundingFailure(FakeBinance):
+        def fetch_funding(self, symbol, start_ms, end_ms):
+            if symbol == SYMBOLS[2]:
+                raise RuntimeError("selected funding failure")
+            return super().fetch_funding(symbol, start_ms, end_ms)
+
+    config = _config(tmp_path)
+    with pytest.raises(RuntimeError):
+        CryptoQuantPipeline(config, FakeCmc(), FundingFailure()).backfill(
+            datetime(2024, 2, 25, tzinfo=timezone.utc)
+        )
+    assert not config.store_path.exists()
+    staging = CryptoQuantStore(config.staging_path)
+    klines = staging.read("klines_daily")
+    assert not klines[klines.symbol == SYMBOLS[2]].empty
+    checkpoint = staging.read_metadata().get("checkpoint.klines.C02USDT")
+    assert checkpoint is not None and checkpoint["complete"] is True
+    assert "checkpoint.funding.C02USDT" not in staging.read_metadata()
+    assert "last_successful_funding_time" not in staging.read_metadata()
+
+
 def test_validation_failure_never_publishes_staging(tmp_path):
     _run(tmp_path)
     active = tmp_path / "data" / "crypto_quant.h5"

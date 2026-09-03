@@ -376,6 +376,8 @@ class CryptoQuantPipeline:
             if not klines.empty:
                 store.upsert("klines_daily", klines)
                 kline_batch_symbols.add(symbol)
+                kline_status, _ = record_coverage(symbol, support_start, True, False, False)
+                all_kline_complete &= kline_status
             else:
                 all_kline_complete = False
 
