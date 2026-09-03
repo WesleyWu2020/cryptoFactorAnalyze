@@ -103,7 +103,7 @@ def normalize_cmc_payload(
     if not status_mapping:
         raise CmcSchemaError("status must not be empty")
     error_code = status_mapping.get("error_code")
-    if error_code != 0:
+    if type(error_code) is not int or error_code != 0:
         raise CmcSchemaError(f"CMC status error_code={error_code}")
 
     data = root.get("data")

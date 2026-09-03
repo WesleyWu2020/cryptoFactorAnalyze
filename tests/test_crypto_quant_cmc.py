@@ -108,6 +108,15 @@ def test_normalize_requires_status_error_code_zero(fixture_payload, status):
         normalize_cmc_payload(payload, pd.Timestamp("2026-09-03"))
 
 
+@pytest.mark.parametrize("error_code", [False, 0.0])
+def test_normalize_requires_builtin_integer_zero_status_code(
+    fixture_payload, error_code
+):
+    payload = {**fixture_payload, "status": {"error_code": error_code}}
+    with pytest.raises(CmcSchemaError, match="error_code"):
+        normalize_cmc_payload(payload, pd.Timestamp("2026-09-03"))
+
+
 @pytest.mark.parametrize(
     "value", [None, "", "not-a-timestamp", pd.NaT, [], ["2024-01-01T00:00:00Z"]]
 )
