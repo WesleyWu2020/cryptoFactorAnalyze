@@ -209,12 +209,23 @@ class CryptoQuantPipeline:
         for current in set(daily_dates.dropna()):
             daily_snapshot = daily.loc[daily_dates == current]
             member_snapshot = members.loc[member_dates == current]
-            if len(daily_snapshot) != 1 or len(member_snapshot) != 100:
-                continue
-            if member_snapshot.duplicated(["date", "cmc_id"]).any() or member_snapshot[list(required)].isna().any().any():
+            if len(daily_snapshot) != 1 or not CryptoQuantPipeline._is_complete_cmc_snapshot(member_snapshot):
                 continue
             valid.add(current)
         return valid
+
+    @staticmethod
+    def _is_complete_cmc_snapshot(snapshot: pd.DataFrame) -> bool:
+        required = {"date", "cmc_id", "symbol", "name", "weight"}
+        if len(snapshot) != 100 or not required.issubset(snapshot.columns):
+            return False
+        normalized_dates = pd.to_datetime(snapshot["date"], errors="coerce", utc=True).dt.date
+        if normalized_dates.isna().any() or normalized_dates.nunique() != 1:
+            return False
+        if snapshot[list(required)].isna().any().any():
+            return False
+        cmc_ids = pd.to_numeric(snapshot["cmc_id"], errors="coerce")
+        return not cmc_ids.isna().any() and cmc_ids.nunique() == 100
 
     def _map_contracts(self, store: CryptoQuantStore, exchange: pd.DataFrame) -> pd.DataFrame:
         constituents = store.read("cmc100_constituents")
@@ -259,18 +270,12 @@ class CryptoQuantPipeline:
             return None
         daily_dates = set(pd.to_datetime(daily["date"], errors="coerce", utc=True).dt.date.dropna())
         member_dates = pd.to_datetime(members["date"], errors="coerce", utc=True).dt.date
-        required = {"date", "cmc_id", "symbol", "name", "weight"}
-        if not required.issubset(members.columns):
-            return None
         current = self.config.universe_start
         while current <= end:
             if current not in daily_dates:
                 break
             snapshot = members.loc[member_dates == current]
-            valid = len(snapshot) == 100
-            valid &= not snapshot.duplicated(["date", "cmc_id"]).any()
-            valid &= not snapshot[list(required)].isna().any().any()
-            if not valid:
+            if not self._is_complete_cmc_snapshot(snapshot):
                 break
             current += timedelta(days=1)
         return current - timedelta(days=1) if current > self.config.universe_start else None
