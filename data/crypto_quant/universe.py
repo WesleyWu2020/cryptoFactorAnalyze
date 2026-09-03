@@ -59,7 +59,7 @@ def build_monthly_universe(
     kline_data = klines.copy()
     kline_data["_date"] = _timestamp_column(kline_data, "date")
     if "completed" in kline_data:
-        kline_data = kline_data[kline_data["completed"].fillna(False).astype(bool)]
+        kline_data = kline_data[kline_data["completed"].map(lambda value: type(value) is bool and value)]
     completed_keys = kline_data[["_date", "symbol"]].drop_duplicates()
 
     accepted_months: list[pd.DataFrame] = []
@@ -74,6 +74,12 @@ def build_monthly_universe(
             ]
             eligible = eligible[
                 eligible["_valid_to"].isna() | (eligible["_valid_to"] >= decision_date)
+            ]
+            eligible = eligible[
+                eligible.groupby("cmc_id")["binance_symbol"].transform("size") == 1
+            ]
+            eligible = eligible[
+                eligible.groupby("binance_symbol")["cmc_id"].transform("nunique") == 1
             ]
             prior_date = decision_date - pd.Timedelta(days=1)
             eligible = eligible.merge(

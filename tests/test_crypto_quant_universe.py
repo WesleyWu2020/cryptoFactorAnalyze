@@ -126,3 +126,34 @@ def test_cutoff_replay_matches_full_history_before_cutoff(synthetic_inputs):
     full_january = full[full["decision_date"] == pd.Timestamp("2024-01-01")].reset_index(drop=True)
     comparable = [column for column in cutoff.columns if column != "effective_end_date"]
     pd.testing.assert_frame_equal(full_january[comparable], cutoff[comparable].reset_index(drop=True))
+
+
+def test_excludes_cmc_ids_with_multiple_current_mappings(synthetic_inputs):
+    constituents, mappings, klines = synthetic_inputs
+    duplicate = mappings.iloc[[0]].copy()
+    duplicate["binance_symbol"] = "C1ALTUSDT"
+    mappings = pd.concat([mappings, duplicate], ignore_index=True)
+    klines = pd.concat(
+        [klines, pd.DataFrame([{"date": pd.Timestamp("2023-12-31"), "symbol": "C1ALTUSDT", "completed": True}])],
+        ignore_index=True,
+    )
+    out = build_monthly_universe(constituents, mappings, klines, date(2024, 1, 1), date(2024, 1, 31))
+    assert "C1USDT" not in set(out["binance_symbol"])
+    assert "C1ALTUSDT" not in set(out["binance_symbol"])
+    assert out["cmc_id"].is_unique
+
+
+def test_excludes_cross_cmc_symbol_mapping_conflicts(synthetic_inputs):
+    constituents, mappings, klines = synthetic_inputs
+    mappings.loc[mappings["cmc_id"] == 1, "binance_symbol"] = "C2USDT"
+    out = build_monthly_universe(constituents, mappings, klines, date(2024, 1, 1), date(2024, 1, 31))
+    assert out["binance_symbol"].is_unique
+    assert not out["cmc_id"].isin([1, 2]).any()
+
+
+def test_completed_requires_strict_boolean_true(synthetic_inputs):
+    constituents, mappings, klines = synthetic_inputs
+    klines["completed"] = klines["completed"].astype(object)
+    klines.loc[(klines["symbol"] == "C1USDT") & (klines["date"] == pd.Timestamp("2023-12-31")), "completed"] = "False"
+    out = build_monthly_universe(constituents, mappings, klines, date(2024, 1, 1), date(2024, 1, 31))
+    assert "C1USDT" not in set(out["binance_symbol"])
