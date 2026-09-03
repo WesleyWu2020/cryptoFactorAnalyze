@@ -145,21 +145,25 @@ def test_full_vs_cutoff_derived_builders_have_no_future_leak(capsys):
 
     mappings = base["futures_contracts"]
     symbols = mappings["binance_symbol"].tolist()
+    future_mappings = mappings.copy()
+    future_mappings["cmc_id"] = range(100, 150)
+    future_mappings["cmc_symbol"] = [f"FUTURE{i:02d}" for i in range(50)]
+    future_mappings["binance_symbol"] = future_symbols = [f"FUTURE{i:02d}USDT" for i in range(50)]
+    mappings = pd.concat([mappings, future_mappings], ignore_index=True)
     dates = pd.date_range("2023-12-31", "2024-03-05", freq="D")
     klines = pd.DataFrame([
         {"date": day, "symbol": symbol, "completed": True}
         for day in dates for symbol in symbols
     ])
-    future_symbols = [f"FUTURE{i:02d}USDT" for i in range(50)]
     klines = pd.concat([
         klines,
         pd.DataFrame([
             {"date": day, "symbol": symbol, "completed": True}
-            for day in pd.date_range("2024-03-01", "2024-03-05") for symbol in future_symbols
+            for day in pd.date_range("2024-02-29", "2024-03-05") for symbol in future_symbols
         ]),
     ], ignore_index=True)
     funding = pd.DataFrame({
-        "funding_time": pd.to_datetime(["2024-02-15 08:00", "2024-03-01 08:00"]),
+        "funding_time": pd.to_datetime(["2024-02-14 08:00", "2024-03-02 08:00"]),
         "symbol": [symbols[0], future_symbols[0]],
         "funding_rate": [0.0001, 0.25],
     })
@@ -167,17 +171,34 @@ def test_full_vs_cutoff_derived_builders_have_no_future_leak(capsys):
     assert pd.to_datetime(constituents["date"]).max() > cutoff
     assert pd.to_datetime(klines["date"]).max() > cutoff
     assert pd.to_datetime(funding["funding_time"]).max() > cutoff
-    full_universe = build_monthly_universe(constituents, mappings, klines, date(2024, 1, 1), date(2024, 2, 15))
+    full_universe = build_monthly_universe(constituents, mappings, klines, date(2024, 1, 1), date(2024, 3, 5))
     cut_universe = build_monthly_universe(
-        constituents[pd.to_datetime(constituents["date"]) <= cutoff], mappings,
+        constituents[pd.to_datetime(constituents["date"]) <= cutoff],
+        mappings[pd.to_datetime(mappings["valid_from"]) <= cutoff],
         klines[pd.to_datetime(klines["date"]) <= cutoff], date(2024, 1, 1), date(2024, 2, 15),
     )
-    full_panel = build_research_panel(full_universe, klines, funding, date(2024, 2, 15), date(2024, 2, 15))
-    cut_panel = build_research_panel(cut_universe, klines[pd.to_datetime(klines["date"]) <= cutoff], funding, date(2024, 2, 15), date(2024, 2, 15))
+    full_panel = build_research_panel(full_universe, klines, funding, date(2024, 3, 5), date(2024, 3, 5))
+    cut_funding = funding[pd.to_datetime(funding["funding_time"]) <= cutoff]
+    cut_panel = build_research_panel(
+        cut_universe,
+        klines[pd.to_datetime(klines["date"]) <= cutoff],
+        cut_funding,
+        date(2024, 2, 15), date(2024, 2, 15),
+    )
 
-    full_u = full_universe[full_universe["effective_date"] <= cutoff].reset_index(drop=True)
+    assert full_universe["effective_date"].max() > cutoff
+    assert full_panel["date"].max() > cutoff
+    assert set(future_symbols).issubset(set(full_panel.loc[full_panel["date"] > cutoff, "binance_symbol"]))
+    assert full_panel.loc[
+        (full_panel["date"] == pd.Timestamp("2024-03-02"))
+        & (full_panel["binance_symbol"] == future_symbols[0]),
+        "funding_rate_sum",
+    ].iloc[0] == pytest.approx(0.25)
+
+    full_u = full_universe[full_universe["effective_date"] <= cutoff].drop(columns=["effective_end_date"]).reset_index(drop=True)
+    cut_u = cut_universe.drop(columns=["effective_end_date"])
     full_p = full_panel[full_panel["date"] <= cutoff].reset_index(drop=True)
-    pd.testing.assert_frame_equal(full_u, cut_universe.reset_index(drop=True), check_exact=False, atol=1e-12, rtol=0)
+    pd.testing.assert_frame_equal(full_u, cut_u.reset_index(drop=True), check_exact=False, atol=1e-12, rtol=0)
     pd.testing.assert_frame_equal(full_p, cut_panel.reset_index(drop=True), check_exact=False, atol=1e-12, rtol=0)
     def max_numeric_diff(left, right):
         left_values = left.select_dtypes(include="number").to_numpy(dtype=float)
@@ -185,7 +206,7 @@ def test_full_vs_cutoff_derived_builders_have_no_future_leak(capsys):
         delta = np.nan_to_num(left_values, nan=0.0) - np.nan_to_num(right_values, nan=0.0)
         return float(np.abs(delta).max(initial=0.0))
 
-    max_abs_diff = max(max_numeric_diff(full_u, cut_universe), max_numeric_diff(full_p, cut_panel))
+    max_abs_diff = max(max_numeric_diff(full_u, cut_u), max_numeric_diff(full_p, cut_panel))
     print(f"max_abs_diff={max_abs_diff}")
     assert max_abs_diff <= 1e-12
     assert f"max_abs_diff={max_abs_diff}" in capsys.readouterr().out
