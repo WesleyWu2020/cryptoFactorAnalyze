@@ -53,6 +53,7 @@ def test_table_specs_have_required_keys_columns_and_version():
         name: tuple(columns.split()) for name, columns in EXPECTED_COLUMNS.items()
     }
     assert all(spec.schema_version == 1 for spec in TABLE_SPECS.values())
+    assert {"valid_from", "valid_to"}.issubset(TABLE_SPECS["futures_contracts"].data_columns)
 
 
 def test_normalize_table_requires_columns_and_sorts_by_primary_key():
@@ -176,6 +177,18 @@ def test_second_writer_fails_without_waiting(tmp_path):
         with pytest.raises(StoreLockedError):
             with single_writer_lock(lock):
                 pass
+
+
+@pytest.mark.parametrize("method", ["replace", "upsert", "write_metadata"])
+def test_public_write_methods_fail_when_store_lock_is_held(tmp_path, method):
+    store = CryptoQuantStore(tmp_path / "active.h5")
+    lock = store.path.with_suffix(store.path.suffix + ".lock")
+    with single_writer_lock(lock):
+        with pytest.raises(StoreLockedError):
+            if method == "write_metadata":
+                store.write_metadata({"checkpoint": {"rows": 1}})
+            else:
+                getattr(store, method)("cmc100_daily", _cmc_row())
 
 
 def test_failed_staging_context_keeps_active_bytes_unchanged(tmp_path):

@@ -32,7 +32,7 @@ _DATE_COLUMNS = {
 
 
 def _spec(columns: tuple[str, ...], key: tuple[str, ...]) -> TableSpec:
-    query = tuple(c for c in columns if c in {"date", "decision_date", "effective_date", "funding_time", "symbol", "binance_symbol"})
+    query = tuple(c for c in columns if c in {"date", "decision_date", "effective_date", "funding_time", "valid_from", "valid_to", "symbol", "binance_symbol"})
     sizes = {c: _STRING_SIZES[c] for c in columns if c in _STRING_SIZES}
     return TableSpec(columns, key, query, sizes)
 

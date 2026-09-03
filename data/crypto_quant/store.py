@@ -44,9 +44,19 @@ def single_writer_lock(lock_path: Path) -> Iterator[None]:
 
 
 class CryptoQuantStore:
-    def __init__(self, path: Path):
+    def __init__(self, path: Path, *, lock_path: Path | None = None, lock_held: bool = False):
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.lock_path = Path(lock_path) if lock_path is not None else self.path.with_suffix(self.path.suffix + ".lock")
+        self._lock_held = lock_held
+
+    @contextmanager
+    def _write_lock(self) -> Iterator[None]:
+        if self._lock_held:
+            yield
+        else:
+            with single_writer_lock(self.lock_path):
+                yield
 
     def _write(self, name: str, frame: pd.DataFrame, *, append: bool = False) -> None:
         spec = TABLE_SPECS[name]
@@ -65,17 +75,21 @@ class CryptoQuantStore:
                 return pd.DataFrame(columns=TABLE_SPECS[name].columns)
             return hdf.select(name, where=where)
 
-    def replace(self, name: str, frame: pd.DataFrame) -> None:
+    def _replace_unlocked(self, name: str, frame: pd.DataFrame) -> None:
         normalized = normalize_table(name, frame)
         spec = TABLE_SPECS[name]
         with pd.HDFStore(self.path, mode="a") as hdf:
             hdf.put(name, normalized, format="table", data_columns=list(spec.data_columns), min_itemsize=spec.min_itemsize, index=False)
 
-    def upsert(self, name: str, frame: pd.DataFrame) -> None:
+    def replace(self, name: str, frame: pd.DataFrame) -> None:
+        with self._write_lock():
+            self._replace_unlocked(name, frame)
+
+    def _upsert_unlocked(self, name: str, frame: pd.DataFrame) -> None:
         incoming = normalize_table(name, frame)
         existing = self.read(name)
         if existing.empty:
-            self.replace(name, incoming)
+            self._replace_unlocked(name, incoming)
             return
         spec = TABLE_SPECS[name]
         provenance = {"fetched_at_utc", "source_update_time", "updated_at_utc"}
@@ -90,18 +104,23 @@ class CryptoQuantStore:
                 old = combined.loc[mask, business].iloc[0]
                 if not old.equals(new_row[business]):
                     combined.loc[mask, :] = new_row.values
-        self.replace(name, combined)
+        self._replace_unlocked(name, combined)
+
+    def upsert(self, name: str, frame: pd.DataFrame) -> None:
+        with self._write_lock():
+            self._upsert_unlocked(name, frame)
 
     def read_metadata(self) -> dict[str, object]:
         frame = self.read("_metadata")
         return {row.key: json.loads(row.value) for row in frame.itertuples()}
 
     def write_metadata(self, updates: Mapping[str, object]) -> None:
-        current = self.read_metadata()
-        current.update(updates)
-        frame = _metadata_frame(current)
-        with pd.HDFStore(self.path, mode="a") as hdf:
-            hdf.put("_metadata", frame, format="table", data_columns=["key"], min_itemsize={"key": 128, "value": 16384}, index=False)
+        with self._write_lock():
+            current = self.read_metadata()
+            current.update(updates)
+            frame = _metadata_frame(current)
+            with pd.HDFStore(self.path, mode="a") as hdf:
+                hdf.put("_metadata", frame, format="table", data_columns=["key"], min_itemsize={"key": 128, "value": 16384}, index=False)
 
     def keys(self) -> set[str]:
         with pd.HDFStore(self.path, mode="a") as hdf:
@@ -124,7 +143,7 @@ def staged_store(active_path: Path, staging_path: Path, run_fingerprint: str, *,
             shutil.copy2(active_path, staging_path)
         else:
             staging_path.parent.mkdir(parents=True, exist_ok=True)
-        store = CryptoQuantStore(staging_path)
+        store = CryptoQuantStore(staging_path, lock_path=lock_path, lock_held=True)
         if store.read_metadata().get("run_fingerprint") != run_fingerprint:
             store.write_metadata({"run_fingerprint": run_fingerprint})
         try:
