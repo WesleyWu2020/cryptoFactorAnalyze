@@ -29,6 +29,16 @@ class FakeClient:
         return self.payload
 
 
+class SequentialClient(FakeClient):
+    def __init__(self, payloads):
+        self.payloads = iter(payloads)
+        self.calls = []
+
+    def get_json(self, url, *, params=None):
+        self.calls.append((url, params))
+        return next(self.payloads)
+
+
 @pytest.fixture
 def fake_client(fixture_payload):
     return FakeClient(fixture_payload)
@@ -79,6 +89,67 @@ def test_normalize_rejects_malformed_status(fixture_payload):
     payload = {**fixture_payload, "status": {"error_code": 100}}
     with pytest.raises(CmcSchemaError, match="error_code"):
         normalize_cmc_payload(payload, pd.Timestamp("2026-09-03"))
+
+
+@pytest.mark.parametrize("status", [None, {}, []])
+def test_normalize_requires_nonempty_status(fixture_payload, status):
+    payload = {**fixture_payload, "status": status}
+    if status is None:
+        payload.pop("status")
+    with pytest.raises(CmcSchemaError, match="status"):
+        normalize_cmc_payload(payload, pd.Timestamp("2026-09-03"))
+
+
+def test_normalize_rejects_non_integer_id(fixture_payload):
+    payload = json.loads(json.dumps(fixture_payload))
+    payload["data"][0]["constituents"][0]["id"] = 1.5
+    with pytest.raises(CmcSchemaError, match="id"):
+        normalize_cmc_payload(payload, pd.Timestamp("2026-09-03"))
+
+
+@pytest.mark.parametrize("field, value", [("weight", float("nan")), ("weight", float("inf"))])
+def test_normalize_rejects_nonfinite_weight(fixture_payload, field, value):
+    payload = json.loads(json.dumps(fixture_payload))
+    payload["data"][0]["constituents"][0][field] = value
+    with pytest.raises(CmcSchemaError, match=field):
+        normalize_cmc_payload(payload, pd.Timestamp("2026-09-03"))
+
+
+def test_normalize_rejects_nonfinite_value(fixture_payload):
+    payload = json.loads(json.dumps(fixture_payload))
+    payload["data"][0]["constituents"][0]["value"] = float("nan")
+    with pytest.raises(CmcSchemaError, match="value"):
+        normalize_cmc_payload(payload, pd.Timestamp("2026-09-03"))
+
+
+@pytest.mark.parametrize("field", ["symbol", "name"])
+def test_normalize_rejects_empty_text_fields(fixture_payload, field):
+    payload = json.loads(json.dumps(fixture_payload))
+    payload["data"][0]["constituents"][0][field] = ""
+    with pytest.raises(CmcSchemaError, match=field):
+        normalize_cmc_payload(payload, pd.Timestamp("2026-09-03"))
+
+
+def test_fetch_deduplicates_cross_page_member_by_business_fields(fixture_payload):
+    client = SequentialClient([fixture_payload] * 3)
+    daily, members = fetch_cmc_history(client, date(2024, 1, 1), date(2024, 1, 23))
+    assert len(daily) == 2
+    assert len(members) == 6
+
+
+def test_fetch_rejects_cross_page_conflict_before_second_callback(fixture_payload):
+    conflicting = json.loads(json.dumps(fixture_payload))
+    conflicting["data"][0]["constituents"][0]["weight"] = 0.99
+    client = SequentialClient([fixture_payload, conflicting, fixture_payload])
+    callbacks = []
+    with pytest.raises(CmcSchemaError, match="duplicate"):
+        fetch_cmc_history(
+            client,
+            date(2024, 1, 1),
+            date(2024, 1, 23),
+            on_page=lambda d, m, end: callbacks.append(end),
+        )
+    assert callbacks == [date(2024, 1, 10)]
 
 
 def test_normalize_rejects_missing_constituents(fixture_payload):

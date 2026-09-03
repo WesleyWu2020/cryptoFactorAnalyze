@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterator, Mapping
 from datetime import date, timedelta
+from math import isfinite
+from numbers import Integral
 
 import pandas as pd
 
@@ -45,25 +47,39 @@ def _as_mapping(value: object, label: str) -> Mapping[str, object]:
 
 def _float(value: object, field: str) -> float:
     try:
-        return float(value)
+        converted = float(value)
     except (TypeError, ValueError) as exc:
         raise CmcSchemaError(f"invalid {field}") from exc
+    if not isfinite(converted):
+        raise CmcSchemaError(f"invalid {field}: must be finite")
+    return converted
 
 
 def _int(value: object, field: str) -> int:
-    try:
-        return int(value)
-    except (TypeError, ValueError) as exc:
-        raise CmcSchemaError(f"invalid {field}") from exc
+    if isinstance(value, bool) or not isinstance(value, Integral):
+        raise CmcSchemaError(f"invalid {field}: must be an integer")
+    return int(value)
 
 
-def _deduplicate(rows: list[dict[str, object]], keys: list[str], label: str) -> list[dict[str, object]]:
+def _text(value: object, field: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise CmcSchemaError(f"invalid {field}: must be a non-empty string")
+    return value
+
+
+def _deduplicate(
+    rows: list[dict[str, object]],
+    keys: list[str],
+    label: str,
+    compare_columns: list[str] | None = None,
+) -> list[dict[str, object]]:
     result: dict[tuple[object, ...], dict[str, object]] = {}
     for row in rows:
         key = tuple(row[column] for column in keys)
         previous = result.get(key)
         if previous is not None:
-            if previous != row:
+            columns = compare_columns or list(row)
+            if any(previous[column] != row[column] for column in columns):
                 raise CmcSchemaError(f"conflicting duplicate {label}: {key}")
             continue
         result[key] = row
@@ -74,8 +90,11 @@ def normalize_cmc_payload(
     payload: object, fetched_at: pd.Timestamp
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     root = _as_mapping(payload, "payload")
-    status = root.get("status", {})
-    status_mapping = _as_mapping(status, "status")
+    if "status" not in root:
+        raise CmcSchemaError("missing status")
+    status_mapping = _as_mapping(root["status"], "status")
+    if not status_mapping:
+        raise CmcSchemaError("status must not be empty")
     error_code = status_mapping.get("error_code")
     if error_code not in (0, None):
         raise CmcSchemaError(f"CMC status error_code={error_code}")
@@ -97,16 +116,20 @@ def normalize_cmc_payload(
             item = _as_mapping(constituent, "constituent")
             source_time = _utc_timestamp(item.get("update_time", point_time), "update_time")
             cmc_id = _int(item.get("id"), "id")
+            symbol = _text(item.get("symbol"), "symbol")
+            name = _text(item.get("name"), "name")
+            weight = _float(item.get("weight"), "weight")
+            constituent_value = _float(item.get("value"), "value")
             if point_time is None:
                 point_time = item.get("update_time")
             if point_value is None:
-                point_value = item.get("value")
+                point_value = constituent_value
             member_rows.append({
                 "date": source_time.date(),
                 "cmc_id": cmc_id,
-                "symbol": item.get("symbol"),
-                "name": item.get("name"),
-                "weight": _float(item.get("weight"), "weight"),
+                "symbol": symbol,
+                "name": name,
+                "weight": weight,
             })
         if point_time is None or point_value is None:
             raise CmcSchemaError("missing update_time or value")
@@ -118,7 +141,12 @@ def normalize_cmc_payload(
             "fetched_at_utc": fetched_at_utc,
         })
 
-    daily_rows = _deduplicate(daily_rows, ["date"], "date")
+    daily_rows = _deduplicate(
+        daily_rows,
+        ["date"],
+        "date",
+        ["date", "index_value", "source_update_time"],
+    )
     member_rows = _deduplicate(member_rows, ["date", "cmc_id"], "date + cmc_id")
     daily_rows.sort(key=lambda row: row["date"])
     member_rows.sort(key=lambda row: (row["date"], row["cmc_id"]))
@@ -133,8 +161,8 @@ def fetch_cmc_history(
     end: date,
     on_page: Callable[[pd.DataFrame, pd.DataFrame, date], None] | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
-    daily_pages: list[pd.DataFrame] = []
-    member_pages: list[pd.DataFrame] = []
+    daily_rows: list[dict[str, object]] = []
+    member_rows: list[dict[str, object]] = []
     for window_start, window_end in iter_cmc_windows(start, end):
         payload = client.get_json(
             CMC100_HISTORY_URL,
@@ -146,21 +174,24 @@ def fetch_cmc_history(
             },
         )
         daily, members = normalize_cmc_payload(payload, pd.Timestamp.now(tz="UTC"))
-        daily_pages.append(daily)
-        member_pages.append(members)
+        candidate_daily = daily_rows + daily.to_dict("records")
+        candidate_members = member_rows + members.to_dict("records")
+        daily_rows = _deduplicate(
+            candidate_daily,
+            ["date"],
+            "date",
+            ["date", "index_value", "source_update_time"],
+        )
+        member_rows = _deduplicate(
+            candidate_members, ["date", "cmc_id"], "date + cmc_id"
+        )
         if on_page is not None:
             on_page(daily, members, window_end)
 
     daily_columns = ["date", "index_value", "source_update_time", "fetched_at_utc"]
     member_columns = ["date", "cmc_id", "symbol", "name", "weight"]
-    if not daily_pages:
+    if not daily_rows:
         return pd.DataFrame(columns=daily_columns), pd.DataFrame(columns=member_columns)
-    daily = pd.concat(daily_pages, ignore_index=True)
-    members = pd.concat(member_pages, ignore_index=True)
-    daily_rows = daily.to_dict("records")
-    member_rows = members.to_dict("records")
-    daily_rows = _deduplicate(daily_rows, ["date"], "date")
-    member_rows = _deduplicate(member_rows, ["date", "cmc_id"], "date + cmc_id")
     daily = pd.DataFrame(sorted(daily_rows, key=lambda row: row["date"]), columns=daily_columns)
     members = pd.DataFrame(sorted(member_rows, key=lambda row: (row["date"], row["cmc_id"])), columns=member_columns)
     return daily, members
