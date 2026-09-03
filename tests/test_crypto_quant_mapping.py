@@ -58,6 +58,17 @@ def test_override_wins_and_records_mapping_source(rules, exchange_info):
     assert row["valid_from"] == pd.Timestamp("2025-01-01")
 
 
+def test_override_missing_from_current_exchange_info_keeps_stable_contract_schema(rules, exchange_info):
+    constituents = pd.DataFrame([{"date": date(2026, 9, 1), "cmc_id": 999, "symbol": "SHIB", "name": "Shiba Inu", "weight": 1.0}])
+    override = {"cmc_id": 999, "binance_symbol": "ARCHIVEDSHIBUSDT", "valid_from": "2025-01-01"}
+    rules_with_override = MappingRules(rules.version, rules.stablecoin_symbols, rules.wrapper_symbols, [override], rules.blocked_cmc_ids)
+    mappings, issues = build_contract_mappings(constituents, exchange_info, rules_with_override, lambda *_: False)
+    assert issues.empty
+    assert list(mappings.columns) == ["cmc_id", "cmc_symbol", "cmc_name", "mapping_source", "valid_from", "valid_to", *exchange_info.columns]
+    assert mappings.iloc[0]["binance_symbol"] == "ARCHIVEDSHIBUSDT"
+    assert pd.isna(mappings.iloc[0]["onboard_date"])
+
+
 def test_same_symbol_collision_is_unresolved(rules, exchange_info):
     constituents = pd.DataFrame([{"date": date(2026, 9, 1), "cmc_id": 7, "symbol": "BTC", "name": "Bitcoin", "weight": 1.0}])
     duplicate = exchange_info.iloc[[0]].copy()
@@ -99,6 +110,13 @@ def test_historical_probe_confirms_contract_absent_from_current_exchange_info(ru
     assert mappings.iloc[0]["mapping_source"] == "historical_kline_probe"
     assert mappings.iloc[0]["valid_from"] == pd.Timestamp("2020-01-02")
     assert issues.empty
+
+
+def test_current_match_is_unresolved_when_first_observed_date_precedes_onboard_date(rules, exchange_info):
+    constituents = pd.DataFrame([{"date": date(2019, 12, 31), "cmc_id": 13, "symbol": "BTC", "name": "Bitcoin", "weight": 1.0}])
+    mappings, issues = build_contract_mappings(constituents, exchange_info, rules, lambda symbol, _: False)
+    assert mappings.empty
+    assert issues.iloc[0]["issue"] == "unresolved"
 
 
 def test_unresolved_issue_is_emitted(rules, exchange_info):

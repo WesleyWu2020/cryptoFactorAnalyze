@@ -74,6 +74,14 @@ def _empty_frames(exchange_info: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFra
     return pd.DataFrame(columns=list(dict.fromkeys(mapping_columns))), pd.DataFrame(columns=["cmc_id", "cmc_symbol", "cmc_name", "decision_date", "issue"])
 
 
+def _blank_contract(exchange_info: pd.DataFrame) -> dict[str, object]:
+    base = {column: pd.NA for column in exchange_info.columns}
+    for column in ("onboard_date", "fetched_at_utc"):
+        if column in base:
+            base[column] = pd.NaT
+    return base
+
+
 def build_contract_mappings(
     constituents: pd.DataFrame,
     exchange_info: pd.DataFrame,
@@ -98,8 +106,12 @@ def build_contract_mappings(
         override = _override_for(int(cmc_id), decision_date, rules)
         if override is not None:
             contract = exchange_info.loc[exchange_info["binance_symbol"].str.upper() == str(override["binance_symbol"]).upper()]
-            base = contract.iloc[0].to_dict() if len(contract) == 1 else {"binance_symbol": override["binance_symbol"], "base_asset": str(override["binance_symbol"]).removesuffix("USDT"), "quote_asset": "USDT", "contract_type": "PERPETUAL", "status": "UNKNOWN", "fetched_at_utc": pd.NaT}
-            base.update(override)
+            base = contract.iloc[0].to_dict() if len(contract) == 1 else _blank_contract(exchange_info)
+            if len(contract) != 1:
+                base.update({"binance_symbol": override["binance_symbol"], "base_asset": str(override["binance_symbol"]).removesuffix("USDT"), "quote_asset": "USDT", "contract_type": "PERPETUAL", "status": "UNKNOWN"})
+            for key, value in override.items():
+                if key in exchange_info.columns:
+                    base[key] = value
             base.update({"cmc_id": int(cmc_id), "cmc_symbol": symbol, "cmc_name": first.get("name", ""), "mapping_source": "explicit_override", "valid_from": pd.Timestamp(override.get("valid_from", decision_date)), "valid_to": pd.to_datetime(override.get("valid_to"), errors="coerce")})
             rows.append(base)
             continue
@@ -109,10 +121,12 @@ def build_contract_mappings(
             issue_rows.append({**issue_base, "issue": "ambiguous_current_match"})
             continue
         if len(candidates) == 1:
-            base = candidates.iloc[0].to_dict()
-            base.update({"cmc_id": int(cmc_id), "cmc_symbol": symbol, "cmc_name": first.get("name", ""), "mapping_source": "current_exchange_info", "valid_from": base.get("onboard_date", pd.NaT), "valid_to": pd.NaT})
-            rows.append(base)
-            continue
+            onboard_date = _as_date(candidates.iloc[0].get("onboard_date"))
+            if onboard_date is not None and decision_date >= onboard_date:
+                base = candidates.iloc[0].to_dict()
+                base.update({"cmc_id": int(cmc_id), "cmc_symbol": symbol, "cmc_name": first.get("name", ""), "mapping_source": "current_exchange_info", "valid_from": base.get("onboard_date", pd.NaT), "valid_to": pd.NaT})
+                rows.append(base)
+                continue
 
         contract_symbol = f"{symbol}USDT"
         if historical_probe(contract_symbol, decision_date):
