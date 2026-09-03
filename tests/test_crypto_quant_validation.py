@@ -139,17 +139,34 @@ def test_full_vs_cutoff_derived_builders_have_no_future_leak(capsys):
     march = february.copy()
     march["date"] = pd.Timestamp("2024-03-01")
     march["weight"] = [100.0 - i for i in range(50)]
+    march["cmc_id"] = range(100, 150)
+    march["symbol"] = [f"FUTURE{i:02d}" for i in range(50)]
     constituents = pd.concat([members, february, march], ignore_index=True)
 
     mappings = base["futures_contracts"]
     symbols = mappings["binance_symbol"].tolist()
-    dates = pd.date_range("2023-12-31", "2024-02-15", freq="D")
+    dates = pd.date_range("2023-12-31", "2024-03-05", freq="D")
     klines = pd.DataFrame([
         {"date": day, "symbol": symbol, "completed": True}
         for day in dates for symbol in symbols
     ])
-    funding = pd.DataFrame(columns=["funding_time", "symbol", "funding_rate"])
+    future_symbols = [f"FUTURE{i:02d}USDT" for i in range(50)]
+    klines = pd.concat([
+        klines,
+        pd.DataFrame([
+            {"date": day, "symbol": symbol, "completed": True}
+            for day in pd.date_range("2024-03-01", "2024-03-05") for symbol in future_symbols
+        ]),
+    ], ignore_index=True)
+    funding = pd.DataFrame({
+        "funding_time": pd.to_datetime(["2024-02-15 08:00", "2024-03-01 08:00"]),
+        "symbol": [symbols[0], future_symbols[0]],
+        "funding_rate": [0.0001, 0.25],
+    })
     cutoff = pd.Timestamp("2024-02-15")
+    assert pd.to_datetime(constituents["date"]).max() > cutoff
+    assert pd.to_datetime(klines["date"]).max() > cutoff
+    assert pd.to_datetime(funding["funding_time"]).max() > cutoff
     full_universe = build_monthly_universe(constituents, mappings, klines, date(2024, 1, 1), date(2024, 2, 15))
     cut_universe = build_monthly_universe(
         constituents[pd.to_datetime(constituents["date"]) <= cutoff], mappings,
@@ -162,10 +179,13 @@ def test_full_vs_cutoff_derived_builders_have_no_future_leak(capsys):
     full_p = full_panel[full_panel["date"] <= cutoff].reset_index(drop=True)
     pd.testing.assert_frame_equal(full_u, cut_universe.reset_index(drop=True), check_exact=False, atol=1e-12, rtol=0)
     pd.testing.assert_frame_equal(full_p, cut_panel.reset_index(drop=True), check_exact=False, atol=1e-12, rtol=0)
-    numeric_full = full_p.select_dtypes(include="number").to_numpy(dtype=float)
-    numeric_cut = cut_panel.select_dtypes(include="number").to_numpy(dtype=float)
-    numeric_delta = np.nan_to_num(numeric_full, nan=0.0) - np.nan_to_num(numeric_cut, nan=0.0)
-    max_abs_diff = float(np.abs(numeric_delta).max(initial=0.0))
+    def max_numeric_diff(left, right):
+        left_values = left.select_dtypes(include="number").to_numpy(dtype=float)
+        right_values = right.select_dtypes(include="number").to_numpy(dtype=float)
+        delta = np.nan_to_num(left_values, nan=0.0) - np.nan_to_num(right_values, nan=0.0)
+        return float(np.abs(delta).max(initial=0.0))
+
+    max_abs_diff = max(max_numeric_diff(full_u, cut_universe), max_numeric_diff(full_p, cut_panel))
     print(f"max_abs_diff={max_abs_diff}")
     assert max_abs_diff <= 1e-12
     assert f"max_abs_diff={max_abs_diff}" in capsys.readouterr().out
