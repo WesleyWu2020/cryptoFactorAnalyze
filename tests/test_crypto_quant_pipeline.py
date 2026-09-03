@@ -351,3 +351,60 @@ def test_funding_internal_natural_day_gap_blocks_completion(tmp_path):
     assert checkpoint["complete"] is False
     assert checkpoint["missing_date_count"] > 0
     assert metadata["last_successful_funding_time"] is None
+
+
+def test_cmc_historical_gap_survives_incremental_overlap(tmp_path):
+    class HistoricalGap(FakeCmc):
+        def fetch_history(self, start, end, on_page=None):
+            daily, members = super().fetch_history(start, end, on_page=None)
+            daily = daily[daily.date != pd.Timestamp("2024-01-10")]
+            members = members[members.date != pd.Timestamp("2024-01-10")]
+            if on_page:
+                on_page(daily, members, end)
+            return daily, members
+
+    _run(tmp_path, cmc=HistoricalGap())
+    config = _config(tmp_path)
+    CryptoQuantPipeline(config, FakeCmc(), FakeBinance()).update(datetime(2024, 2, 26, tzinfo=timezone.utc))
+    metadata = CryptoQuantStore(config.store_path).read_metadata()
+    assert metadata["last_successful_cmc_date"] == "2024-01-09"
+    assert metadata["checkpoint.cmc_through"] == "2024-01-09"
+
+
+def test_kline_historical_gap_survives_incremental_overlap(tmp_path):
+    class HistoricalGap(FakeBinance):
+        def fetch_klines(self, symbol, start, end):
+            out = super().fetch_klines(symbol, start, end)
+            if symbol == SYMBOLS[0] and start == date(2023, 7, 5):
+                out = out[out.date != pd.Timestamp("2024-01-10")]
+            return out
+
+    _run(tmp_path, binance=HistoricalGap())
+    config = _config(tmp_path)
+    CryptoQuantPipeline(config, FakeCmc(), FakeBinance()).update(datetime(2024, 2, 26, tzinfo=timezone.utc))
+    metadata = CryptoQuantStore(config.store_path).read_metadata()
+    assert metadata["last_successful_kline_date"] is None
+    assert metadata["checkpoint.klines.C00USDT"]["complete"] is False
+
+
+def test_funding_historical_gap_survives_incremental_overlap(tmp_path):
+    class HistoricalGap(FakeBinance):
+        def fetch_funding(self, symbol, start_ms, end_ms):
+            start = pd.Timestamp(start_ms, unit="ms", tz="UTC")
+            end = pd.Timestamp(end_ms, unit="ms", tz="UTC")
+            dates = [value + pd.Timedelta(hours=8) for value in pd.date_range(start.normalize(), end.normalize(), freq="D") if value.date() != date(2024, 1, 10)]
+            return pd.DataFrame([{"funding_time": value, "symbol": symbol, "funding_rate": 0.0, "mark_price": 1.0, "rate_type": "Regular"} for value in dates])
+
+    class CompleteFunding(FakeBinance):
+        def fetch_funding(self, symbol, start_ms, end_ms):
+            start = pd.Timestamp(start_ms, unit="ms", tz="UTC")
+            end = pd.Timestamp(end_ms, unit="ms", tz="UTC")
+            dates = [value + pd.Timedelta(hours=8) for value in pd.date_range(start.normalize(), end.normalize(), freq="D")]
+            return pd.DataFrame([{"funding_time": value, "symbol": symbol, "funding_rate": 0.0, "mark_price": 1.0, "rate_type": "Regular"} for value in dates])
+
+    _run(tmp_path, binance=HistoricalGap())
+    config = _config(tmp_path)
+    CryptoQuantPipeline(config, FakeCmc(), CompleteFunding()).update(datetime(2024, 2, 26, tzinfo=timezone.utc))
+    metadata = CryptoQuantStore(config.store_path).read_metadata()
+    assert metadata["last_successful_funding_time"] is None
+    assert metadata["checkpoint.funding.C00USDT"]["complete"] is False
