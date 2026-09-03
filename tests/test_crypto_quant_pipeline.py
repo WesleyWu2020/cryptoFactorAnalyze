@@ -161,7 +161,9 @@ def test_summary_does_not_report_kline_end_when_kline_coverage_is_incomplete(tmp
     summary = _run(tmp_path, binance=PartialKline())
     assert summary.last_complete_kline_date is None
     assert summary.warnings
-    assert CryptoQuantStore(_config(tmp_path).store_path).read_metadata()["validation_warnings"]
+    metadata = CryptoQuantStore(_config(tmp_path).store_path).read_metadata()
+    assert metadata["validation_warnings"]
+    assert metadata["last_complete_panel_date"] != "None"
 
 
 def test_pipeline_incremental_persistence_does_not_use_full_table_upsert(tmp_path, monkeypatch):
@@ -173,12 +175,45 @@ def test_pipeline_incremental_persistence_does_not_use_full_table_upsert(tmp_pat
 
 
 def test_mapping_issues_are_retained_in_metadata(tmp_path):
-    _run(tmp_path)
+    summary = _run(tmp_path)
     metadata = CryptoQuantStore(_config(tmp_path).store_path).read_metadata()
     issues = metadata["mapping_issues"]
     assert issues
     assert {"cmc_id", "cmc_symbol", "decision_date", "issue"}.issubset(issues[0])
     assert any(issue["issue"] == "unresolved" for issue in issues)
+    assert any("unresolved" in warning for warning in summary.warnings)
+    assert any("unresolved" in warning for warning in metadata["validation_warnings"])
+
+
+def test_rebuild_derived_does_not_reuse_expired_funding_checkpoint(tmp_path):
+    _run(tmp_path)
+    config = _config(tmp_path)
+    summary = CryptoQuantPipeline(config, FakeCmc(), FakeBinance()).rebuild_derived(
+        datetime(2024, 2, 26, 12, tzinfo=timezone.utc)
+    )
+    panel = CryptoQuantStore(config.store_path).read("research_panel_daily")
+    assert not panel["has_complete_funding"].any()
+    assert summary.last_complete_panel_date is not None
+
+
+def test_incremental_revision_of_existing_kline_key_is_persisted(tmp_path):
+    _run(tmp_path)
+
+    class Revised(FakeBinance):
+        def fetch_klines(self, symbol, start, end):
+            out = super().fetch_klines(symbol, start, end)
+            if out.empty:
+                return out
+            mask = out.date == pd.Timestamp("2024-02-20")
+            out.loc[mask, "close"] = 100.75
+            return out
+
+    config = _config(tmp_path)
+    CryptoQuantPipeline(config, FakeCmc(), Revised()).update(
+        datetime(2024, 2, 26, 12, tzinfo=timezone.utc)
+    )
+    stored = CryptoQuantStore(config.store_path).read("klines_daily")
+    assert stored.loc[(stored.symbol == SYMBOLS[0]) & (stored.date == pd.Timestamp("2024-02-20")), "close"].iloc[0] == 100.75
 
 
 def test_fingerprint_is_stable_for_relative_and_absolute_target_paths(tmp_path):

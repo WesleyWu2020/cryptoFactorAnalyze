@@ -102,7 +102,7 @@ class CryptoQuantPipeline:
                     kline_complete, funding_complete = self._fetch_binance(store, mode, cmc_end, kline_end, funding_end_ms)
             else:
                 exchange = store.read("futures_contracts")
-                funding_complete = self._funding_checkpoints_complete(store)
+                funding_complete = self._funding_checkpoints_complete(store, funding_end_ms)
 
             for name, spec in TABLE_SPECS.items():
                 if name not in store.keys():
@@ -122,7 +122,10 @@ class CryptoQuantPipeline:
             counts = {name: len(store.read(name)) for name in TABLE_SPECS}
             panel = store.read("research_panel_daily")
             complete = last_complete_panel_date(panel)
-            warnings = tuple(f"{issue.code}: {issue.detail}" for issue in report.issues if issue.level == "warning")
+            warnings_list = [f"{issue.code}: {issue.detail}" for issue in report.issues if issue.level == "warning"]
+            for issue in store.read_metadata().get("mapping_issues", []):
+                warnings_list.append(f"mapping_{issue.get('issue', 'unknown')}: cmc_id={issue.get('cmc_id')} symbol={issue.get('cmc_symbol')}")
+            warnings = tuple(warnings_list)
             symbol_status = self._symbol_status(store)
             store.write_metadata({"validation_warnings": list(warnings), "symbol_status": symbol_status})
             last_kline = _day(metadata.get("last_successful_kline_date"))
@@ -342,17 +345,37 @@ class CryptoQuantPipeline:
                 else:
                     working_funding = clean
 
-        def append_new(name: str, current: pd.DataFrame, incoming: pd.DataFrame) -> tuple[pd.DataFrame, bool]:
+        def append_new(name: str, current: pd.DataFrame, incoming: pd.DataFrame) -> tuple[pd.DataFrame, bool, bool]:
             keys = TABLE_SPECS[name].key
             incoming = incoming.drop_duplicates(keys, keep="last").reset_index(drop=True)
             if current.empty:
                 new_rows = incoming
+                revised = False
             else:
                 existing_keys = {tuple(row) for row in current[list(keys)].astype(str).itertuples(index=False, name=None)}
                 new_rows = incoming.loc[
                     [tuple(row) not in existing_keys for row in incoming[list(keys)].astype(str).itertuples(index=False, name=None)]
                 ].reset_index(drop=True)
-            return merge_working(current, incoming, name), not new_rows.empty
+                revised = False
+                business = [column for column in TABLE_SPECS[name].columns if column not in keys]
+                for row in incoming.itertuples(index=False):
+                    key = tuple(str(getattr(row, column)) for column in keys)
+                    if key not in existing_keys:
+                        continue
+                    key_mask = pd.Series(True, index=current.index)
+                    for column, value in zip(keys, key):
+                        key_mask &= current[column].astype(str).eq(value)
+                    old = current.loc[key_mask].iloc[0]
+                    for column in business:
+                        old_value, new_value = old[column], getattr(row, column)
+                        if pd.isna(old_value) and pd.isna(new_value):
+                            continue
+                        if old_value != new_value:
+                            revised = True
+                            break
+                    if revised:
+                        break
+            return merge_working(current, incoming, name), not new_rows.empty, revised
 
         def merge_working(current: pd.DataFrame, incoming: pd.DataFrame, name: str) -> pd.DataFrame:
             combined = pd.concat([current, incoming], ignore_index=True)
@@ -433,9 +456,12 @@ class CryptoQuantPipeline:
                 klines = self.binance_source.fetch_klines(symbol, kline_start, kline_end)
                 klines = self._clip_date_frame(klines, "date", kline_start, kline_end)
                 if not klines.empty:
-                    working_klines, has_new_rows = append_new("klines_daily", working_klines, klines)
+                    working_klines, has_new_rows, has_revisions = append_new("klines_daily", working_klines, klines)
                     if has_new_rows:
                         store.append("klines_daily", klines)
+                        kline_dirty = True
+                    if has_revisions:
+                        store.replace("klines_daily", working_klines)
                         kline_dirty = True
                     kline_batch_symbols.add(symbol)
                     kline_status, _ = record_coverage(symbol, support_start, True, False, False)
@@ -461,9 +487,12 @@ class CryptoQuantPipeline:
                 funding = self.binance_source.fetch_funding(symbol, funding_start, funding_end_ms)
                 funding = self._clip_funding(funding, funding_start, funding_end_ms)
                 if not funding.empty:
-                    working_funding, has_new_rows = append_new("funding_events", working_funding, funding)
+                    working_funding, has_new_rows, has_revisions = append_new("funding_events", working_funding, funding)
                     if has_new_rows:
                         store.append("funding_events", funding)
+                        funding_dirty = True
+                    if has_revisions:
+                        store.replace("funding_events", working_funding)
                         funding_dirty = True
                     funding_batch_symbols.add(symbol)
                 elif {"funding_time", "symbol", "funding_rate", "mark_price", "rate_type"}.issubset(funding.columns):
@@ -481,13 +510,14 @@ class CryptoQuantPipeline:
         return all_kline_complete, all_funding_complete
 
     @staticmethod
-    def _funding_checkpoints_complete(store: CryptoQuantStore) -> bool:
+    def _funding_checkpoints_complete(store: CryptoQuantStore, target_end_ms: int) -> bool:
         mappings = store.read("futures_contracts")
         if mappings.empty:
             return False
         metadata = store.read_metadata()
         return all(
             metadata.get(f"checkpoint.funding.{symbol}", {}).get("complete") is True
+            and int(metadata.get(f"checkpoint.funding.{symbol}", {}).get("requested_end_ms", -1)) >= target_end_ms
             for symbol in mappings["binance_symbol"].dropna().astype(str)
         )
 
@@ -548,13 +578,14 @@ class CryptoQuantPipeline:
             else:
                 column = dates[0]
                 ranges[name] = {"min": str(frame[column].min()), "max": str(frame[column].max())}
+        panel_complete = last_complete_panel_date(store.read("research_panel_daily"))
         return {
             "schema_version": 1, "pipeline_version": "task10", "rules_version": load_mapping_rules(self.config.rules_path).version,
             "source_urls": {"cmc": self.config.cmc_url, "exchange_info": self.config.exchange_info_url, "klines": self.config.klines_url, "funding": self.config.funding_url},
             "last_successful_cmc_date": cmc_watermark.isoformat() if cmc_watermark is not None else prior.get("last_successful_cmc_date"),
             "last_successful_kline_date": kline_end.isoformat() if kline_complete else prior.get("last_successful_kline_date"),
             "last_successful_funding_time": funding_end_ms if funding_complete else prior.get("last_successful_funding_time"),
-            "last_complete_panel_date": str(last_complete_panel_date(store.read("research_panel_daily"))),
+            "last_complete_panel_date": panel_complete.date().isoformat() if panel_complete is not None else None,
             "table_row_counts": {name: len(store.read(name)) for name in TABLE_SPECS}, "table_date_ranges": ranges,
             "created_at_utc": store.read_metadata().get("created_at_utc", run_at.isoformat()), "updated_at_utc": run_at.isoformat(),
         }
