@@ -1,4 +1,5 @@
 from datetime import date
+from typing import Mapping, get_type_hints
 
 import pandas as pd
 import pytest
@@ -143,6 +144,18 @@ def test_load_daily_universe_reports_missing_panel_columns(tmp_path, monkeypatch
         load_daily_universe(path, date(2024, 3, 9), date(2024, 3, 11))
 
 
+def test_load_daily_universe_rejects_empty_malformed_panel(tmp_path, monkeypatch):
+    path = _store_fixture(tmp_path)
+    original_read = CryptoQuantStore.read
+
+    def read_empty_panel(self, name, where=None):
+        return pd.DataFrame() if name == "research_panel_daily" else original_read(self, name, where=where)
+
+    monkeypatch.setattr(CryptoQuantStore, "read", read_empty_panel)
+    with pytest.raises(ValueError, match="research_panel_daily missing columns"):
+        load_daily_universe(path, date(2024, 3, 9), date(2024, 3, 11))
+
+
 def test_filter_factor_output_requires_same_day_membership_and_exact_schema():
     factors = pd.DataFrame({
         "date": ["2024-03-09 12:00", "2024-03-09", "2024-03-10", "2024-03-11"],
@@ -159,6 +172,12 @@ def test_filter_factor_output_requires_same_day_membership_and_exact_schema():
 
     assert list(out.columns) == ["date", "instrument", "factor"]
     assert out.to_dict("records") == [{"date": pd.Timestamp("2024-03-09"), "instrument": "AUSDT", "factor": 1.0}]
+
+
+def test_filter_factor_output_uses_mapping_type_contract():
+    annotation = get_type_hints(filter_factor_output)["universe_by_date"]
+
+    assert annotation == Mapping[pd.Timestamp, set[str]]
 
 
 @pytest.mark.parametrize("bad", [pd.DataFrame(), pd.DataFrame({"date": [], "instrument": []})])

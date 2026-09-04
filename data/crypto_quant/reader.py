@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from datetime import date
 from pathlib import Path
+from typing import Mapping
 
 import pandas as pd
 
@@ -92,9 +93,9 @@ def load_daily_universe(
         "research_panel_daily",
         where=f"date >= '{start_ts}' & date <= '{end_ts}'",
     )
+    _require_columns(panel, {"date", "binance_symbol", "has_complete_kline", "has_complete_funding"}, "research_panel_daily")
     if panel.empty:
         return {}
-    _require_columns(panel, {"date", "binance_symbol", "has_complete_kline", "has_complete_funding"}, "research_panel_daily")
     panel["date"] = _normalized_dates(panel["date"])
     panel = panel[panel["date"].between(start_ts, end_ts)].copy()
     panel["binance_symbol"] = panel["binance_symbol"].astype(str)
@@ -111,7 +112,7 @@ def load_daily_universe(
     return result
 
 
-def filter_factor_output(factors: pd.DataFrame, universe_by_date: dict[pd.Timestamp, set[str]]) -> pd.DataFrame:
+def filter_factor_output(factors: pd.DataFrame, universe_by_date: Mapping[pd.Timestamp, set[str]]) -> pd.DataFrame:
     """Keep factor rows whose normalized date and instrument are exact same-day members."""
     required = {"date", "instrument", "factor"}
     missing = required - set(factors.columns)
