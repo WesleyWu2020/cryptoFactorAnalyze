@@ -108,6 +108,17 @@ def test_load_market_history_empty_result_keeps_full_market_schema(tmp_path):
     assert list(out.columns) == MARKET_COLUMNS
 
 
+@pytest.mark.parametrize("missing", ["date", "open_time"])
+def test_load_market_history_reports_malformed_hdf_before_where(tmp_path, missing):
+    path = _store_fixture(tmp_path)
+    malformed = pd.DataFrame([_market_row("2024-03-10", "AUSDT")]).drop(columns=[missing])
+    with pd.HDFStore(path, mode="a") as hdf:
+        hdf.put("klines_daily", malformed, format="table", data_columns=["symbol"], index=False)
+
+    with pytest.raises(ValueError, match=f"klines_daily missing columns.*{missing}"):
+        load_market_history(path, date(2024, 3, 10), date(2024, 3, 12))
+
+
 def test_load_daily_universe_excludes_incomplete_panel_date(tmp_path):
     path = _store_fixture(tmp_path)
 

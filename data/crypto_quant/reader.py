@@ -34,15 +34,26 @@ def _require_columns(frame: pd.DataFrame, columns: set[str], context: str) -> No
         raise ValueError(f"{context} missing columns: {sorted(missing)}")
 
 
-def _require_hdf_query_columns(path: Path, table: str, columns: set[str]) -> None:
+def _require_hdf_query_columns(
+    path: Path,
+    table: str,
+    columns: set[str],
+    query_columns: set[str] | None = None,
+) -> None:
     with pd.HDFStore(path, mode="r") as hdf:
         if f"/{table}" not in hdf.keys():
             available = set()
+            queryable = set()
         else:
-            available = set(hdf.get_storer(table).queryables().keys())
+            storer = hdf.get_storer(table)
+            available = set(hdf.select(table, start=0, stop=0).columns)
+            queryable = set(storer.queryables().keys())
     missing = columns - available
     if missing:
-        raise ValueError(f"{table} missing columns required for query: {sorted(missing)}")
+        raise ValueError(f"{table} missing columns: {sorted(missing)}")
+    missing_query = (query_columns or set()) - queryable
+    if missing_query:
+        raise ValueError(f"{table} missing queryable columns required for query: {sorted(missing_query)}")
 
 
 def _membership_by_date(universe: pd.DataFrame, start: pd.Timestamp, end: pd.Timestamp) -> dict[pd.Timestamp, set[str]]:
@@ -79,6 +90,12 @@ def load_market_history(
         return pd.DataFrame(columns=_MARKET_OUTPUT_COLUMNS)
 
     kline_start = start_ts - pd.Timedelta(days=lookback_days)
+    _require_hdf_query_columns(
+        Path(path),
+        "klines_daily",
+        set(TABLE_SPECS["klines_daily"].columns),
+        {"date"},
+    )
     market = store.read(
         "klines_daily",
         where=f"date >= '{kline_start}' & date <= '{end_ts}'",
@@ -100,7 +117,7 @@ def load_daily_universe(
     start_ts, end_ts = _date_range(start, end)
     store = CryptoQuantStore(Path(path))
     expected = _membership_by_date(store.read("universe_monthly"), start_ts, end_ts)
-    _require_hdf_query_columns(Path(path), "research_panel_daily", {"date"})
+    _require_hdf_query_columns(Path(path), "research_panel_daily", {"date"}, {"date"})
     panel = store.read(
         "research_panel_daily",
         where=f"date >= '{start_ts}' & date <= '{end_ts}'",
