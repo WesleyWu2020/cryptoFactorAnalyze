@@ -11,6 +11,7 @@ from .store import CryptoQuantStore
 
 
 _MARKET_COLUMNS = [column for column in TABLE_SPECS["klines_daily"].columns if column != "symbol"]
+_MARKET_OUTPUT_COLUMNS = ["date", "instrument", *[column for column in _MARKET_COLUMNS if column != "date"]]
 
 
 def _date_range(start: date, end: date) -> tuple[pd.Timestamp, pd.Timestamp]:
@@ -22,7 +23,14 @@ def _date_range(start: date, end: date) -> tuple[pd.Timestamp, pd.Timestamp]:
 
 
 def _normalized_dates(values: pd.Series) -> pd.Series:
-    return pd.to_datetime(values, errors="raise", format="mixed", utc=True).dt.tz_localize(None).dt.normalize()
+    parsed = values.map(pd.Timestamp)
+    return pd.to_datetime(parsed, errors="raise", utc=True).dt.tz_localize(None).dt.normalize()
+
+
+def _require_columns(frame: pd.DataFrame, columns: set[str], context: str) -> None:
+    missing = columns - set(frame.columns)
+    if missing:
+        raise ValueError(f"{context} missing columns: {sorted(missing)}")
 
 
 def _membership_by_date(universe: pd.DataFrame, start: pd.Timestamp, end: pd.Timestamp) -> dict[pd.Timestamp, set[str]]:
@@ -32,7 +40,7 @@ def _membership_by_date(universe: pd.DataFrame, start: pd.Timestamp, end: pd.Tim
         raise ValueError(f"universe_monthly missing columns: {sorted(missing)}")
     data = universe.copy()
     data["_start"] = _normalized_dates(data["effective_date"])
-    data["_end"] = pd.to_datetime(data["effective_end_date"], errors="raise", format="mixed", utc=True).dt.tz_localize(None).dt.normalize()
+    data["_end"] = _normalized_dates(data["effective_end_date"])
     data["_symbol"] = data["binance_symbol"].astype(str)
     result: dict[pd.Timestamp, set[str]] = {}
     for day in pd.date_range(start, end, freq="D"):
@@ -56,15 +64,18 @@ def load_market_history(
     memberships = _membership_by_date(universe, start_ts, end_ts)
     symbols = set().union(*memberships.values()) if memberships else set()
     if not symbols:
-        return pd.DataFrame(columns=[*(_MARKET_COLUMNS[:1]), "instrument", *_MARKET_COLUMNS[2:]])
+        return pd.DataFrame(columns=_MARKET_OUTPUT_COLUMNS)
 
-    market = store.read("klines_daily")
+    kline_start = start_ts - pd.Timedelta(days=lookback_days)
+    market = store.read(
+        "klines_daily",
+        where=f"date >= '{kline_start}' & date <= '{end_ts}'",
+    )
+    _require_columns(market, set(TABLE_SPECS["klines_daily"].columns), "klines_daily")
     market["date"] = _normalized_dates(market["date"])
     market = market[market["symbol"].astype(str).isin(symbols)]
-    market = market[market["date"].between(start_ts - pd.Timedelta(days=lookback_days), end_ts)]
     market = market.rename(columns={"symbol": "instrument"})
-    columns = ["date", "instrument", *[column for column in _MARKET_COLUMNS if column != "date"]]
-    return market.loc[:, columns].sort_values(["date", "instrument"], kind="mergesort").reset_index(drop=True)
+    return market.loc[:, _MARKET_OUTPUT_COLUMNS].sort_values(["date", "instrument"], kind="mergesort").reset_index(drop=True)
 
 
 def load_daily_universe(
@@ -77,9 +88,13 @@ def load_daily_universe(
     start_ts, end_ts = _date_range(start, end)
     store = CryptoQuantStore(Path(path))
     expected = _membership_by_date(store.read("universe_monthly"), start_ts, end_ts)
-    panel = store.read("research_panel_daily")
+    panel = store.read(
+        "research_panel_daily",
+        where=f"date >= '{start_ts}' & date <= '{end_ts}'",
+    )
     if panel.empty:
         return {}
+    _require_columns(panel, {"date", "binance_symbol", "has_complete_kline", "has_complete_funding"}, "research_panel_daily")
     panel["date"] = _normalized_dates(panel["date"])
     panel = panel[panel["date"].between(start_ts, end_ts)].copy()
     panel["binance_symbol"] = panel["binance_symbol"].astype(str)
@@ -88,7 +103,9 @@ def load_daily_universe(
         rows = panel[panel["date"] == day]
         actual = set(rows["binance_symbol"]) & expected_symbols
         rows = rows[rows["binance_symbol"].isin(actual)]
-        complete = actual == expected_symbols and rows["has_complete_kline"].fillna(False).all()
+        complete = actual == expected_symbols
+        complete &= rows["has_complete_kline"].fillna(False).all()
+        complete &= rows["has_complete_funding"].fillna(False).all()
         if (not require_complete or complete) and actual:
             result[day] = actual
     return result

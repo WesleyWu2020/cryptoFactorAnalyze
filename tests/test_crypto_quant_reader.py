@@ -82,6 +82,31 @@ def test_load_market_history_uses_overlapping_memberships_and_keeps_warmup(tmp_p
     assert out[["date", "instrument"]].duplicated().sum() == 0
 
 
+def test_load_market_history_pushes_date_range_into_hdf_read(tmp_path, monkeypatch):
+    path = _store_fixture(tmp_path)
+    calls = []
+    original_read = CryptoQuantStore.read
+
+    def read_with_spy(self, name, where=None):
+        calls.append((name, where))
+        return original_read(self, name, where=where)
+
+    monkeypatch.setattr(CryptoQuantStore, "read", read_with_spy)
+    load_market_history(path, date(2024, 3, 10), date(2024, 3, 12), lookback_days=5)
+
+    kline_where = next(where for name, where in calls if name == "klines_daily")
+    assert kline_where is not None
+    assert "2024-03-05" in kline_where
+    assert "2024-03-12" in kline_where
+
+
+def test_load_market_history_empty_result_keeps_full_market_schema(tmp_path):
+    out = load_market_history(_store_fixture(tmp_path), date(2024, 2, 1), date(2024, 2, 2))
+
+    assert out.empty
+    assert list(out.columns) == MARKET_COLUMNS
+
+
 def test_load_daily_universe_excludes_incomplete_panel_date(tmp_path):
     path = _store_fixture(tmp_path)
 
@@ -91,6 +116,31 @@ def test_load_daily_universe_excludes_incomplete_panel_date(tmp_path):
     assert pd.Timestamp("2024-03-10") not in out
     assert out[pd.Timestamp("2024-03-09")] == {"AUSDT", "BUSDT"}
     assert out[pd.Timestamp("2024-03-11")] == {"CUSDT"}
+
+
+def test_load_daily_universe_requires_complete_kline_and_funding(tmp_path):
+    path = _store_fixture(tmp_path)
+    store = CryptoQuantStore(path)
+    panel = store.read("research_panel_daily")
+    panel.loc[panel["date"] == pd.Timestamp("2024-03-09"), "has_complete_funding"] = False
+    store.replace("research_panel_daily", panel)
+
+    out = load_daily_universe(path, date(2024, 3, 9), date(2024, 3, 11))
+
+    assert pd.Timestamp("2024-03-09") not in out
+
+
+def test_load_daily_universe_reports_missing_panel_columns(tmp_path, monkeypatch):
+    path = _store_fixture(tmp_path)
+    original_read = CryptoQuantStore.read
+
+    def read_missing_panel(self, name, where=None):
+        frame = original_read(self, name, where=where)
+        return frame.drop(columns=["has_complete_funding"]) if name == "research_panel_daily" else frame
+
+    monkeypatch.setattr(CryptoQuantStore, "read", read_missing_panel)
+    with pytest.raises(ValueError, match="research_panel_daily missing columns.*has_complete_funding"):
+        load_daily_universe(path, date(2024, 3, 9), date(2024, 3, 11))
 
 
 def test_filter_factor_output_requires_same_day_membership_and_exact_schema():
