@@ -57,13 +57,13 @@ def _store_config(store_path: Path) -> PipelineConfig:
     )
 
 
-def build_pipeline(store_path: Path) -> CryptoQuantPipeline:
+def build_pipeline(store_path: Path, *, cmc_keyless: bool = False) -> CryptoQuantPipeline:
     """Build all concrete sources around one shared HTTP session."""
     config = _store_config(store_path)
     session = requests.Session()
     try:
         api_key = os.environ.get("CMC_PRO_API_KEY") or os.environ.get("CMC_API_KEY")
-        if api_key:
+        if api_key and not cmc_keyless:
             session.headers.update({"X-CMC_PRO_API_KEY": api_key})
         client = JsonHttpClient(
             session,
@@ -98,6 +98,11 @@ def _parser() -> argparse.ArgumentParser:
         sub.add_argument("--as-of", type=_parse_as_of, default=None)
         sub.add_argument("--store", type=Path, default=Path("data/crypto_quant.h5"))
         sub.add_argument("--reset-staging", action="store_true")
+        sub.add_argument(
+            "--cmc-keyless",
+            action="store_true",
+            help="omit the CMC API key header and use the public endpoint",
+        )
     for command in ("validate", "inspect"):
         sub = subparsers.add_parser(command)
         sub.add_argument("--store", type=Path, default=Path("data/crypto_quant.h5"))
@@ -115,7 +120,7 @@ def _print_summary(summary) -> None:
 
 
 def _run_pipeline(args: argparse.Namespace) -> int:
-    pipeline = build_pipeline(args.store)
+    pipeline = build_pipeline(args.store, cmc_keyless=args.cmc_keyless)
     try:
         as_of = args.as_of or datetime.now(timezone.utc)
         method = getattr(pipeline, args.command.replace("-", "_"))

@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Iterator, Mapping
-from datetime import date, timedelta
+from datetime import date, datetime, time, timedelta, timezone
 from math import isfinite
 from numbers import Integral
 
@@ -12,6 +12,13 @@ from pandas.api.types import is_scalar
 from .http import JsonHttpClient
 
 CMC100_HISTORY_URL = "https://pro-api.coinmarketcap.com/public-api/v3/index/cmc100-historical"
+
+
+def _cmc_day_timestamp(value: date, *, end_of_day: bool = False) -> str:
+    day_time = time(23, 59, 59) if end_of_day else time.min
+    return datetime.combine(value, day_time, tzinfo=timezone.utc).isoformat().replace(
+        "+00:00", "Z"
+    )
 
 
 class CmcSchemaError(ValueError):
@@ -174,8 +181,8 @@ def fetch_cmc_history(
         payload = client.get_json(
             CMC100_HISTORY_URL,
             params={
-                "time_start": window_start.isoformat(),
-                "time_end": window_end.isoformat(),
+                "time_start": _cmc_day_timestamp(window_start),
+                "time_end": _cmc_day_timestamp(window_end, end_of_day=True),
                 "count": 10,
                 "interval": "daily",
             },

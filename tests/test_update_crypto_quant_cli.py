@@ -53,6 +53,20 @@ def test_backfill_command_forwards_reset_staging(monkeypatch):
     assert fake.calls[0][2] is True
 
 
+def test_update_command_supports_explicit_cmc_keyless_mode(monkeypatch):
+    fake = FakePipeline()
+    build_calls = []
+
+    def build(*args, **kwargs):
+        build_calls.append((args, kwargs))
+        return fake
+
+    monkeypatch.setattr(update_crypto_quant, "build_pipeline", build)
+
+    assert update_crypto_quant.main(["update", "--cmc-keyless"]) == 0
+    assert build_calls[0][1] == {"cmc_keyless": True}
+
+
 def test_rebuild_derived_dispatches_to_pipeline(monkeypatch):
     fake = FakePipeline()
     monkeypatch.setattr(update_crypto_quant, "build_pipeline", lambda *args, **kwargs: fake)
@@ -137,6 +151,31 @@ def test_build_pipeline_exposes_explicit_session_close(monkeypatch, tmp_path):
     assert built is pipeline
     built.close()
     assert session.closed == 1
+
+
+def test_build_pipeline_keyless_mode_does_not_send_env_api_key(
+    monkeypatch, tmp_path
+):
+    class FakeSession:
+        def __init__(self):
+            self.headers = {}
+
+        def close(self):
+            pass
+
+    session = FakeSession()
+    class FakePipelineObject:
+        pass
+
+    pipeline = FakePipelineObject()
+    monkeypatch.setenv("CMC_API_KEY", "invalid-key-from-env")
+    monkeypatch.setattr(update_crypto_quant.requests, "Session", lambda: session)
+    monkeypatch.setattr(update_crypto_quant, "CryptoQuantPipeline", lambda *args: pipeline)
+
+    built = update_crypto_quant.build_pipeline(tmp_path / "store.h5", cmc_keyless=True)
+
+    assert built is pipeline
+    assert session.headers == {}
 
 
 def test_validate_command_exits_zero_for_valid_store(monkeypatch, tmp_path):

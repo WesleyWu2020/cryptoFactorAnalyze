@@ -79,11 +79,18 @@ def test_fetch_history_calls_page_callback_after_each_valid_page(fake_client):
     assert len(daily) == 2
     assert len(members) == 6
     assert fake_client.calls[0][1] == {
-        "time_start": "2024-01-01",
-        "time_end": "2024-01-02",
+        "time_start": "2024-01-01T00:00:00Z",
+        "time_end": "2024-01-02T23:59:59Z",
         "count": 10,
         "interval": "daily",
     }
+
+
+def test_fetch_history_sends_full_utc_timestamps_for_daily_closed_window(fake_client):
+    fetch_cmc_history(fake_client, date(2024, 1, 1), date(2024, 1, 2))
+
+    assert fake_client.calls[0][1]["time_start"] == "2024-01-01T00:00:00Z"
+    assert fake_client.calls[0][1]["time_end"] == "2024-01-02T23:59:59Z"
 
 
 def test_normalize_rejects_malformed_status(fixture_payload):
