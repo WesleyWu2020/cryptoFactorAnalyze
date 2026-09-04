@@ -67,6 +67,18 @@ def test_normalize_cmc_payload_uses_update_date_and_cmc_id(fixture_payload):
     assert daily.loc[0, "source_update_time"] == pd.Timestamp("2024-01-01", tz="UTC")
 
 
+def test_normalize_cmc_payload_accepts_string_zero_status_code(fixture_payload):
+    payload = json.loads(json.dumps(fixture_payload))
+    payload["status"]["error_code"] = " 0 "
+
+    daily, members = normalize_cmc_payload(
+        payload, fetched_at=pd.Timestamp("2026-09-03T00:20:00")
+    )
+
+    assert not daily.empty
+    assert not members.empty
+
+
 def test_fetch_history_calls_page_callback_after_each_valid_page(fake_client):
     calls = []
     daily, members = fetch_cmc_history(
@@ -115,7 +127,7 @@ def test_normalize_requires_status_error_code_zero(fixture_payload, status):
         normalize_cmc_payload(payload, pd.Timestamp("2026-09-03"))
 
 
-@pytest.mark.parametrize("error_code", [False, 0.0])
+@pytest.mark.parametrize("error_code", [False, 0.0, "1", " 1 ", "not-a-code"])
 def test_normalize_requires_builtin_integer_zero_status_code(
     fixture_payload, error_code
 ):
