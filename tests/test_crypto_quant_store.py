@@ -140,6 +140,21 @@ def test_normalize_table_normalizes_cmc_id_to_integer():
     assert pd.api.types.is_integer_dtype(normalized["cmc_id"])
 
 
+def test_normalize_table_and_store_accept_empty_cmc_text_fields(tmp_path):
+    frame = pd.DataFrame([{"date": "2024-01-01", "cmc_id": 28683, "symbol": "", "name": "", "weight": 0.5}])
+
+    normalized = normalize_table("cmc100_constituents", frame)
+    assert normalized.loc[0, "symbol"] == ""
+    assert normalized.loc[0, "name"] == ""
+
+    store = CryptoQuantStore(tmp_path / "cmc.h5")
+    store.upsert("cmc100_constituents", frame)
+    stored = store.read("cmc100_constituents")
+    assert stored.loc[0, "cmc_id"] == 28683
+    assert stored.loc[0, "symbol"] == ""
+    assert stored.loc[0, "name"] == ""
+
+
 def test_normalize_table_rejects_non_boolean_text_and_non_integral_cmc_id():
     panel = pd.DataFrame([{column: 1 for column in TABLE_SPECS["research_panel_daily"].columns}])
     panel["date"] = "2026-09-01"

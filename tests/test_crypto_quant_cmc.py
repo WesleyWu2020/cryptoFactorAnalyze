@@ -97,6 +97,34 @@ def test_normalize_cmc_payload_accepts_keyless_cmc100_shape():
     assert set(members["cmc_id"]) == set(range(1, 101))
 
 
+@pytest.mark.parametrize("field, value", [("symbol", None), ("name", None), ("symbol", ""), ("name", "")])
+def test_normalize_cmc_payload_preserves_real_cmc100_missing_text_shape(field, value):
+    payload = {
+        "status": {"error_code": 0},
+        "data": [
+            {
+                "value": 100.0,
+                "update_time": "2024-01-01T00:00:00.000Z",
+                "constituents": [
+                    {
+                        "id": 28683,
+                        "name": "Coin 28683",
+                        "symbol": "C28683",
+                        "weight": 0.01,
+                    }
+                ],
+            }
+        ],
+    }
+    payload["data"][0]["constituents"][0][field] = value
+
+    _, members = normalize_cmc_payload(payload, pd.Timestamp("2026-09-03"))
+
+    assert len(members) == 1
+    assert members.loc[0, "cmc_id"] == 28683
+    assert members.loc[0, field] == ""
+
+
 def test_normalize_cmc_payload_accepts_string_zero_status_code(fixture_payload):
     payload = json.loads(json.dumps(fixture_payload))
     payload["status"]["error_code"] = " 0 "
@@ -196,10 +224,10 @@ def test_normalize_rejects_nonfinite_point_value(fixture_payload):
         normalize_cmc_payload(payload, pd.Timestamp("2026-09-03"))
 
 
-@pytest.mark.parametrize("field", ["symbol", "name"])
-def test_normalize_rejects_empty_text_fields(fixture_payload, field):
+@pytest.mark.parametrize("field, value", [("symbol", 123), ("name", 123)])
+def test_normalize_rejects_non_string_text_fields(fixture_payload, field, value):
     payload = json.loads(json.dumps(fixture_payload))
-    payload["data"][0]["constituents"][0][field] = ""
+    payload["data"][0]["constituents"][0][field] = value
     with pytest.raises(CmcSchemaError, match=field):
         normalize_cmc_payload(payload, pd.Timestamp("2026-09-03"))
 

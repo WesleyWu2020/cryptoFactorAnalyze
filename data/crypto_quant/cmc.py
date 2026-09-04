@@ -76,8 +76,12 @@ def _int(value: object, field: str) -> int:
 
 
 def _text(value: object, field: str) -> str:
-    if not isinstance(value, str) or not value.strip():
-        raise CmcSchemaError(f"invalid {field}: must be a non-empty string")
+    if value is None:
+        return ""
+    if not isinstance(value, str):
+        raise CmcSchemaError(f"invalid {field}: must be a string or null")
+    if not value.strip():
+        return ""
     return value
 
 
