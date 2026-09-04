@@ -157,3 +157,115 @@ def test_completed_requires_strict_boolean_true(synthetic_inputs):
     klines.loc[(klines["symbol"] == "C1USDT") & (klines["date"] == pd.Timestamp("2023-12-31")), "completed"] = "False"
     out = build_monthly_universe(constituents, mappings, klines, date(2024, 1, 1), date(2024, 1, 31))
     assert "C1USDT" not in set(out["binance_symbol"])
+
+
+def test_uses_first_available_cmc_snapshot_in_october_and_delays_effective_date(synthetic_inputs):
+    constituents, mappings, klines = synthetic_inputs
+    october = constituents.copy()
+    october["date"] = date(2024, 10, 2)
+    october["weight"] = october["weight"] + 1_000
+    november = constituents.copy()
+    november["date"] = date(2024, 11, 1)
+    klines = pd.concat(
+        [
+            klines,
+            pd.DataFrame(
+                [
+                    {"date": timestamp, "symbol": symbol, "completed": True}
+                    for timestamp in (pd.Timestamp("2024-10-01"), pd.Timestamp("2024-10-31"))
+                    for symbol in mappings["binance_symbol"]
+                ]
+            ),
+        ],
+        ignore_index=True,
+    )
+
+    out = build_monthly_universe(
+        pd.concat([constituents, october, november], ignore_index=True),
+        mappings,
+        klines,
+        date(2024, 10, 1),
+        date(2024, 11, 30),
+        top_n=2,
+    )
+
+    october_rows = out[out["decision_date"] == pd.Timestamp("2024-10-02")]
+    assert len(october_rows) == 2
+    assert out["decision_date"].tolist() == [
+        pd.Timestamp("2024-10-02"), pd.Timestamp("2024-10-02"),
+        pd.Timestamp("2024-11-01"), pd.Timestamp("2024-11-01"),
+    ]
+    assert october_rows["effective_date"].eq(pd.Timestamp("2024-10-03")).all()
+    assert october_rows["effective_end_date"].eq(pd.Timestamp("2024-10-31")).all()
+    assert not out["effective_date"].eq(pd.Timestamp("2024-10-02")).any()
+
+
+def test_uses_september_2025_snapshot_on_september_2(synthetic_inputs):
+    constituents, mappings, klines = synthetic_inputs
+    september = constituents.copy()
+    september["date"] = date(2025, 9, 2)
+    september["weight"] = september["weight"] + 1_000
+    klines = pd.concat(
+        [
+            klines,
+            pd.DataFrame(
+                [
+                    {"date": pd.Timestamp("2025-09-01"), "symbol": symbol, "completed": True}
+                    for symbol in mappings["binance_symbol"]
+                ]
+            ),
+        ],
+        ignore_index=True,
+    )
+
+    out = build_monthly_universe(
+        september, mappings, klines, date(2025, 9, 1), date(2025, 9, 30), top_n=2
+    )
+
+    assert out["decision_date"].eq(pd.Timestamp("2025-09-02")).all()
+    assert out["effective_date"].eq(pd.Timestamp("2025-09-03")).all()
+
+
+def test_october_snapshot_cannot_change_universe_before_its_decision(synthetic_inputs):
+    constituents, mappings, klines = synthetic_inputs
+    september = constituents.copy()
+    september["date"] = date(2024, 9, 1)
+    october = constituents.copy()
+    october["date"] = date(2024, 10, 2)
+    october["weight"] = 0
+    october.loc[october["cmc_id"] == 55, "weight"] = 2
+    october.loc[october["cmc_id"] == 56, "weight"] = 1
+    klines = pd.concat(
+        [
+            klines,
+            pd.DataFrame(
+                [
+                    {"date": timestamp, "symbol": symbol, "completed": True}
+                    for timestamp in (
+                        pd.Timestamp("2024-08-31"),
+                        pd.Timestamp("2024-09-30"),
+                        pd.Timestamp("2024-10-01"),
+                    )
+                    for symbol in mappings["binance_symbol"]
+                ]
+            ),
+        ],
+        ignore_index=True,
+    )
+
+    out = build_monthly_universe(
+        pd.concat([september, october], ignore_index=True),
+        mappings,
+        klines,
+        date(2024, 9, 1),
+        date(2024, 10, 31),
+        top_n=2,
+    )
+
+    prior = out[out["decision_date"] == pd.Timestamp("2024-09-01")]
+    later = out[out["decision_date"] == pd.Timestamp("2024-10-02")]
+    assert set(prior["cmc_id"]) == {1, 2}
+    assert prior["effective_date"].eq(pd.Timestamp("2024-09-02")).all()
+    assert prior["effective_end_date"].eq(pd.Timestamp("2024-10-01")).all()
+    assert set(later["cmc_id"]) == {55, 56}
+    assert later["effective_date"].eq(pd.Timestamp("2024-10-03")).all()

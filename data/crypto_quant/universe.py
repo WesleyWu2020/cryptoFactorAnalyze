@@ -63,8 +63,19 @@ def build_monthly_universe(
     completed_keys = kline_data[["_date", "symbol"]].drop_duplicates()
 
     accepted_months: list[pd.DataFrame] = []
-    for decision_date in _month_starts(start, end):
-        snapshot = member_data[member_data["_date"] == decision_date].copy()
+    for nominal_month_start in _month_starts(start, end):
+        next_month_start = nominal_month_start + pd.offsets.MonthBegin(1)
+        snapshot_dates = member_data.loc[
+            (member_data["_date"] >= nominal_month_start)
+            & (member_data["_date"] < next_month_start),
+            "_date",
+        ]
+        if snapshot_dates.empty:
+            decision_date = nominal_month_start
+            snapshot = member_data.iloc[0:0].copy()
+        else:
+            decision_date = snapshot_dates.min()
+            snapshot = member_data[member_data["_date"] == decision_date].copy()
         if snapshot.empty:
             eligible = snapshot
         else:
