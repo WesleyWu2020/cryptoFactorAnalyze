@@ -1,5 +1,9 @@
 # cryptoFactorAnalyze
 
+## Crypto Market-Cap Top50 Data Pipeline
+
+The point-in-time CoinMarketCap/Binance Top50 workflow and its maintenance commands are documented in [docs/crypto_quant_data.md](docs/crypto_quant_data.md).
+
 1. first run /data/list.py to get the largest top 50 coin in binance.
 
 2. second run /data/capture_data.py to get the latest k-line data.
