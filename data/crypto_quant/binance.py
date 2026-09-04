@@ -100,7 +100,7 @@ def fetch_funding_events(client: JsonHttpClient, symbol: str, start_ms: int, end
         page = client.get_json(BINANCE_FUNDING_URL, params={"symbol": symbol, "startTime": cursor, "endTime": end_ms, "limit": 1000})
         if not page:
             break
-        rows.extend({"symbol": item.get("symbol", symbol), "funding_time": _datetime_from_ms(item["fundingTime"]), "funding_rate": float(item["fundingRate"]), "mark_price": float(item["markPrice"]) if item.get("markPrice") is not None else float("nan"), "rate_type": item.get("rateType") or "Regular"} for item in page)
+        rows.extend({"symbol": item.get("symbol", symbol), "funding_time": _datetime_from_ms(item["fundingTime"]), "funding_rate": float(item["fundingRate"]), "mark_price": float(item["markPrice"]) if item.get("markPrice") not in (None, "") else float("nan"), "rate_type": item.get("rateType") or "Regular"} for item in page)
         if len(page) < 1000:
             break
         next_cursor = int(page[-1]["fundingTime"]) + 1

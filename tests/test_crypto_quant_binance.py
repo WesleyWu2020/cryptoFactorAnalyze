@@ -124,6 +124,32 @@ def test_funding_pagination_advances_one_millisecond_and_normalizes_type(funding
     assert pd.isna(out.loc[out["rate_type"] == "Regular", "mark_price"]).all()
 
 
+def test_funding_empty_mark_price_is_nan_and_missing_rate_type_defaults_regular():
+    client = SequentialClient([[{
+        "symbol": "BTCUSDT",
+        "fundingRate": "0.00010000",
+        "fundingTime": 1704067200000,
+        "markPrice": "",
+    }]])
+
+    out = fetch_funding_events(client, "BTCUSDT", 1704067200000, 1704153600000)
+
+    assert pd.isna(out.loc[0, "mark_price"])
+    assert out.loc[0, "rate_type"] == "Regular"
+
+
+def test_funding_nonempty_invalid_mark_price_still_raises():
+    client = SequentialClient([[{
+        "symbol": "BTCUSDT",
+        "fundingRate": "0.00010000",
+        "fundingTime": 1704067200000,
+        "markPrice": "not-a-number",
+    }]])
+
+    with pytest.raises(ValueError):
+        fetch_funding_events(client, "BTCUSDT", 1704067200000, 1704153600000)
+
+
 def test_funding_empty_result_has_stable_dtypes():
     client = SequentialClient([[]])
     out = fetch_funding_events(client, "BTCUSDT", 1704067200000, 1704153600000)
