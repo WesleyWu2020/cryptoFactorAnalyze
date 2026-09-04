@@ -11,9 +11,6 @@ data/                        # 数据获取与预处理
   update_crypto_quant.py     # CryptoQuant 数据管线统一入口
   crypto_quant/              # 数据抓取、映射、存储与校验模块
   crypto_quant.h5            # CryptoQuant 生成数据
-  factor_data/               # 因子 CSV 输出目录（date/instrument/factor）
-  kline_data/                # K 线 CSV 主文件（增量复用，不每日新建）
-  indicator/                 # 指标中间产物
 
 factor_analyse/              # 因子分析主流程
   main.py                    # 报告生成入口：python factor_analyse/main.py <factor_type>
