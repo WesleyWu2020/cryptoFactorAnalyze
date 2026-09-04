@@ -1,8 +1,7 @@
 from __future__ import annotations
 
-from datetime import timezone
+from datetime import datetime, timezone
 from pathlib import Path
-from time import time
 
 import pytest
 
@@ -63,14 +62,44 @@ def test_rebuild_derived_dispatches_to_pipeline(monkeypatch):
     assert fake.closed == 1
 
 
-def test_default_as_of_is_aware_current_utc(monkeypatch):
+def test_default_as_of_uses_injected_utc_clock(monkeypatch):
     fake = FakePipeline()
+    fixed_now = datetime(2026, 9, 4, 1, 2, 3, 456789, tzinfo=timezone.utc)
+
+    class FixedDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return fixed_now if tz is not None else fixed_now.replace(tzinfo=None)
+
+    monkeypatch.setattr(update_crypto_quant, "datetime", FixedDateTime)
     monkeypatch.setattr(update_crypto_quant, "build_pipeline", lambda *args, **kwargs: fake)
 
     assert update_crypto_quant.main(["update"]) == 0
     as_of = fake.calls[0][1]
-    assert as_of.tzinfo == timezone.utc
-    assert abs(as_of.timestamp() - time()) < 2
+    assert as_of == fixed_now
+
+
+@pytest.mark.parametrize("component", ["JsonHttpClient", "_CmcSource", "_BinanceSource", "CryptoQuantPipeline"])
+def test_build_pipeline_closes_session_when_construction_fails(monkeypatch, tmp_path, component):
+    class FakeSession:
+        def __init__(self):
+            self.headers = {}
+            self.closed = 0
+
+        def close(self):
+            self.closed += 1
+
+    session = FakeSession()
+
+    def fail(*args, **kwargs):
+        raise RuntimeError(f"{component} failed")
+
+    monkeypatch.setattr(update_crypto_quant.requests, "Session", lambda: session)
+    monkeypatch.setattr(update_crypto_quant, component, fail)
+
+    with pytest.raises(RuntimeError, match="failed"):
+        update_crypto_quant.build_pipeline(tmp_path / "store.h5")
+    assert session.closed == 1
 
 
 def test_runtime_exception_returns_one_and_closes_pipeline(monkeypatch, capsys):

@@ -61,23 +61,23 @@ def build_pipeline(store_path: Path) -> CryptoQuantPipeline:
     """Build all concrete sources around one shared HTTP session."""
     config = _store_config(store_path)
     session = requests.Session()
-    api_key = os.environ.get("CMC_PRO_API_KEY") or os.environ.get("CMC_API_KEY")
-    if api_key:
-        session.headers.update({"X-CMC_PRO_API_KEY": api_key})
-    client = JsonHttpClient(
-        session,
-        timeout=config.request_timeout_seconds,
-        max_attempts=config.max_attempts,
-        base_backoff=config.base_backoff_seconds,
-        max_backoff=config.max_backoff_seconds,
-    )
     try:
+        api_key = os.environ.get("CMC_PRO_API_KEY") or os.environ.get("CMC_API_KEY")
+        if api_key:
+            session.headers.update({"X-CMC_PRO_API_KEY": api_key})
+        client = JsonHttpClient(
+            session,
+            timeout=config.request_timeout_seconds,
+            max_attempts=config.max_attempts,
+            base_backoff=config.base_backoff_seconds,
+            max_backoff=config.max_backoff_seconds,
+        )
         pipeline = CryptoQuantPipeline(config, _CmcSource(client), _BinanceSource(client))
+        pipeline.close = session.close  # type: ignore[attr-defined]
+        return pipeline
     except Exception:
         session.close()
         raise
-    pipeline.close = session.close  # type: ignore[attr-defined]
-    return pipeline
 
 
 def _parse_as_of(value: str) -> datetime:
