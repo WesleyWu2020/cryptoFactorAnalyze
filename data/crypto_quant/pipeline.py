@@ -576,7 +576,13 @@ class CryptoQuantPipeline:
         current_symbols = None
         current_observed = None
         today = datetime.now(timezone.utc).date()
-        latest_decision = pd.Timestamp(cmc_end).to_period("M").start_time.date()
+        month_start = pd.Timestamp(cmc_end).to_period("M").start_time
+        next_month_start = month_start + pd.offsets.MonthBegin(1)
+        constituent_dates = pd.to_datetime(constituents["date"], errors="coerce").dt.normalize()
+        latest_snapshot = constituent_dates[
+            (constituent_dates >= month_start) & (constituent_dates < next_month_start)
+        ]
+        latest_decision = _day(latest_snapshot.min()) or month_start.date()
         if cmc_end == today and latest_decision == cmc_end:
             current_symbols = set(mappings.loc[mappings["status"].astype(str).str.upper() == "TRADING", "binance_symbol"])
             current_observed = cmc_end

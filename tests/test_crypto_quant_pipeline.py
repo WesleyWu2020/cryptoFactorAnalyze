@@ -6,6 +6,7 @@ import hashlib
 import pandas as pd
 import pytest
 
+from data.crypto_quant import pipeline as pipeline_module
 from data.crypto_quant.config import PipelineConfig
 from data.crypto_quant.http import HttpRequestError
 from data.crypto_quant.pipeline import CryptoQuantPipeline, RunSummary
@@ -364,6 +365,38 @@ def test_first_decision_uses_2023_12_31_kline_and_activates_2024_01_02(tmp_path)
     assert any(symbol == SYMBOLS[0] and start <= date(2023, 12, 31) <= end for symbol, start, end in binance.kline_requests)
     universe = CryptoQuantStore(tmp_path / "data" / "crypto_quant.h5").read("universe_monthly")
     assert universe["effective_date"].min() == pd.Timestamp("2024-01-02")
+
+
+def test_delayed_current_snapshot_uses_current_status_filter(tmp_path, monkeypatch):
+    config = _config(tmp_path)
+    object.__setattr__(config, "universe_start", date(2025, 9, 1))
+    object.__setattr__(config, "top_n", 2)
+    store = CryptoQuantStore(config.store_path)
+    _, constituents = _cmc_frame()
+    constituents["date"] = pd.Timestamp("2025-09-02")
+    mappings = FakeBinance().fetch_exchange_info()
+    mappings["cmc_id"] = range(1, len(mappings) + 1)
+    mappings["cmc_symbol"] = mappings["base_asset"]
+    mappings["mapping_source"] = "test"
+    mappings["valid_from"] = pd.Timestamp("2020-01-01")
+    mappings["valid_to"] = pd.NaT
+    mappings.loc[mappings["binance_symbol"] == SYMBOLS[0], "status"] = "BREAK"
+    store.replace("cmc100_constituents", constituents)
+    store.replace("futures_contracts", mappings)
+    store.replace("klines_daily", _klines(start=date(2025, 9, 1), end=date(2025, 9, 3)))
+
+    class CurrentDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(2025, 9, 2, tzinfo=tz)
+
+    monkeypatch.setattr(pipeline_module, "datetime", CurrentDateTime)
+    CryptoQuantPipeline(config, FakeCmc(), FakeBinance())._build_derived(
+        store, date(2025, 9, 2), date(2025, 9, 3), True
+    )
+
+    universe = store.read("universe_monthly")
+    assert set(universe["binance_symbol"]) == {SYMBOLS[1], SYMBOLS[2]}
 
 
 def test_month_start_creates_t_plus_one_membership(tmp_path):

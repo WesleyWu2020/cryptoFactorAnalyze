@@ -166,6 +166,9 @@ def test_uses_first_available_cmc_snapshot_in_october_and_delays_effective_date(
     october["weight"] = october["weight"] + 1_000
     november = constituents.copy()
     november["date"] = date(2024, 11, 1)
+    later_october = constituents.copy()
+    later_october["date"] = date(2024, 10, 15)
+    later_october["weight"] = later_october["weight"] + 2_000
     klines = pd.concat(
         [
             klines,
@@ -181,7 +184,7 @@ def test_uses_first_available_cmc_snapshot_in_october_and_delays_effective_date(
     )
 
     out = build_monthly_universe(
-        pd.concat([constituents, october, november], ignore_index=True),
+        pd.concat([constituents, october, later_october, november], ignore_index=True),
         mappings,
         klines,
         date(2024, 10, 1),
@@ -191,6 +194,7 @@ def test_uses_first_available_cmc_snapshot_in_october_and_delays_effective_date(
 
     october_rows = out[out["decision_date"] == pd.Timestamp("2024-10-02")]
     assert len(october_rows) == 2
+    assert october_rows["decision_date"].eq(pd.Timestamp("2024-10-02")).all()
     assert out["decision_date"].tolist() == [
         pd.Timestamp("2024-10-02"), pd.Timestamp("2024-10-02"),
         pd.Timestamp("2024-11-01"), pd.Timestamp("2024-11-01"),
