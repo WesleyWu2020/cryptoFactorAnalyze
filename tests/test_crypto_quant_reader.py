@@ -156,6 +156,25 @@ def test_load_daily_universe_rejects_empty_malformed_panel(tmp_path, monkeypatch
         load_daily_universe(path, date(2024, 3, 9), date(2024, 3, 11))
 
 
+def test_load_daily_universe_reports_missing_date_before_hdf_where(tmp_path):
+    path = _store_fixture(tmp_path)
+    with pd.HDFStore(path, mode="a") as hdf:
+        hdf.put(
+            "research_panel_daily",
+            pd.DataFrame({
+                "binance_symbol": ["AUSDT"],
+                "has_complete_kline": [True],
+                "has_complete_funding": [True],
+            }),
+            format="table",
+            data_columns=["binance_symbol"],
+            index=False,
+        )
+
+    with pytest.raises(ValueError, match="research_panel_daily missing columns.*date"):
+        load_daily_universe(path, date(2024, 3, 9), date(2024, 3, 11))
+
+
 def test_filter_factor_output_requires_same_day_membership_and_exact_schema():
     factors = pd.DataFrame({
         "date": ["2024-03-09 12:00", "2024-03-09", "2024-03-10", "2024-03-11"],

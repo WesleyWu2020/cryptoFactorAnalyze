@@ -34,6 +34,17 @@ def _require_columns(frame: pd.DataFrame, columns: set[str], context: str) -> No
         raise ValueError(f"{context} missing columns: {sorted(missing)}")
 
 
+def _require_hdf_query_columns(path: Path, table: str, columns: set[str]) -> None:
+    with pd.HDFStore(path, mode="r") as hdf:
+        if f"/{table}" not in hdf.keys():
+            available = set()
+        else:
+            available = set(hdf.get_storer(table).queryables().keys())
+    missing = columns - available
+    if missing:
+        raise ValueError(f"{table} missing columns required for query: {sorted(missing)}")
+
+
 def _membership_by_date(universe: pd.DataFrame, start: pd.Timestamp, end: pd.Timestamp) -> dict[pd.Timestamp, set[str]]:
     required = {"effective_date", "effective_end_date", "binance_symbol"}
     missing = required - set(universe.columns)
@@ -89,6 +100,7 @@ def load_daily_universe(
     start_ts, end_ts = _date_range(start, end)
     store = CryptoQuantStore(Path(path))
     expected = _membership_by_date(store.read("universe_monthly"), start_ts, end_ts)
+    _require_hdf_query_columns(Path(path), "research_panel_daily", {"date"})
     panel = store.read(
         "research_panel_daily",
         where=f"date >= '{start_ts}' & date <= '{end_ts}'",
