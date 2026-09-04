@@ -136,11 +136,8 @@ def normalize_cmc_payload(
             symbol = _text(item.get("symbol"), "symbol")
             name = _text(item.get("name"), "name")
             weight = _float(item.get("weight"), "weight")
-            constituent_value = _float(item.get("value"), "value")
             if point_time is None:
                 point_time = item.get("update_time")
-            if point_value is None:
-                point_value = constituent_value
             member_rows.append({
                 "date": source_time.date(),
                 "cmc_id": cmc_id,

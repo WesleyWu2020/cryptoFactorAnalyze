@@ -2,6 +2,8 @@
   "status": {"error_code": 0},
   "data": [
     {
+      "value": 100.0,
+      "update_time": "2024-01-01T00:00:00.000Z",
       "constituents": [
         {"id": 1, "name": "Bitcoin", "symbol": "BTC", "weight": 0.5, "update_time": "2024-01-01T00:00:00.000Z", "value": 100.0},
         {"id": 2, "name": "Ether", "symbol": "ETH", "weight": 0.3, "update_time": "2024-01-01T00:00:00.000Z", "value": 100.0},
@@ -9,6 +11,8 @@
       ]
     },
     {
+      "value": 101.0,
+      "update_time": "2024-01-02T00:00:00.000Z",
       "constituents": [
         {"id": 1, "name": "Bitcoin", "symbol": "BTC", "weight": 0.4, "update_time": "2024-01-02T00:00:00.000Z", "value": 101.0},
         {"id": 2, "name": "Ether", "symbol": "ETH", "weight": 0.35, "update_time": "2024-01-02T00:00:00.000Z", "value": 101.0},

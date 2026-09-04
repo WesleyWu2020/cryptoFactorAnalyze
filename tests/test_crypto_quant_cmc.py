@@ -67,6 +67,36 @@ def test_normalize_cmc_payload_uses_update_date_and_cmc_id(fixture_payload):
     assert daily.loc[0, "source_update_time"] == pd.Timestamp("2024-01-01", tz="UTC")
 
 
+def test_normalize_cmc_payload_accepts_keyless_cmc100_shape():
+    payload = {
+        "status": {"error_code": "0"},
+        "data": [
+            {
+                "value": "100.00",
+                "update_time": "2024-01-01T00:00:00.000Z",
+                "constituents": [
+                    {
+                        "id": cmc_id,
+                        "name": f"Coin {cmc_id}",
+                        "symbol": f"C{cmc_id}",
+                        "url": [f"https://coinmarketcap.com/currencies/c{cmc_id}/"],
+                        "weight": 0.01,
+                    }
+                    for cmc_id in range(1, 101)
+                ],
+            }
+        ],
+    }
+
+    daily, members = normalize_cmc_payload(
+        payload, fetched_at=pd.Timestamp("2026-09-03T00:20:00")
+    )
+
+    assert daily.loc[0, "index_value"] == 100.0
+    assert len(members) == 100
+    assert set(members["cmc_id"]) == set(range(1, 101))
+
+
 def test_normalize_cmc_payload_accepts_string_zero_status_code(fixture_payload):
     payload = json.loads(json.dumps(fixture_payload))
     payload["status"]["error_code"] = " 0 "
@@ -159,9 +189,9 @@ def test_normalize_rejects_nonfinite_weight(fixture_payload, field, value):
         normalize_cmc_payload(payload, pd.Timestamp("2026-09-03"))
 
 
-def test_normalize_rejects_nonfinite_value(fixture_payload):
+def test_normalize_rejects_nonfinite_point_value(fixture_payload):
     payload = json.loads(json.dumps(fixture_payload))
-    payload["data"][0]["constituents"][0]["value"] = float("nan")
+    payload["data"][0]["value"] = float("nan")
     with pytest.raises(CmcSchemaError, match="value"):
         normalize_cmc_payload(payload, pd.Timestamp("2026-09-03"))
 
@@ -214,10 +244,26 @@ def test_normalize_rejects_missing_constituents(fixture_payload):
         normalize_cmc_payload(payload, pd.Timestamp("2026-09-03"))
 
 
+def test_normalize_rejects_missing_point_value(fixture_payload):
+    payload = json.loads(json.dumps(fixture_payload))
+    payload["data"][0].pop("value")
+    with pytest.raises(CmcSchemaError, match="value"):
+        normalize_cmc_payload(payload, pd.Timestamp("2026-09-03"))
+
+
 def test_normalize_rejects_conflicting_duplicate_date_and_cmc_id(fixture_payload):
     first = fixture_payload["data"][0]["constituents"][0]
     duplicate = {**first, "weight": 0.9}
-    payload = {**fixture_payload, "data": [{"constituents": [first, duplicate]}]}
+    payload = {
+        **fixture_payload,
+        "data": [
+            {
+                "value": fixture_payload["data"][0]["value"],
+                "update_time": fixture_payload["data"][0]["update_time"],
+                "constituents": [first, duplicate],
+            }
+        ],
+    }
     with pytest.raises(CmcSchemaError, match="duplicate"):
         normalize_cmc_payload(payload, pd.Timestamp("2026-09-03"))
 
