@@ -7,6 +7,7 @@ import pandas as pd
 import pytest
 
 from data.crypto_quant.config import PipelineConfig
+from data.crypto_quant.http import HttpRequestError
 from data.crypto_quant.pipeline import CryptoQuantPipeline, RunSummary
 from data.crypto_quant.store import CryptoQuantStore
 from data.crypto_quant.universe import UniverseBuildError
@@ -212,6 +213,49 @@ def test_mapping_issues_are_retained_in_metadata(tmp_path):
     assert any(issue["issue"] == "unresolved" for issue in issues)
     assert any("unresolved" in warning for warning in summary.warnings)
     assert any("unresolved" in warning for warning in metadata["validation_warnings"])
+
+
+def test_invalid_symbol_historical_probe_is_unresolved_and_does_not_abort(tmp_path):
+    config = _config(tmp_path)
+    store = CryptoQuantStore(config.store_path)
+    store.replace("cmc100_constituents", pd.DataFrame([
+        {"date": date(2020, 1, 2), "cmc_id": 1, "symbol": "INVALID", "name": "Invalid", "weight": 0.5},
+        {"date": date(2020, 1, 2), "cmc_id": 2, "symbol": "VALID", "name": "Valid", "weight": 0.5},
+    ]))
+
+    class ProbeBinance:
+        def fetch_klines(self, symbol, start, end):
+            if symbol == "INVALIDUSDT":
+                raise HttpRequestError("HTTP 400 for Binance klines", binance_code=-1121)
+            return _klines([symbol], start, end)
+
+    pipeline = CryptoQuantPipeline(config, FakeCmc(), ProbeBinance())
+    mappings, issues = pipeline._map_contracts(store, pd.DataFrame(columns=[
+        "binance_symbol", "base_asset", "quote_asset", "contract_type",
+        "onboard_date", "status", "fetched_at_utc",
+    ]))
+
+    assert list(mappings["cmc_symbol"]) == ["VALID"]
+    assert issues.loc[issues["cmc_symbol"] == "INVALID", "issue"].iloc[0] == "unresolved"
+
+
+def test_non_invalid_symbol_probe_error_still_propagates(tmp_path):
+    config = _config(tmp_path)
+    store = CryptoQuantStore(config.store_path)
+    store.replace("cmc100_constituents", pd.DataFrame([
+        {"date": date(2020, 1, 2), "cmc_id": 1, "symbol": "BROKEN", "name": "Broken", "weight": 1.0},
+    ]))
+
+    class ProbeBinance:
+        def fetch_klines(self, symbol, start, end):
+            raise HttpRequestError("HTTP 503 from Binance")
+
+    pipeline = CryptoQuantPipeline(config, FakeCmc(), ProbeBinance())
+    with pytest.raises(HttpRequestError, match="HTTP 503"):
+        pipeline._map_contracts(store, pd.DataFrame(columns=[
+            "binance_symbol", "base_asset", "quote_asset", "contract_type",
+            "onboard_date", "status", "fetched_at_utc",
+        ]))
 
 
 def test_rebuild_derived_does_not_reuse_expired_funding_checkpoint(tmp_path):

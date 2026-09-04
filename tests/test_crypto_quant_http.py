@@ -56,9 +56,10 @@ def test_retries_500_then_succeeds():
 
 
 def test_does_not_retry_400():
-    client = JsonHttpClient(FakeSession([FakeResponse(400, {"error": "bad"})]), max_attempts=3)
-    with pytest.raises(HttpRequestError, match="HTTP 400"):
+    client = JsonHttpClient(FakeSession([FakeResponse(400, {"code": -1121, "msg": "Invalid symbol."})]), max_attempts=3)
+    with pytest.raises(HttpRequestError, match="HTTP 400") as exc_info:
         client.get_json("https://example.test")
+    assert exc_info.value.binance_code == -1121
 
 
 def test_rejects_non_json_success():

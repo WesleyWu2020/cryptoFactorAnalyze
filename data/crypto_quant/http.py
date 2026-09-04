@@ -11,6 +11,10 @@ import requests
 class HttpRequestError(RuntimeError):
     """Raised when an HTTP request cannot produce a JSON response."""
 
+    def __init__(self, message: str, *, binance_code: int | None = None) -> None:
+        super().__init__(message)
+        self.binance_code = binance_code
+
 
 class JsonHttpClient:
     def __init__(
@@ -69,9 +73,21 @@ class JsonHttpClient:
 
             retryable = status == 429 or 500 <= status < 600
             if not retryable or attempt == self.max_attempts - 1:
+                binance_code = None
+                try:
+                    payload = response.json()
+                except ValueError:
+                    payload = None
+                if isinstance(payload, Mapping):
+                    raw_code = payload.get("code")
+                    try:
+                        binance_code = int(raw_code) if raw_code is not None else None
+                    except (TypeError, ValueError):
+                        binance_code = None
                 raise HttpRequestError(
                     f"HTTP {status} for {url}; attempt "
-                    f"{attempt + 1}/{self.max_attempts}"
+                    f"{attempt + 1}/{self.max_attempts}",
+                    binance_code=binance_code,
                 )
 
             retry_after = self._retry_after(response)

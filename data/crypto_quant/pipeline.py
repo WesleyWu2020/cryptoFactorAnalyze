@@ -16,6 +16,7 @@ import pandas as pd
 
 from .binance import DAY_MS
 from .config import PipelineConfig
+from .http import HttpRequestError
 from .mapping import build_contract_mappings, load_mapping_rules
 from .panel import build_research_panel, last_complete_panel_date
 from .schemas import TABLE_SPECS
@@ -259,7 +260,12 @@ class CryptoQuantPipeline:
         constituents = store.read("cmc100_constituents")
         rules = load_mapping_rules(self.config.rules_path)
         def probe(symbol: str, when: date) -> bool:
-            return not self.binance_source.fetch_klines(symbol, when, when).empty
+            try:
+                return not self.binance_source.fetch_klines(symbol, when, when).empty
+            except HttpRequestError as exc:
+                if exc.binance_code == -1121:
+                    return False
+                raise
         mappings, issues = build_contract_mappings(constituents, exchange, rules, probe)
         if mappings.empty:
             mappings = pd.DataFrame(columns=TABLE_SPECS["futures_contracts"].columns)
