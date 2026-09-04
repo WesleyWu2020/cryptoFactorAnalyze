@@ -5,7 +5,7 @@
 当前主要目标是持续扩展高质量因子（含规则因子与 ML 因子），并稳定产出可比较的因子分析报告（`reports/`）。
 
 ## Repo layout
-- `data/`: 数据获取与预处理脚本（如币对列表、K 线抓取、因子数据目录）
+- `data/`: CryptoQuant 数据管线与因子数据目录；统一入口为 `data/update_crypto_quant.py`
 - `factor_analyse/`: 因子分析主流程、因子配置、因子挖掘、ML/GA 模块
 - `reports/`: 生成的 HTML 因子分析报告
 - `README.md`: 基础运行顺序说明
@@ -13,8 +13,8 @@
 ## How to run
 - install: `pip install -r requirements.txt`
 - dev:
-  - `python data/list-from-binance.py`
-  - `python data/capture_data_binance.py`
+  - `./.venv/bin/python data/update_crypto_quant.py update`
+  - `./.venv/bin/python data/update_crypto_quant.py validate`
   - `python factor_analyse/main.py --list`
   - `python factor_analyse/main.py <factor_type> [rebalance_period]`
 - test: 当前仓库未配置统一测试入口；如新增逻辑需补充最小可复现验证脚本或测试用例

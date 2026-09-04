@@ -8,10 +8,9 @@
 
 ```
 data/                        # 数据获取与预处理
-  capture_data_binance.py    # 增量抓取 Binance K 线（主数据入口）
-  list-from-binance.py       # 获取 Top50 交易对列表
-  market_cap_50_index.py     # 构建市值加权指数
-  pipeline_time_utils.py     # 时间工具
+  update_crypto_quant.py     # CryptoQuant 数据管线统一入口
+  crypto_quant/              # 数据抓取、映射、存储与校验模块
+  crypto_quant.h5            # CryptoQuant 生成数据
   factor_data/               # 因子 CSV 输出目录（date/instrument/factor）
   kline_data/                # K 线 CSV 主文件（增量复用，不每日新建）
   indicator/                 # 指标中间产物
@@ -35,8 +34,8 @@ daily_feishu_scheduler.py    # 每日 08:00 BJT 自动运行 + 飞书推送
 
 ```bash
 # 使用项目 venv（必须，避免解释器路径问题）
-./.venv/bin/python data/list-from-binance.py          # Step 1: 获取 Top50 列表
-./.venv/bin/python data/capture_data_binance.py       # Step 2: 增量更新 K 线数据
+./.venv/bin/python data/update_crypto_quant.py update  # 更新 CryptoQuant 数据
+./.venv/bin/python data/update_crypto_quant.py validate # 校验数据存储
 ./.venv/bin/python factor_analyse/main.py --list      # 查看所有已注册因子
 ./.venv/bin/python factor_analyse/<factor_script>.py  # Step 3: 生成因子数据
 ./.venv/bin/python factor_analyse/main.py <factor_type>  # Step 4: 生成分析报告

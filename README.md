@@ -1,18 +1,19 @@
 # cryptoFactorAnalyze
 
-## Crypto Market-Cap Top50 Data Pipeline
+## CryptoQuant Data Pipeline
 
-The point-in-time CoinMarketCap/Binance Top50 workflow and its maintenance commands are documented in [docs/crypto_quant_data.md](docs/crypto_quant_data.md).
+The point-in-time CoinMarketCap/Binance data workflow is maintained by
+`data/update_crypto_quant.py`. Its commands operate on the preserved
+`data/crypto_quant.h5` store:
 
-1. first run /data/list.py to get the largest top 50 coin in binance.
+```bash
+./.venv/bin/python data/update_crypto_quant.py update
+./.venv/bin/python data/update_crypto_quant.py validate
+```
 
-2. second run /data/capture_data.py to get the latest k-line data.
-
-3. third make your factor in /factor_anayse/factor_mining 
-
-4. the add your factor to main.py , and run main.py
-
-5. finally you will get the factor analyze report in /reports
+Use `backfill` or `rebuild-derived` when explicitly needed. After updating the
+store, create factors in `factor_analyse/factor_mining/` and run
+`factor_analyse/main.py` to generate reports in `reports/`.
 
 ## MaxDD-15 Hedged Strategy
 
