@@ -107,6 +107,9 @@ def build_contract_mappings(
         issue_base = {"cmc_id": int(cmc_id), "cmc_symbol": symbol, "cmc_name": first.get("name", ""), "decision_date": decision_date}
         if is_excluded_asset(int(cmc_id), symbol, rules):
             continue
+        if not symbol:
+            issue_rows.append({**issue_base, "issue": "unresolved"})
+            continue
 
         override = _override_for(int(cmc_id), decision_date, rules)
         if override is not None:

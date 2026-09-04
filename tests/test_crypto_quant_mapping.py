@@ -139,6 +139,23 @@ def test_empty_cmc_text_fields_remain_unresolved(rules, exchange_info):
     assert issues.iloc[0]["issue"] == "unresolved"
 
 
+def test_empty_cmc_symbol_does_not_probe_a_fake_contract(rules, exchange_info):
+    constituents = pd.DataFrame([{"date": date(2024, 1, 1), "cmc_id": 28683, "symbol": "", "name": "", "weight": 1.0}])
+    probed_symbols = []
+
+    def historical_probe(symbol, _):
+        probed_symbols.append(symbol)
+        return False
+
+    mappings, issues = build_contract_mappings(constituents, exchange_info, rules, historical_probe)
+
+    assert mappings.empty
+    assert issues.iloc[0]["cmc_symbol"] == ""
+    assert issues.iloc[0]["cmc_name"] == ""
+    assert issues.iloc[0]["issue"] == "unresolved"
+    assert probed_symbols == []
+
+
 def test_rules_are_versioned_and_case_insensitive(tmp_path):
     path = tmp_path / "rules.json"
     path.write_text(json.dumps({"version": "v", "stablecoin_symbols": ["usdt"], "wrapper_symbols": ["wbtc"], "overrides": [], "blocked_cmc_ids": [9]}))
