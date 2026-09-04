@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import timezone
 from pathlib import Path
+from time import time
 
 import pytest
 
@@ -14,6 +15,10 @@ class FakePipeline:
     def __init__(self, report=None):
         self.calls = []
         self.report = report
+        self.closed = 0
+
+    def close(self):
+        self.closed += 1
 
     def update(self, as_of, *, reset_staging=False):
         self.calls.append(("update", as_of, reset_staging))
@@ -22,6 +27,10 @@ class FakePipeline:
     def backfill(self, as_of, *, reset_staging=False):
         self.calls.append(("backfill", as_of, reset_staging))
         return type("Summary", (), {"mode": "backfill", "as_of_utc": as_of, "row_counts": {}, "published_path": Path("store.h5"), "last_complete_panel_date": None})()
+
+    def rebuild_derived(self, as_of, *, reset_staging=False):
+        self.calls.append(("rebuild_derived", as_of, reset_staging))
+        return type("Summary", (), {"mode": "rebuild", "as_of_utc": as_of, "row_counts": {}, "published_path": Path("store.h5"), "last_complete_panel_date": None})()
 
 
 def test_update_command_uses_explicit_utc_as_of(monkeypatch):
@@ -43,6 +52,62 @@ def test_backfill_command_forwards_reset_staging(monkeypatch):
     assert update_crypto_quant.main(["backfill", "--reset-staging"]) == 0
     assert fake.calls[0][0] == "backfill"
     assert fake.calls[0][2] is True
+
+
+def test_rebuild_derived_dispatches_to_pipeline(monkeypatch):
+    fake = FakePipeline()
+    monkeypatch.setattr(update_crypto_quant, "build_pipeline", lambda *args, **kwargs: fake)
+
+    assert update_crypto_quant.main(["rebuild-derived", "--as-of", "2026-09-03T00:20:00Z"]) == 0
+    assert fake.calls[0][0] == "rebuild_derived"
+    assert fake.closed == 1
+
+
+def test_default_as_of_is_aware_current_utc(monkeypatch):
+    fake = FakePipeline()
+    monkeypatch.setattr(update_crypto_quant, "build_pipeline", lambda *args, **kwargs: fake)
+
+    assert update_crypto_quant.main(["update"]) == 0
+    as_of = fake.calls[0][1]
+    assert as_of.tzinfo == timezone.utc
+    assert abs(as_of.timestamp() - time()) < 2
+
+
+def test_runtime_exception_returns_one_and_closes_pipeline(monkeypatch, capsys):
+    fake = FakePipeline()
+
+    def fail(*args, **kwargs):
+        raise RuntimeError("boom")
+
+    fake.update = fail
+    monkeypatch.setattr(update_crypto_quant, "build_pipeline", lambda *args, **kwargs: fake)
+
+    assert update_crypto_quant.main(["update"]) == 1
+    assert fake.closed == 1
+    assert "RuntimeError" in capsys.readouterr().err
+
+
+def test_build_pipeline_exposes_explicit_session_close(monkeypatch, tmp_path):
+    class FakeSession:
+        def __init__(self):
+            self.headers = {}
+            self.closed = 0
+
+        def close(self):
+            self.closed += 1
+
+    session = FakeSession()
+    class FakePipelineObject:
+        pass
+
+    pipeline = FakePipelineObject()
+    monkeypatch.setattr(update_crypto_quant.requests, "Session", lambda: session)
+    monkeypatch.setattr(update_crypto_quant, "CryptoQuantPipeline", lambda *args: pipeline)
+
+    built = update_crypto_quant.build_pipeline(tmp_path / "store.h5")
+    assert built is pipeline
+    built.close()
+    assert session.closed == 1
 
 
 def test_validate_command_exits_zero_for_valid_store(monkeypatch, tmp_path):
@@ -72,6 +137,22 @@ def test_inspect_prints_row_counts_ranges_and_last_complete_date(capsys, tmp_pat
     assert "row_counts" in output and "42" in output
     assert "2026-08-01" in output and "2026-09-02" in output
     assert "last_complete_date" in output
+
+
+def test_inspect_missing_store_returns_one_without_creating_file(tmp_path):
+    store_path = tmp_path / "missing.h5"
+
+    assert update_crypto_quant.main(["inspect", "--store", str(store_path)]) == 1
+    assert not store_path.exists()
+
+
+def test_inspect_corrupt_store_returns_one_without_replacing_file(tmp_path):
+    store_path = tmp_path / "corrupt.h5"
+    original = b"not an HDF5 file"
+    store_path.write_bytes(original)
+
+    assert update_crypto_quant.main(["inspect", "--store", str(store_path)]) == 1
+    assert store_path.read_bytes() == original
 
 
 def test_as_of_rejects_timezone_free_timestamp():

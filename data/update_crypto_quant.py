@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Sequence
 
 import requests
+import pandas as pd
 
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -20,7 +21,6 @@ from data.crypto_quant.cmc import fetch_cmc_history
 from data.crypto_quant.config import PipelineConfig
 from data.crypto_quant.http import JsonHttpClient
 from data.crypto_quant.pipeline import CryptoQuantPipeline
-from data.crypto_quant.store import CryptoQuantStore
 from data.crypto_quant.validation import StoreValidationError, ValidationReport, validate_store
 
 
@@ -71,7 +71,13 @@ def build_pipeline(store_path: Path) -> CryptoQuantPipeline:
         base_backoff=config.base_backoff_seconds,
         max_backoff=config.max_backoff_seconds,
     )
-    return CryptoQuantPipeline(config, _CmcSource(client), _BinanceSource(client))
+    try:
+        pipeline = CryptoQuantPipeline(config, _CmcSource(client), _BinanceSource(client))
+    except Exception:
+        session.close()
+        raise
+    pipeline.close = session.close  # type: ignore[attr-defined]
+    return pipeline
 
 
 def _parse_as_of(value: str) -> datetime:
@@ -110,10 +116,15 @@ def _print_summary(summary) -> None:
 
 def _run_pipeline(args: argparse.Namespace) -> int:
     pipeline = build_pipeline(args.store)
-    as_of = args.as_of or datetime.now(timezone.utc)
-    method = getattr(pipeline, args.command.replace("-", "_"))
-    _print_summary(method(as_of, reset_staging=args.reset_staging))
-    return 0
+    try:
+        as_of = args.as_of or datetime.now(timezone.utc)
+        method = getattr(pipeline, args.command.replace("-", "_"))
+        _print_summary(method(as_of, reset_staging=args.reset_staging))
+        return 0
+    finally:
+        close = getattr(pipeline, "close", None)
+        if close is not None:
+            close()
 
 
 def _run_validate(store_path: Path) -> int:
@@ -128,7 +139,17 @@ def _run_validate(store_path: Path) -> int:
 
 
 def _run_inspect(store_path: Path) -> int:
-    metadata = CryptoQuantStore(store_path).read_metadata()
+    store_path = Path(store_path)
+    if not store_path.is_file():
+        raise FileNotFoundError(f"store path does not exist: {store_path}")
+    with pd.HDFStore(store_path, mode="r") as hdf:
+        if not hdf.keys():
+            raise ValueError(f"store has no tables: {store_path}")
+        if "/_metadata" not in hdf.keys():
+            metadata = {}
+        else:
+            metadata_frame = hdf.select("_metadata")
+            metadata = {row.key: json.loads(row.value) for row in metadata_frame.itertuples()}
     print(json.dumps({
         "row_counts": metadata.get("table_row_counts", {}),
         "date_ranges": metadata.get("table_date_ranges", {}),
