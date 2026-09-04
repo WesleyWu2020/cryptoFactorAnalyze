@@ -578,9 +578,10 @@ class CryptoQuantPipeline:
         today = datetime.now(timezone.utc).date()
         month_start = pd.Timestamp(cmc_end).to_period("M").start_time
         next_month_start = month_start + pd.offsets.MonthBegin(1)
+        snapshot_cutoff = min(next_month_start, pd.Timestamp(cmc_end) + pd.Timedelta(days=1))
         constituent_dates = pd.to_datetime(constituents["date"], errors="coerce").dt.normalize()
         latest_snapshot = constituent_dates[
-            (constituent_dates >= month_start) & (constituent_dates < next_month_start)
+            (constituent_dates >= month_start) & (constituent_dates < snapshot_cutoff)
         ]
         latest_decision = _day(latest_snapshot.min()) or month_start.date()
         if cmc_end == today and latest_decision == cmc_end:

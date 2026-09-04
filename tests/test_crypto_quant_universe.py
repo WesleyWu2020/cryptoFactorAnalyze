@@ -230,6 +230,29 @@ def test_uses_september_2025_snapshot_on_september_2(synthetic_inputs):
     assert out["effective_date"].eq(pd.Timestamp("2025-09-03")).all()
 
 
+def test_rejects_snapshot_after_end_date(synthetic_inputs):
+    constituents, mappings, klines = synthetic_inputs
+    future_snapshot = constituents.copy()
+    future_snapshot["date"] = date(2025, 9, 15)
+    klines = pd.concat(
+        [
+            klines,
+            pd.DataFrame(
+                [
+                    {"date": pd.Timestamp("2025-09-14"), "symbol": symbol, "completed": True}
+                    for symbol in mappings["binance_symbol"]
+                ]
+            ),
+        ],
+        ignore_index=True,
+    )
+
+    with pytest.raises(UniverseBuildError):
+        build_monthly_universe(
+            future_snapshot, mappings, klines, date(2025, 9, 1), date(2025, 9, 2), top_n=2
+        )
+
+
 def test_october_snapshot_cannot_change_universe_before_its_decision(synthetic_inputs):
     constituents, mappings, klines = synthetic_inputs
     september = constituents.copy()

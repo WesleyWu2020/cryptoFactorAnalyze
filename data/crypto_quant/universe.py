@@ -65,9 +65,10 @@ def build_monthly_universe(
     accepted_months: list[pd.DataFrame] = []
     for nominal_month_start in _month_starts(start, end):
         next_month_start = nominal_month_start + pd.offsets.MonthBegin(1)
+        snapshot_cutoff = min(next_month_start, pd.Timestamp(end) + pd.Timedelta(days=1))
         snapshot_dates = member_data.loc[
             (member_data["_date"] >= nominal_month_start)
-            & (member_data["_date"] < next_month_start),
+            & (member_data["_date"] < snapshot_cutoff),
             "_date",
         ]
         if snapshot_dates.empty:
