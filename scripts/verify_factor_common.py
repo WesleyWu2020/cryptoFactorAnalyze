@@ -112,7 +112,6 @@ def _validate_real_contract(result: dict) -> tuple[list[str], bool]:
         hasattr(coverage, "empty")
         and not coverage.empty
         and (~coverage["accepted"]).any()
-        and bool(set(coverage["status"]) & {"rejected", "unknown"})
     )
     halt_reason = accounting.get("diagnostics", {}).get("halt_reason")
 
@@ -123,10 +122,12 @@ def _validate_real_contract(result: dict) -> tuple[list[str], bool]:
             failures.append("incomplete real data: all_costs full metrics must be null")
         if not coverage_has_unresolved:
             failures.append(
-                "incomplete real data: funding coverage must include rejected or unknown funding coverage rows"
+                "incomplete real data: funding coverage must include an unaccepted unresolved row"
             )
-        if not halt_reason:
-            failures.append("incomplete real data: all_costs halt reason is required")
+        if halt_reason not in {"unresolved_funding", "unresolved_funding_coverage"}:
+            failures.append(
+                "incomplete real data: all_costs halt reason must identify unresolved funding"
+            )
         return failures, False
 
     if status != "complete":
@@ -149,18 +150,18 @@ def _exception_record(component: str, exc: BaseException) -> dict:
     }
 
 
-def _write_acceptance(path: Path, acceptance: dict) -> None:
+def _write_acceptance(path: Path, acceptance: dict) -> dict | None:
     """Write strict JSON, falling back to a strict error document if needed."""
+    serialization_failure = None
     try:
         encoded = json.dumps(
             acceptance, indent=2, sort_keys=True, allow_nan=False
         )
     except (TypeError, ValueError) as exc:
+        serialization_failure = _exception_record("acceptance_serialization", exc)
         fallback = {
             "ok": False,
-            "contract_failures": [
-                _exception_record("acceptance_serialization", exc)
-            ],
+            "contract_failures": [serialization_failure],
             "serialization_error": {
                 "type": type(exc).__name__,
                 "message": str(exc) or repr(exc),
@@ -168,6 +169,7 @@ def _write_acceptance(path: Path, acceptance: dict) -> None:
         }
         encoded = json.dumps(fallback, indent=2, sort_keys=True, allow_nan=False)
     path.write_text(encoded + "\n", encoding="utf-8")
+    return serialization_failure
 
 
 def _run_real(h5_path: Path, start: str, end: str, output_dir: Path, failures: list) -> dict:
@@ -502,7 +504,9 @@ def main(argv=None) -> int:
         "ok": not failures,
     }
     acceptance_path = output_dir / "acceptance.json"
-    _write_acceptance(acceptance_path, acceptance)
+    serialization_failure = _write_acceptance(acceptance_path, acceptance)
+    if serialization_failure is not None:
+        failures.append(serialization_failure)
 
     print(f"acceptance: {acceptance_path}")
     print(f"h5_unchanged={unchanged}")

@@ -282,7 +282,7 @@ def test_real_contract_rejects_non_null_incomplete_net_metrics():
     assert any("all_costs full metrics must be null" in failure for failure in failures)
 
 
-def test_real_contract_requires_incomplete_halt_and_rejected_or_unknown_coverage():
+def test_real_contract_requires_incomplete_halt_and_unaccepted_coverage():
     result = {
         "status": "incomplete",
         "factor_performance": {
@@ -305,8 +305,40 @@ def test_real_contract_requires_incomplete_halt_and_rejected_or_unknown_coverage
 
     assert verified is False
     assert any("all_costs status must be incomplete" in failure for failure in failures)
-    assert any("rejected or unknown funding coverage" in failure for failure in failures)
+    assert any("unaccepted unresolved row" in failure for failure in failures)
     assert any("halt reason" in failure for failure in failures)
+
+
+@pytest.mark.parametrize(
+    "coverage_status",
+    ["missing", "no_events", "invalid_rate", "schedule_mismatch", "rejected", "unknown"],
+)
+@pytest.mark.parametrize("halt_reason", ["unresolved_funding", "unresolved_funding_coverage"])
+def test_real_contract_accepts_documented_unresolved_coverage_statuses(
+    coverage_status, halt_reason
+):
+    result = {
+        "status": "incomplete",
+        "factor_performance": {
+            "scenarios": {"all_costs": {"status": "incomplete", "full": None}}
+        },
+        "factor_result": {
+            "scenarios": {
+                "all_costs": {
+                    "status": "incomplete",
+                    "diagnostics": {"halt_reason": halt_reason},
+                    "funding_coverage": pd.DataFrame(
+                        [{"status": coverage_status, "accepted": False}]
+                    ),
+                }
+            }
+        },
+    }
+
+    failures, verified = verify_factor_common._validate_real_contract(result)
+
+    assert failures == []
+    assert verified is False
 
 
 def test_real_contract_rejects_complete_status_without_complete_coverage():
@@ -404,3 +436,75 @@ def test_cli_writes_strict_failure_acceptance_for_malformed_h5(tmp_path):
     raw = acceptance_path.read_text(encoding="utf-8")
     assert all(token not in raw for token in ("NaN", "Infinity", "-Infinity"))
     assert "Traceback" not in proc.stderr
+
+
+def test_write_acceptance_fallback_is_strict_and_reports_failure(tmp_path):
+    acceptance_path = tmp_path / "acceptance.json"
+
+    failure = verify_factor_common._write_acceptance(
+        acceptance_path, {"ok": True, "non_finite": float("nan")}
+    )
+
+    saved = json.loads(acceptance_path.read_text(encoding="utf-8"))
+    assert failure["component"] == "acceptance_serialization"
+    assert saved["ok"] is False
+    assert saved["contract_failures"][0]["component"] == "acceptance_serialization"
+    assert all(
+        token not in acceptance_path.read_text(encoding="utf-8")
+        for token in ("NaN", "Infinity", "-Infinity")
+    )
+
+
+def test_main_propagates_acceptance_serialization_failure(tmp_path, monkeypatch, capsys):
+    h5_path = tmp_path / "fixture.h5"
+    h5_path.write_bytes(b"fixture")
+    output_dir = tmp_path / "acceptance"
+
+    monkeypatch.setattr(
+        verify_factor_common,
+        "_fingerprint",
+        lambda path: {"size": 1, "mtime_ns": 1, "sha256": "hash"},
+    )
+    monkeypatch.setattr(
+        verify_factor_common,
+        "_run_real",
+        lambda h5, start, end, out, failures: {
+            "status": "incomplete",
+            "real_data_status": "incomplete",
+            "verified_complete_net_performance": False,
+            "cutoff": {"max_abs_diff": 0.0},
+        },
+    )
+    monkeypatch.setattr(
+        verify_factor_common,
+        "_run_synthetic",
+        lambda out, failures: {"status": "complete"},
+    )
+
+    def fake_write(path, acceptance):
+        path.write_text('{"ok": false}\n', encoding="utf-8")
+        return {
+            "component": "acceptance_serialization",
+            "type": "ValueError",
+            "message": "forced fallback",
+        }
+
+    monkeypatch.setattr(verify_factor_common, "_write_acceptance", fake_write)
+
+    rc = verify_factor_common.main(
+        [
+            "--h5",
+            str(h5_path),
+            "--start",
+            "2024-02-01",
+            "--end",
+            "2024-03-15",
+            "--output-dir",
+            str(output_dir),
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert rc != 0
+    assert "ok=true" not in captured.out
+    assert "acceptance_serialization" in captured.err
