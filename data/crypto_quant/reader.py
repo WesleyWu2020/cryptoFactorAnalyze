@@ -56,20 +56,61 @@ def _require_hdf_query_columns(
         raise ValueError(f"{table} missing queryable columns required for query: {sorted(missing_query)}")
 
 
-def _membership_by_date(universe: pd.DataFrame, start: pd.Timestamp, end: pd.Timestamp) -> dict[pd.Timestamp, set[str]]:
+def _membership_by_date(
+    universe: pd.DataFrame,
+    start: pd.Timestamp,
+    end: pd.Timestamp,
+    *,
+    as_of: pd.Timestamp | None = None,
+) -> dict[pd.Timestamp, set[str]]:
     required = {"effective_date", "effective_end_date", "binance_symbol"}
     missing = required - set(universe.columns)
     if missing:
         raise ValueError(f"universe_monthly missing columns: {sorted(missing)}")
     data = universe.copy()
+    if "decision_date" in data.columns:
+        data["_decision"] = _normalized_dates(data["decision_date"])
+    if as_of is not None and "decision_date" in data.columns:
+        data = data[data["_decision"] <= as_of]
     data["_start"] = _normalized_dates(data["effective_date"])
     data["_end"] = _normalized_dates(data["effective_end_date"])
     data["_symbol"] = data["binance_symbol"].astype(str)
     result: dict[pd.Timestamp, set[str]] = {}
     for day in pd.date_range(start, end, freq="D"):
-        active = data[(data["_start"] <= day) & (data["_end"].isna() | (data["_end"] >= day))]
+        active = data[
+            (data.get("_decision", day) <= day)
+            & (data["_start"] <= day)
+            & (data["_end"].isna() | (data["_end"] >= day))
+        ]
         result[day] = set(active["_symbol"])
     return result
+
+
+def _knowledge_end(end: pd.Timestamp, as_of: date | None) -> pd.Timestamp:
+    if as_of is None:
+        return end
+    return min(end, pd.Timestamp(as_of).normalize())
+
+
+def load_membership_history(
+    path: str | Path,
+    start: date,
+    end: date,
+    *,
+    as_of: date | None = None,
+) -> dict[pd.Timestamp, set[str]]:
+    """Return interval memberships known by an optional historical cutoff."""
+    start_ts, end_ts = _date_range(start, end)
+    end_ts = _knowledge_end(end_ts, as_of)
+    if end_ts < start_ts:
+        return {}
+    store = CryptoQuantStore(Path(path))
+    return _membership_by_date(
+        store.read("universe_monthly"),
+        start_ts,
+        end_ts,
+        as_of=pd.Timestamp(as_of).normalize() if as_of is not None else None,
+    )
 
 
 def load_market_history(
@@ -77,16 +118,29 @@ def load_market_history(
     start: date,
     end: date,
     lookback_days: int = 180,
+    *,
+    symbols: set[str] | list[str] | tuple[str, ...] | None = None,
+    as_of: date | None = None,
 ) -> pd.DataFrame:
     """Load market history for symbols in memberships overlapping the request."""
     start_ts, end_ts = _date_range(start, end)
+    end_ts = _knowledge_end(end_ts, as_of)
+    if end_ts < start_ts:
+        return pd.DataFrame(columns=_MARKET_OUTPUT_COLUMNS)
     if not isinstance(lookback_days, int) or isinstance(lookback_days, bool) or lookback_days < 0:
         raise ValueError("lookback_days must be a non-negative integer")
     store = CryptoQuantStore(Path(path))
-    universe = store.read("universe_monthly")
-    memberships = _membership_by_date(universe, start_ts, end_ts)
-    symbols = set().union(*memberships.values()) if memberships else set()
-    if not symbols:
+    selected_symbols = (
+        {str(symbol) for symbol in symbols}
+        if symbols is not None
+        else set().union(*_membership_by_date(
+            store.read("universe_monthly"),
+            start_ts,
+            end_ts,
+            as_of=pd.Timestamp(as_of).normalize() if as_of is not None else None,
+        ).values())
+    )
+    if not selected_symbols:
         return pd.DataFrame(columns=_MARKET_OUTPUT_COLUMNS)
 
     kline_start = start_ts - pd.Timedelta(days=lookback_days)
@@ -102,7 +156,7 @@ def load_market_history(
     )
     _require_columns(market, set(TABLE_SPECS["klines_daily"].columns), "klines_daily")
     market["date"] = _normalized_dates(market["date"])
-    market = market[market["symbol"].astype(str).isin(symbols)]
+    market = market[market["symbol"].astype(str).isin(selected_symbols)]
     market = market.rename(columns={"symbol": "instrument"})
     return market.loc[:, _MARKET_OUTPUT_COLUMNS].sort_values(["date", "instrument"], kind="mergesort").reset_index(drop=True)
 
@@ -112,11 +166,21 @@ def load_daily_universe(
     start: date,
     end: date,
     require_complete: bool = True,
+    *,
+    as_of: date | None = None,
 ) -> dict[pd.Timestamp, set[str]]:
     """Load exact-date memberships, optionally requiring a complete research panel."""
     start_ts, end_ts = _date_range(start, end)
+    end_ts = _knowledge_end(end_ts, as_of)
+    if end_ts < start_ts:
+        return {}
     store = CryptoQuantStore(Path(path))
-    expected = _membership_by_date(store.read("universe_monthly"), start_ts, end_ts)
+    expected = _membership_by_date(
+        store.read("universe_monthly"),
+        start_ts,
+        end_ts,
+        as_of=pd.Timestamp(as_of).normalize() if as_of is not None else None,
+    )
     _require_hdf_query_columns(Path(path), "research_panel_daily", {"date"}, {"date"})
     panel = store.read(
         "research_panel_daily",
@@ -159,4 +223,9 @@ def filter_factor_output(factors: pd.DataFrame, universe_by_date: Mapping[pd.Tim
     return data.loc[keep].reset_index(drop=True)
 
 
-__all__ = ["filter_factor_output", "load_daily_universe", "load_market_history"]
+__all__ = [
+    "filter_factor_output",
+    "load_daily_universe",
+    "load_market_history",
+    "load_membership_history",
+]

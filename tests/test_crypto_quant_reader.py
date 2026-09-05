@@ -83,6 +83,36 @@ def test_load_market_history_uses_overlapping_memberships_and_keeps_warmup(tmp_p
     assert out[["date", "instrument"]].duplicated().sum() == 0
 
 
+def test_load_market_history_reads_explicit_symbol_after_membership_end(tmp_path):
+    path = _store_fixture(tmp_path)
+
+    out = load_market_history(
+        path,
+        date(2024, 3, 11),
+        date(2024, 3, 12),
+        lookback_days=0,
+        symbols={"AUSDT"},
+    )
+
+    assert out["instrument"].unique().tolist() == ["AUSDT"]
+    assert out["date"].tolist() == [pd.Timestamp("2024-03-11"), pd.Timestamp("2024-03-12")]
+
+
+def test_load_market_history_as_of_truncates_market_and_membership_knowledge(tmp_path):
+    path = _store_fixture(tmp_path)
+
+    out = load_market_history(
+        path,
+        date(2024, 3, 9),
+        date(2024, 3, 12),
+        lookback_days=0,
+        as_of=date(2024, 3, 10),
+    )
+
+    assert out["date"].max() == pd.Timestamp("2024-03-10")
+    assert set(out["instrument"]) == {"AUSDT", "BUSDT"}
+
+
 def test_load_market_history_pushes_date_range_into_hdf_read(tmp_path, monkeypatch):
     path = _store_fixture(tmp_path)
     calls = []
