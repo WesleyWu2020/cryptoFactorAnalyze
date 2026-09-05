@@ -10,6 +10,10 @@ def _calc_factor(data: dict[str, pd.DataFrame]) -> pd.DataFrame:
     return pd.DataFrame()
 
 
+class MutableMetadata:
+    pass
+
+
 def test_factor_spec_has_immutable_contract_and_copies_inputs():
     meta = {"tags": ["momentum"], "nested": {"enabled": True}}
     setting = {"required_fields": ["open"], "nested": {"window": 20}}
@@ -42,3 +46,18 @@ def test_factor_spec_has_immutable_contract_and_copies_inputs():
         spec.setting["nested"]["window"] = 10
     with pytest.raises(FrozenInstanceError):
         spec.factor_id = "other"
+
+
+def test_factor_spec_freezes_bytearray_values():
+    blob = bytearray(b"abc")
+    spec = FactorSpec("bytes", {"blob": blob}, {}, _calc_factor, "sha")
+
+    blob[0] = ord("z")
+
+    assert spec.meta["blob"] == b"abc"
+    assert isinstance(spec.meta["blob"], bytes)
+
+
+def test_factor_spec_rejects_unsupported_mutable_values():
+    with pytest.raises(TypeError, match="Unsupported mutable value"):
+        FactorSpec("custom", {"value": MutableMetadata()}, {}, _calc_factor, "sha")

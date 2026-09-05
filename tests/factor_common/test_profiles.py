@@ -1,4 +1,4 @@
-from dataclasses import FrozenInstanceError
+from dataclasses import FrozenInstanceError, asdict
 
 import pytest
 
@@ -8,12 +8,23 @@ from factor_common.profiles import resolve_profile
 def test_daily_defaults_include_strict_funding():
     p = resolve_profile("perp_1d", {})
 
-    assert (p.signal_delay_days, p.price_field, p.include_funding) == (
-        1,
-        "open",
-        True,
-    )
-    assert p.funding_price_mode == "strict"
+    assert asdict(p) == {
+        "profile_id": "perp_1d",
+        "rebalance_days": 1,
+        "anchor_date": "2024-01-01",
+        "signal_delay_days": 1,
+        "price_field": "open",
+        "n_groups": 10,
+        "factor_direction": 1,
+        "initial_equity": 1.0,
+        "gross_exposure": 1.0,
+        "fee_rate": 0.0003,
+        "include_funding": True,
+        "funding_price_mode": "strict",
+        "out_of_sample_days": 180,
+        "split_date": None,
+        "periods_per_year": 365,
+    }
 
 
 @pytest.mark.parametrize("name", ["perp_4h", "perp_8h"])
