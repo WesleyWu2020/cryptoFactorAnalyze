@@ -173,6 +173,54 @@ def test_performance_respects_factor_direction(tmp_path, h5_fixture):
     assert miner.performance(2)["group"].iloc[0] == "short"
 
 
+def test_external_label_boundary_signal_purged_like_evaluate_metrics(tmp_path, h5_fixture):
+    """Crossing-holding signals must be purged from both slices.
+
+    With rebalance_period=1, entry executes at t+1 and exit at t+2. The split
+    resolves to 2024-01-07 (last date 2024-01-08 minus out_of_sample_days=1):
+    the 2024-01-06 signal crosses the split (entry 01-07 <= split < exit
+    01-08) and must appear in neither sample; 2024-01-07 enters after the
+    split and belongs to out-of-sample. This mirrors evaluate_metrics, whose
+    purged_signal_dates for this evaluation is exactly ["2024-01-06"].
+    """
+    miner = LegacyFactorMiner(
+        _legacy_frame(), FACTOR_COL, 1, n_groups=3, rebalance_period=1,
+        out_of_sample_days=1,
+        h5_path=h5_fixture, base_dir=tmp_path / "fr", reports_dir=tmp_path / "rep",
+        include_funding=False,
+    )
+    assert miner.split_date == pd.Timestamp("2024-01-07")
+
+    daily_full = miner.IC()[8]
+    assert daily_full["date"].tolist() == list(DATES)
+
+    daily_in = miner.IC_with_sample_split(sample_type="样本内")[8]
+    daily_out = miner.IC_with_sample_split(sample_type="样本外")[8]
+    assert daily_in.empty
+    assert daily_out["date"].tolist() == [
+        pd.Timestamp("2024-01-07"), pd.Timestamp("2024-01-08")
+    ]
+    # The crossing boundary signal is in neither slice (full sample only).
+    sliced_dates = set(daily_in["date"]) | set(daily_out["date"])
+    assert pd.Timestamp("2024-01-06") not in sliced_dates
+
+
+def test_hedged_frame_keeps_legacy_columns_as_none_placeholders(miner):
+    result, _, _ = miner.calculate_hedged_returns_with_fees()
+    assert list(result.columns) == [
+        "long_return",
+        "short_return",
+        "adjusted_hedged_return_no_fee",
+        "adjusted_turnover",
+        "adjusted_fee",
+        "adjusted_hedged_return_with_fee",
+        "cum_return_no_fee",
+        "cum_return_with_fee",
+    ]
+    for column in ("long_return", "short_return", "adjusted_turnover"):
+        assert result[column].isna().all()
+
+
 def test_hedged_returns_fee_rate_keyword_preserved(miner):
     result, stats_no_fee, stats_with_fee = miner.calculate_hedged_returns_with_fees(
         fee_rate=0.001

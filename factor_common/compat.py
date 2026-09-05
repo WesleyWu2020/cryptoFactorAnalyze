@@ -227,6 +227,30 @@ class LegacyFactorMiner:
             return frame[frame.index <= split]
         return frame[frame.index > split]
 
+    def _signal_sample_mask(self, dates: pd.DatetimeIndex, result: dict, sample: str):
+        """``evaluate_metrics`` purge semantics for signal-dated slices.
+
+        Entry executes at the ``t+1`` open, exit at the
+        ``t+1+rebalance_period`` open. In-sample keeps signals whose exit is
+        on or before the split; out-of-sample admits signals whose entry is
+        strictly after the split; a signal whose holding crosses the split is
+        purged from both slices (kept only in the full sample).
+        """
+        if sample == "full":
+            return pd.Series(True, index=dates)
+        split = self._split_date(result)
+        entry = dates + pd.Timedelta(days=1)
+        exit_ = dates + pd.Timedelta(days=1 + self.rebalance_period)
+        if sample == "in_sample":
+            return pd.Series(exit_ <= split, index=dates)
+        return pd.Series(entry > split, index=dates)
+
+    def _slice_signal_sample(self, frame: pd.DataFrame, result: dict, sample: str):
+        if sample == "full":
+            return frame
+        mask = self._signal_sample_mask(frame.index, result, sample)
+        return frame[mask.to_numpy()]
+
     def _external_labels(self, values: pd.DataFrame):
         """Provided legacy future_ret as an external evaluation-only label matrix."""
         if "future_ret" not in self.factor_data.columns:
@@ -249,8 +273,8 @@ class LegacyFactorMiner:
         labels = self._external_labels(values)
         if labels is None:
             return self._performance_block(result)["samples"][sample]["ic"]
-        values = self._slice_sample(values, result, sample)
-        labels = self._slice_sample(labels, result, sample)
+        values = self._slice_signal_sample(values, result, sample)
+        labels = self._slice_signal_sample(labels, result, sample)
         daily = _daily_ic(values, labels)
         return _ic_summary(daily, periods_per_year=_PERIODS_PER_YEAR)
 
@@ -401,14 +425,30 @@ class LegacyFactorMiner:
         if gross is None or gross.empty or net is None or net.empty:
             return pd.DataFrame({"date": [], "hedged_return": []}), {}, {}
 
+        # Legacy column layout preserved; legs and per-day constant turnover
+        # have no common-ledger source, so they degrade to explicit None
+        # placeholders (matching the performance() convention).
         frame = pd.DataFrame(index=gross.index)
+        frame["long_return"] = None
+        frame["short_return"] = None
         frame["adjusted_hedged_return_no_fee"] = gross["return"]
+        frame["adjusted_turnover"] = None
         frame["adjusted_hedged_return_with_fee"] = net["return"].reindex(gross.index)
         frame["adjusted_fee"] = (
             frame["adjusted_hedged_return_no_fee"] - frame["adjusted_hedged_return_with_fee"]
         )
         frame["cum_return_no_fee"] = gross["equity"] - 1.0
         frame["cum_return_with_fee"] = net["equity"].reindex(gross.index) - 1.0
+        frame = frame.loc[:, [
+            "long_return",
+            "short_return",
+            "adjusted_hedged_return_no_fee",
+            "adjusted_turnover",
+            "adjusted_fee",
+            "adjusted_hedged_return_with_fee",
+            "cum_return_no_fee",
+            "cum_return_with_fee",
+        ]]
 
         frame = self._slice_sample(frame, result, sample)
         stats_no_fee = self._ledger_stats(frame.rename(
@@ -438,8 +478,8 @@ class LegacyFactorMiner:
         if labels is None:
             rows = self._performance_block(result)["samples"][sample]["ic_decay"]
             return [{"lag": row["horizon"], "rank_ic": row["rank_ic"]} for row in rows]
-        values = self._slice_sample(values, result, sample)
-        labels = self._slice_sample(labels, result, sample)
+        values = self._slice_signal_sample(values, result, sample)
+        labels = self._slice_signal_sample(labels, result, sample)
         rows = _ic_decay(values, labels)
         return [{"lag": row["horizon"], "rank_ic": row["rank_ic"]} for row in rows]
 
@@ -461,8 +501,8 @@ class LegacyFactorMiner:
             return list(
                 self._performance_block(result)["samples"][sample]["rank_ic_autocorr"]
             )
-        values = self._slice_sample(values, result, sample)
-        labels = self._slice_sample(labels, result, sample)
+        values = self._slice_signal_sample(values, result, sample)
+        labels = self._slice_signal_sample(labels, result, sample)
         daily = _daily_ic(values, labels)
         return _rank_ic_autocorr(daily, values.index)
 
