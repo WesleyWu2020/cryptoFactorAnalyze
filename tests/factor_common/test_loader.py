@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import builtins
 import hashlib
 import subprocess
 import sys
@@ -113,6 +114,16 @@ def test_load_factor_rejects_unsafe_factor_identifiers(tmp_path, unsafe):
         load_factor(path)
 
 
+def test_load_factor_rejects_unsafe_filename_with_path_traversal(tmp_path):
+    from factor_common.loader import load_factor
+
+    path = tmp_path / ".." / tmp_path.name / "bad-name.py"
+    path.write_text(_factor_source(), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="factor filename"):
+        load_factor(path)
+
+
 def test_load_factor_requires_filename_and_meta_identifier_to_match(tmp_path):
     from factor_common.loader import load_factor
 
@@ -171,6 +182,9 @@ def test_load_factor_rejects_missing_settings_and_invalid_setting_values(tmp_pat
         ("params", None, "params"),
         ("preprocessing", "unknown", "preprocessing"),
         ("factor_direction", 0, "factor_direction"),
+        ("factor_direction", 1.0, "factor_direction"),
+        ("factor_direction", -1.0, "factor_direction"),
+        ("factor_direction", True, "factor_direction"),
     ]:
         setting = {key: value}
         source = _factor_source(
@@ -241,14 +255,61 @@ def test_import_loader_does_not_read_market_data_or_write_files(tmp_path):
     assert list(tmp_path.iterdir()) == []
 
 
-def test_create_template_validates_name_and_never_overwrites(tmp_path):
+def test_load_factor_does_not_read_market_data_or_write_files(monkeypatch, tmp_path):
+    from factor_common.loader import load_factor
+
+    path = _write_factor(tmp_path, _factor_source())
+    market_reads = []
+    writes = []
+    real_open = builtins.open
+
+    def forbidden_hdf_store(*args, **kwargs):
+        market_reads.append((args, kwargs))
+        raise AssertionError("market data read during factor load")
+
+    def spy_open(file, mode="r", *args, **kwargs):
+        if any(flag in mode for flag in ("w", "a", "x", "+")):
+            writes.append((file, mode))
+        return real_open(file, mode, *args, **kwargs)
+
+    monkeypatch.setattr(pd, "HDFStore", forbidden_hdf_store)
+    monkeypatch.setattr(builtins, "open", spy_open)
+
+    spec = load_factor(path)
+
+    assert spec.factor_id == "example_momentum"
+    assert market_reads == []
+    assert writes == []
+
+
+def test_create_template_has_exact_daily_contract_and_formula(tmp_path):
     from factor_common.loader import create_template, load_factor
+    from factor_common.loader import validate_factor_output
 
     target = create_template("new_factor", tmp_path)
 
     assert target == tmp_path / "new_factor.py"
-    assert '"factor_name": "new_factor"' in target.read_text(encoding="utf-8")
-    assert load_factor(target).factor_id == "new_factor"
+    spec = load_factor(target)
+    assert dict(spec.meta) == {
+        "factor_name": "new_factor",
+        "author": "local",
+        "level": "daily",
+        "category": "momentum",
+        "description": "N-day log momentum",
+    }
+    assert spec.setting["data_needed"] == ("close",)
+    assert spec.setting["universe"] == "historical_top50"
+    assert spec.setting["warmup_bars"] == 20
+    assert spec.setting["preprocessing"] == "mad_rank"
+    assert dict(spec.setting["params"]) == {"window": 20}
+    assert spec.setting["factor_direction"] == 1
+
+    dates = pd.date_range("2024-01-01", periods=21, freq="D")
+    close = pd.DataFrame({"BTCUSDT": np.arange(1.0, 22.0)}, index=dates)
+    result = spec.calc_factor({"close": close})
+    expected = np.log(close / close.shift(20))
+    pd.testing.assert_frame_equal(result, expected)
+    assert validate_factor_output(result) is result
 
     with pytest.raises(FileExistsError):
         create_template("new_factor", tmp_path)

@@ -100,7 +100,7 @@ def _validate_settings(setting: dict[str, Any]) -> None:
         raise ValueError("SETTING.params must be a mapping")
 
     direction = setting["factor_direction"]
-    if isinstance(direction, bool) or direction not in (-1, 1):
+    if isinstance(direction, bool) or not isinstance(direction, int) or direction not in (-1, 1):
         raise ValueError("SETTING.factor_direction must be either -1 or 1")
 
     if "frequency" in setting and setting["frequency"] != "daily":
