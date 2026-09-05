@@ -177,6 +177,14 @@ FACTOR_CONFIG = {
         "factor_desc": "方向波动率因子(10日)",
         "rebalance_period": 10
     },
+    "example_momentum": {
+        "file_prefix": "example_momentum_",
+        "factor_name": "example_momentum",
+        "factor_direction": 1,
+        "factor_desc": "示例动量因子(N日对数动量, common框架迁移示例)",
+        "rebalance_period": 1,
+        "module_path": "factor_analyse/factor_mining/example_momentum.py"
+    },
 
 }
 
@@ -198,3 +206,8 @@ def get_rebalance_period(factor_id):
     """获取指定因子的调仓周期"""
     config = get_factor_config(factor_id)
     return config.get("rebalance_period") if config else None
+
+def get_module_path(factor_id):
+    """获取指定因子的 common 框架模块路径（未迁移因子返回 None）"""
+    config = get_factor_config(factor_id)
+    return config.get("module_path") if config else None
