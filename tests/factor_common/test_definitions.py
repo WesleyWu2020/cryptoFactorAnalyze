@@ -1,0 +1,44 @@
+from dataclasses import FrozenInstanceError, fields
+
+import pandas as pd
+import pytest
+
+from factor_common.definitions import FactorSpec
+
+
+def _calc_factor(data: dict[str, pd.DataFrame]) -> pd.DataFrame:
+    return pd.DataFrame()
+
+
+def test_factor_spec_has_immutable_contract_and_copies_inputs():
+    meta = {"tags": ["momentum"], "nested": {"enabled": True}}
+    setting = {"required_fields": ["open"], "nested": {"window": 20}}
+    spec = FactorSpec("momentum", meta, setting, _calc_factor, "abc123")
+
+    assert [field.name for field in fields(FactorSpec)] == [
+        "factor_id",
+        "meta",
+        "setting",
+        "calc_factor",
+        "source_sha256",
+    ]
+    assert spec.factor_id == "momentum"
+    assert spec.calc_factor is _calc_factor
+    assert spec.source_sha256 == "abc123"
+
+    meta["tags"].append("reversal")
+    meta["nested"]["enabled"] = False
+    setting["required_fields"].append("close")
+    setting["nested"]["window"] = 60
+
+    assert spec.meta["tags"] == ("momentum",)
+    assert spec.meta["nested"]["enabled"] is True
+    assert spec.setting["required_fields"] == ("open",)
+    assert spec.setting["nested"]["window"] == 20
+
+    with pytest.raises(TypeError):
+        spec.meta["new"] = "value"
+    with pytest.raises(TypeError):
+        spec.setting["nested"]["window"] = 10
+    with pytest.raises(FrozenInstanceError):
+        spec.factor_id = "other"
