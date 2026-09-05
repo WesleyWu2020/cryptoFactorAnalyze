@@ -15,9 +15,16 @@ _MARKET_COLUMNS = [column for column in TABLE_SPECS["klines_daily"].columns if c
 _MARKET_OUTPUT_COLUMNS = ["date", "instrument", *[column for column in _MARKET_COLUMNS if column != "date"]]
 
 
+def _normalized_bound(value: date) -> pd.Timestamp:
+    timestamp = pd.Timestamp(value)
+    if timestamp.tzinfo is not None:
+        timestamp = timestamp.tz_convert("UTC").tz_localize(None)
+    return timestamp.normalize()
+
+
 def _date_range(start: date, end: date) -> tuple[pd.Timestamp, pd.Timestamp]:
-    start_ts = pd.Timestamp(start).normalize()
-    end_ts = pd.Timestamp(end).normalize()
+    start_ts = _normalized_bound(start)
+    end_ts = _normalized_bound(end)
     if start_ts > end_ts:
         raise ValueError("start must be on or before end")
     return start_ts, end_ts
@@ -89,7 +96,7 @@ def _membership_by_date(
 def _knowledge_end(end: pd.Timestamp, as_of: date | None) -> pd.Timestamp:
     if as_of is None:
         return end
-    return min(end, pd.Timestamp(as_of).normalize())
+    return min(end, _normalized_bound(as_of))
 
 
 def load_membership_history(
@@ -109,7 +116,7 @@ def load_membership_history(
         store.read("universe_monthly"),
         start_ts,
         end_ts,
-        as_of=pd.Timestamp(as_of).normalize() if as_of is not None else None,
+        as_of=_normalized_bound(as_of) if as_of is not None else None,
     )
 
 
@@ -137,7 +144,7 @@ def load_market_history(
             store.read("universe_monthly"),
             start_ts,
             end_ts,
-            as_of=pd.Timestamp(as_of).normalize() if as_of is not None else None,
+            as_of=_normalized_bound(as_of) if as_of is not None else None,
         ).values())
     )
     if not selected_symbols:
@@ -179,7 +186,7 @@ def load_daily_universe(
         store.read("universe_monthly"),
         start_ts,
         end_ts,
-        as_of=pd.Timestamp(as_of).normalize() if as_of is not None else None,
+        as_of=_normalized_bound(as_of) if as_of is not None else None,
     )
     _require_hdf_query_columns(Path(path), "research_panel_daily", {"date"}, {"date"})
     panel = store.read(

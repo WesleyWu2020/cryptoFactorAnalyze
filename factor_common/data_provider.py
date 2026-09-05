@@ -78,7 +78,18 @@ class DataProvider:
         if "date" in market.columns and self._as_of is not None:
             dates = pd.to_datetime(market["date"], errors="coerce", utc=True).dt.tz_localize(None).dt.normalize()
             market = market[dates <= self._as_of]
-        self._symbols = tuple(sorted(market["symbol"].astype(str).unique())) if "symbol" in market else ()
+        market_symbols = set(market["symbol"].astype(str)) if "symbol" in market else set()
+        universe = self._store.read("universe_monthly")
+        if "binance_symbol" in universe.columns:
+            if self._as_of is not None and "decision_date" in universe.columns:
+                decision_dates = pd.to_datetime(
+                    universe["decision_date"], errors="coerce", utc=True
+                ).dt.tz_localize(None).dt.normalize()
+                universe = universe[decision_dates <= self._as_of]
+            universe_symbols = set(universe["binance_symbol"].astype(str))
+        else:
+            universe_symbols = set()
+        self._symbols = tuple(sorted(market_symbols | universe_symbols))
 
     def list_datas(self) -> list[str]:
         """List supported daily market fields using the HDF5 schema names."""
@@ -184,7 +195,10 @@ class DataProvider:
         panel = panel[panel["date"].isin(calendar) & panel["instrument"].isin(requested)]
         if panel.empty:
             return result
-        panel = panel.drop_duplicates(["date", "instrument"], keep="last").set_index(["date", "instrument"])
+        key_columns = ["date", "instrument"]
+        if panel.duplicated(key_columns).any():
+            raise ValueError("duplicate quality key: date/instrument")
+        panel = panel.set_index(key_columns)
         for field in QUALITY_FIELDS:
             if field in panel.columns:
                 result.loc[panel.index, field] = panel[field]

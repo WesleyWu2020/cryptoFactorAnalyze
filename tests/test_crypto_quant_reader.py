@@ -8,6 +8,7 @@ from data.crypto_quant.reader import (
     filter_factor_output,
     load_daily_universe,
     load_market_history,
+    load_membership_history,
 )
 from data.crypto_quant.store import CryptoQuantStore
 
@@ -111,6 +112,41 @@ def test_load_market_history_as_of_truncates_market_and_membership_knowledge(tmp
 
     assert out["date"].max() == pd.Timestamp("2024-03-10")
     assert set(out["instrument"]) == {"AUSDT", "BUSDT"}
+
+
+def test_load_market_history_normalizes_timezone_aware_bounds_and_as_of(tmp_path):
+    path = _store_fixture(tmp_path)
+
+    out = load_market_history(
+        path,
+        pd.Timestamp("2024-03-09 12:00", tz="Asia/Shanghai"),
+        pd.Timestamp("2024-03-12 12:00", tz="Asia/Shanghai"),
+        lookback_days=0,
+        as_of=pd.Timestamp("2024-03-10 12:00", tz="Asia/Shanghai"),
+    )
+
+    assert out["date"].min() == pd.Timestamp("2024-03-09")
+    assert out["date"].max() == pd.Timestamp("2024-03-10")
+
+
+def test_membership_cutoff_excludes_effective_interval_decided_after_cutoff(tmp_path):
+    path = _store_fixture(tmp_path)
+    store = CryptoQuantStore(path)
+    universe = store.read("universe_monthly")
+    future_decision = universe.loc[universe["binance_symbol"] == "CUSDT"].iloc[[0]].copy()
+    future_decision["decision_date"] = pd.Timestamp("2024-03-11")
+    future_decision["effective_date"] = pd.Timestamp("2024-03-09")
+    future_decision["effective_end_date"] = pd.Timestamp("2024-03-10")
+    store.replace("universe_monthly", pd.concat([universe, future_decision], ignore_index=True))
+
+    memberships = load_membership_history(
+        path,
+        date(2024, 3, 9),
+        date(2024, 3, 10),
+        as_of=date(2024, 3, 10),
+    )
+
+    assert "CUSDT" not in memberships[pd.Timestamp("2024-03-09")]
 
 
 def test_load_market_history_pushes_date_range_into_hdf_read(tmp_path, monkeypatch):

@@ -78,6 +78,8 @@ def _klines() -> pd.DataFrame:
     rows = []
     for day in CALENDAR:
         for index, symbol in enumerate(SYMBOLS, start=1):
+            if symbol == "LUSDT":
+                continue
             if symbol == "EUSDT" and day == pd.Timestamp("2024-01-05"):
                 continue
             rows.append(_kline_row(

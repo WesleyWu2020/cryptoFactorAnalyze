@@ -29,6 +29,18 @@ def test_provider_retains_missing_calendar_rows_and_raw_prices_after_membership_
     assert close.loc["2024-01-08", "AUSDT"] == pytest.approx(108.0)
 
 
+def test_provider_includes_member_without_any_kline_rows(h5_fixture):
+    from factor_common.data_provider import DataProvider
+
+    dp = DataProvider(h5_fixture)
+    close = dp.get_single_data("close", start="2024-01-07", end="2024-01-08")
+    mask = dp.get_universe(start="2024-01-07", end="2024-01-08")
+
+    assert "LUSDT" in dp.symbols
+    assert mask.loc["2024-01-07", "LUSDT"]
+    assert close["LUSDT"].isna().all()
+
+
 def test_provider_uses_current_quote_volume_field_name(h5_fixture):
     from factor_common.data_provider import DataProvider
 
@@ -88,6 +100,31 @@ def test_provider_keeps_quality_unknown_for_legacy_panel_flags(h5_fixture):
     assert pd.isna(row["has_placeholder_kline"])
     assert row["funding_coverage_status"] == "unknown"
     assert pd.isna(row["funding_invalid_price_count"])
+
+
+def test_provider_rejects_duplicate_quality_keys(h5_fixture):
+    from data.crypto_quant.store import CryptoQuantStore
+    from factor_common.data_provider import DataProvider
+
+    store = CryptoQuantStore(h5_fixture)
+    panel = store.read("research_panel_daily")
+    duplicate = panel.loc[
+        (panel["date"] == pd.Timestamp("2024-01-03"))
+        & (panel["binance_symbol"] == "AUSDT")
+    ].iloc[[0]]
+    with pd.HDFStore(h5_fixture, mode="a") as hdf:
+        hdf.put(
+            "research_panel_daily",
+            pd.concat([panel, duplicate], ignore_index=True),
+            format="table",
+            data_columns=["date", "binance_symbol"],
+            index=False,
+        )
+
+    with pytest.raises(ValueError, match="duplicate quality key"):
+        DataProvider(h5_fixture).get_quality(
+            start="2024-01-03", end="2024-01-03", symbols=["AUSDT"]
+        )
 
 
 def test_provider_metadata_lists_fields_symbols_and_time_range(h5_fixture):
