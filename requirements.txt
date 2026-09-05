@@ -19,4 +19,5 @@ flask>=2.0.0
 # Crypto Top50 HDF5 pipeline
 requests>=2.31.0,<3.0
 tables>=3.9.0,<4.0
+pyarrow>=14,<22
 pytest>=8.0.0,<9.0
