@@ -87,6 +87,7 @@ def _write_kernel_spec(output_dir: Path) -> Path:
                 "language": "python",
             },
             indent=2,
+            allow_nan=False,
         )
         + "\n",
         encoding="utf-8",
@@ -107,10 +108,25 @@ def _validate_real_contract(result: dict) -> tuple[list[str], bool]:
         and coverage["accepted"].all()
         and set(coverage["status"]) <= {"complete", "not_applicable"}
     )
+    coverage_has_unresolved = bool(
+        hasattr(coverage, "empty")
+        and not coverage.empty
+        and (~coverage["accepted"]).any()
+        and bool(set(coverage["status"]) & {"rejected", "unknown"})
+    )
+    halt_reason = accounting.get("diagnostics", {}).get("halt_reason")
 
     if status == "incomplete":
+        if accounting.get("status") != "incomplete":
+            failures.append("incomplete real data: all_costs status must be incomplete")
         if performance.get("full") is not None:
             failures.append("incomplete real data: all_costs full metrics must be null")
+        if not coverage_has_unresolved:
+            failures.append(
+                "incomplete real data: funding coverage must include rejected or unknown funding coverage rows"
+            )
+        if not halt_reason:
+            failures.append("incomplete real data: all_costs halt reason is required")
         return failures, False
 
     if status != "complete":
@@ -123,6 +139,35 @@ def _validate_real_contract(result: dict) -> tuple[list[str], bool]:
     if performance.get("full") is None:
         failures.append("complete real data: all_costs full metrics cannot be null")
     return failures, not failures
+
+
+def _exception_record(component: str, exc: BaseException) -> dict:
+    return {
+        "component": component,
+        "type": type(exc).__name__,
+        "message": str(exc) or repr(exc),
+    }
+
+
+def _write_acceptance(path: Path, acceptance: dict) -> None:
+    """Write strict JSON, falling back to a strict error document if needed."""
+    try:
+        encoded = json.dumps(
+            acceptance, indent=2, sort_keys=True, allow_nan=False
+        )
+    except (TypeError, ValueError) as exc:
+        fallback = {
+            "ok": False,
+            "contract_failures": [
+                _exception_record("acceptance_serialization", exc)
+            ],
+            "serialization_error": {
+                "type": type(exc).__name__,
+                "message": str(exc) or repr(exc),
+            },
+        }
+        encoded = json.dumps(fallback, indent=2, sort_keys=True, allow_nan=False)
+    path.write_text(encoded + "\n", encoding="utf-8")
 
 
 def _run_real(h5_path: Path, start: str, end: str, output_dir: Path, failures: list) -> dict:
@@ -239,7 +284,12 @@ def _run_synthetic(output_dir: Path, failures: list) -> dict:
     filled = filled[filled["status"] == "filled"]
     fee_reconciles = bool(
         not filled.empty
-        and (filled["fee"] == filled["notional"] * _SYNTHETIC_FEE_RATE).all()
+        and (
+            (filled["fee"] - filled["notional"] * _SYNTHETIC_FEE_RATE)
+            .abs()
+            .max()
+            <= 1e-12
+        )
         and abs(fee_total - float(filled["fee"].sum())) <= 1e-12
     )
     funding = all_costs["funding"]
@@ -321,6 +371,10 @@ def _execute_notebook(
     os.environ["FACTOR_COMMON_OUTPUT_DIR"] = str(output_dir / "notebook_run")
     os.environ["FACTOR_COMMON_START"] = start
     os.environ["FACTOR_COMMON_END"] = end
+    os.environ["FACTOR_COMMON_REPO_ROOT"] = str(_REPO_ROOT)
+    os.environ["FACTOR_COMMON_NOTEBOOK"] = str(NOTEBOOK)
+    os.environ["IPYTHONDIR"] = str(output_dir / "ipython")
+    (output_dir / "ipython").mkdir(parents=True, exist_ok=True)
 
     executed_path = output_dir / "factor_common_usage.executed.ipynb"
     notebook = nbformat.read(NOTEBOOK, as_version=4)
@@ -332,8 +386,6 @@ def _execute_notebook(
     )
     try:
         client.execute()
-    except Exception as exc:
-        failures.append(f"notebook execution failed: {exc}")
     finally:
         nbformat.write(notebook, executed_path)
     return {
@@ -358,24 +410,80 @@ def main(argv=None) -> int:
     args = parser.parse_args(argv)
 
     h5_path = Path(args.h5).resolve()
-    if not h5_path.is_file():
-        print(f"error: H5 store not found: {h5_path}", file=sys.stderr)
-        return 2
     output_dir = Path(args.output_dir).resolve()
-    output_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        output_dir.mkdir(parents=True, exist_ok=True)
+        if any(output_dir.iterdir()):
+            print(
+                f"error: output directory must be empty: {output_dir}",
+                file=sys.stderr,
+            )
+            return 2
+    except OSError as exc:
+        print(
+            f"error: output directory is not usable: {output_dir}: {exc}",
+            file=sys.stderr,
+        )
+        return 2
 
-    failures: list[str] = []
-    before = _fingerprint(h5_path)
+    failures: list[object] = []
+    before = _fingerprint(h5_path) if h5_path.is_file() else None
+    if before is None:
+        failures.append(
+            {
+                "component": "real_input",
+                "type": "FileNotFoundError",
+                "message": f"H5 store not found: {h5_path}",
+            }
+        )
 
-    real = _run_real(h5_path, args.start, args.end, output_dir, failures)
-    synthetic = _run_synthetic(output_dir, failures)
+    real = None
+    if before is not None:
+        try:
+            real = _run_real(h5_path, args.start, args.end, output_dir, failures)
+        except Exception as exc:
+            failures.append(_exception_record("real_run", exc))
+            real = {
+                "status": "error",
+                "real_data_status": "error",
+                "verified_complete_net_performance": False,
+                "error": _exception_record("real_run", exc),
+            }
+    else:
+        real = {
+            "status": "error",
+            "real_data_status": "error",
+            "verified_complete_net_performance": False,
+            "error": failures[-1],
+        }
+
+    synthetic = None
+    try:
+        synthetic = _run_synthetic(output_dir, failures)
+    except Exception as exc:
+        failures.append(_exception_record("synthetic_run", exc))
+        synthetic = {
+            "status": "error",
+            "error": _exception_record("synthetic_run", exc),
+        }
+
     notebook = None
     if args.execute_notebook:
-        notebook = _execute_notebook(h5_path, args.start, args.end, output_dir, failures)
+        try:
+            notebook = _execute_notebook(
+                h5_path, args.start, args.end, output_dir, failures
+            )
+        except Exception as exc:
+            failures.append(_exception_record("notebook", exc))
+            notebook = {
+                "status": "error",
+                "executed_path": str(output_dir / "factor_common_usage.executed.ipynb"),
+                "error": _exception_record("notebook", exc),
+            }
 
-    after = _fingerprint(h5_path)
-    unchanged = before == after
-    if not unchanged:
+    after = _fingerprint(h5_path) if h5_path.is_file() else None
+    unchanged = before is not None and before == after
+    if before is not None and not unchanged:
         failures.append("H5 store changed during verification (size/mtime/sha256)")
 
     acceptance = {
@@ -394,24 +502,28 @@ def main(argv=None) -> int:
         "ok": not failures,
     }
     acceptance_path = output_dir / "acceptance.json"
-    acceptance_path.write_text(
-        json.dumps(acceptance, indent=2, sort_keys=True) + "\n", encoding="utf-8"
-    )
+    _write_acceptance(acceptance_path, acceptance)
 
     print(f"acceptance: {acceptance_path}")
     print(f"h5_unchanged={unchanged}")
     print(
-        f"real_data_status={real['real_data_status']} "
-        f"verified_complete_net_performance={real['verified_complete_net_performance']}"
+        f"real_data_status={real.get('real_data_status', real.get('status'))} "
+        f"verified_complete_net_performance={real.get('verified_complete_net_performance', False)}"
     )
-    print(f"cutoff_max_abs_diff={real['cutoff']['max_abs_diff']}")
-    print(f"synthetic_status={synthetic['status']}")
+    print(f"cutoff_max_abs_diff={real.get('cutoff', {}).get('max_abs_diff')}")
+    print(f"synthetic_status={synthetic.get('status') if synthetic else 'error'}")
     if notebook:
-        print(f"notebook={notebook['executed_path']}")
+        print(f"notebook={notebook.get('executed_path')}")
     if failures:
         print("contract_failures:", file=sys.stderr)
         for failure in failures:
-            print(f"  - {failure}", file=sys.stderr)
+            if isinstance(failure, dict):
+                print(
+                    "  - " + json.dumps(failure, sort_keys=True, allow_nan=False),
+                    file=sys.stderr,
+                )
+            else:
+                print(f"  - {failure}", file=sys.stderr)
         return 1
     print("ok=true")
     return 0

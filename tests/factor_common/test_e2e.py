@@ -16,6 +16,7 @@ Two chains over the shared 12-name H5 fixture shape:
 from __future__ import annotations
 
 import json
+import subprocess
 import sys
 from pathlib import Path
 
@@ -126,7 +127,9 @@ def test_e2e_complete_chain(scheduled_manager, tmp_path):
     trading = scenarios["trading_net"]
     filled = trading["orders"][trading["orders"]["status"] == "filled"]
     assert not filled.empty
-    assert (filled["fee"] == filled["notional"] * FEE_RATE).all()
+    assert filled["fee"].tolist() == pytest.approx(
+        (filled["notional"] * FEE_RATE).tolist()
+    )
     daily_fee = filled.groupby("date")["fee"].sum()
     ledger = trading["ledger"]
     for day, fee in daily_fee.items():
@@ -279,6 +282,33 @@ def test_real_contract_rejects_non_null_incomplete_net_metrics():
     assert any("all_costs full metrics must be null" in failure for failure in failures)
 
 
+def test_real_contract_requires_incomplete_halt_and_rejected_or_unknown_coverage():
+    result = {
+        "status": "incomplete",
+        "factor_performance": {
+            "scenarios": {"all_costs": {"status": "incomplete", "full": None}}
+        },
+        "factor_result": {
+            "scenarios": {
+                "all_costs": {
+                    "status": "complete",
+                    "diagnostics": {"halt_reason": None},
+                    "funding_coverage": pd.DataFrame(
+                        [{"status": "complete", "accepted": True}]
+                    ),
+                }
+            }
+        },
+    }
+
+    failures, verified = verify_factor_common._validate_real_contract(result)
+
+    assert verified is False
+    assert any("all_costs status must be incomplete" in failure for failure in failures)
+    assert any("rejected or unknown funding coverage" in failure for failure in failures)
+    assert any("halt reason" in failure for failure in failures)
+
+
 def test_real_contract_rejects_complete_status_without_complete_coverage():
     result = {
         "status": "complete",
@@ -310,3 +340,67 @@ def test_acceptance_kernel_spec_uses_current_interpreter(tmp_path):
 
     assert spec_path == tmp_path / "kernels" / "factor-common-verify" / "kernel.json"
     assert spec["argv"] == [sys.executable, "-m", "ipykernel_launcher", "-f", "{connection_file}"]
+
+
+def test_cli_refuses_nonempty_output_dir(tmp_path):
+    output_dir = tmp_path / "occupied"
+    output_dir.mkdir()
+    sentinel = output_dir / "sentinel.txt"
+    sentinel.write_text("keep", encoding="utf-8")
+
+    proc = subprocess.run(
+        [
+            sys.executable,
+            str(verify_factor_common.__file__),
+            "--h5",
+            str(tmp_path / "missing.h5"),
+            "--start",
+            "2024-02-01",
+            "--end",
+            "2024-03-15",
+            "--output-dir",
+            str(output_dir),
+        ],
+        cwd=Path(__file__).resolve().parents[2],
+        text=True,
+        capture_output=True,
+    )
+
+    assert proc.returncode != 0
+    assert "output directory must be empty" in proc.stderr
+    assert sentinel.read_text(encoding="utf-8") == "keep"
+    assert not (output_dir / "acceptance.json").exists()
+
+
+def test_cli_writes_strict_failure_acceptance_for_malformed_h5(tmp_path):
+    h5_path = tmp_path / "malformed.h5"
+    h5_path.write_text("not an HDF5 store", encoding="utf-8")
+    output_dir = tmp_path / "acceptance"
+
+    proc = subprocess.run(
+        [
+            sys.executable,
+            str(verify_factor_common.__file__),
+            "--h5",
+            str(h5_path),
+            "--start",
+            "2024-02-01",
+            "--end",
+            "2024-03-15",
+            "--output-dir",
+            str(output_dir),
+        ],
+        cwd=Path("/tmp"),
+        text=True,
+        capture_output=True,
+    )
+
+    assert proc.returncode != 0
+    acceptance_path = output_dir / "acceptance.json"
+    acceptance = json.loads(acceptance_path.read_text(encoding="utf-8"))
+    assert acceptance["ok"] is False
+    assert acceptance["real_run"]["status"] == "error"
+    assert acceptance["contract_failures"]
+    raw = acceptance_path.read_text(encoding="utf-8")
+    assert all(token not in raw for token in ("NaN", "Infinity", "-Infinity"))
+    assert "Traceback" not in proc.stderr

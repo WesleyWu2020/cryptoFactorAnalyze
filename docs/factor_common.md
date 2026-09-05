@@ -12,6 +12,9 @@ legacy compatibility mapping, unsupported features, and known data blockers.
 ## Quick start
 
 ```bash
+# 0. Install the runtime, test, and notebook dependencies
+./.venv/bin/python -m pip install -r requirements-dev.txt
+
 # 1. Refresh and validate the data store (see docs/crypto_quant_data.md)
 ./.venv/bin/python data/update_crypto_quant.py update
 ./.venv/bin/python data/update_crypto_quant.py validate
