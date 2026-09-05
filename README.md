@@ -15,6 +15,10 @@ Use `backfill` or `rebuild-derived` when explicitly needed. After updating the
 store, create factors in `factor_analyse/factor_mining/` and run
 `factor_analyse/main.py` to generate reports in `reports/`.
 
+For the English `factor_common` H5 workflow, artifact schemas, cost and
+funding conventions, compatibility mapping, and executable acceptance command,
+see [`docs/factor_common.md`](docs/factor_common.md).
+
 ## MaxDD-15 Hedged Strategy
 
 Alt-long + BTC-perp-short portfolio targeting ≤15% OOS max drawdown.
