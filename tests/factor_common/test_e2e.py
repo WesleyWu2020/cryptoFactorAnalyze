@@ -17,241 +17,72 @@ from __future__ import annotations
 
 import json
 import sys
+from pathlib import Path
 
-import numpy as np
 import pandas as pd
 import pytest
 
-from data.crypto_quant.panel import build_research_panel
-from data.crypto_quant.store import CryptoQuantStore
 from factor_common.manager import FactorManager
 from scripts import verify_factor_common
+from tests.factor_common.conftest import (
+    EXAMPLE_CALENDAR,
+    EXAMPLE_PARAMS,
+    _complete_funding_schedule,
+    _example_funding_events,
+    _funding_schedule,
+    write_h5_fixture,
+)
 
-# Same 12-name universe/calendar as the shared conftest fixture.
-SYMBOLS = [f"{letter}USDT" for letter in "ABCDEFGHIJKL"]
-INITIAL_SYMBOLS = SYMBOLS[:6]
-LATER_SYMBOLS = SYMBOLS[6:]
-CALENDAR = pd.date_range("2024-01-01", "2024-01-12", freq="D")
-
+EXAMPLE_FACTOR = Path(__file__).resolve().parents[2] / "factor_analyse" / "factor_mining" / "example_momentum.py"
+PARAMS = EXAMPLE_PARAMS
 FEE_RATE = 0.0003
-# Six names in the early window and n_groups=6 put exactly one name per
-# group: the long-short portfolio holds AUSDT (long) and FUSDT (short), so it
-# never touches the intentional EUSDT kline gap or the BUSDT placeholder bar.
-PARAMS = {
-    "start": "2024-01-02",
-    "end": "2024-01-03",
-    "n_groups": 6,
-    "include_funding": True,
-}
-
-FACTOR_SOURCE = '''
-import numpy as np
-
-TYPE = "regular"
-
-META = {{"factor_name": "{name}", "author": "test", "level": "daily",
-        "category": "momentum", "description": "1-day log momentum"}}
-
-SETTING = {{"data_needed": ["close"], "universe": "historical_top50",
-          "warmup_bars": 1, "preprocessing": "none",
-          "params": {{"window": 1}}, "factor_direction": 1}}
-
-
-def calc_factor(data_ctx):
-    close = data_ctx["close"]
-    window = SETTING["params"]["window"]
-    return np.log(close / close.shift(window))
-'''
-
-
-def _kline_row(day: pd.Timestamp, symbol: str, *, close: float, placeholder: bool = False) -> dict:
-    if placeholder:
-        return {
-            "date": day,
-            "symbol": symbol,
-            "close_time": day + pd.Timedelta(hours=23, minutes=59),
-            "open": 0.248,
-            "high": 0.248,
-            "low": 0.248,
-            "close": 0.248,
-            "volume": 0.0,
-            "quote_volume": 0.0,
-            "trade_count": 0,
-            "taker_buy_base_volume": 0.0,
-            "taker_buy_quote_volume": 0.0,
-        }
-    return {
-        "date": day,
-        "symbol": symbol,
-        "close_time": day + pd.Timedelta(hours=23, minutes=59),
-        "open": close - 1.0,
-        "high": close + 1.0,
-        "low": close - 2.0,
-        "close": close,
-        "volume": 1_000.0,
-        "quote_volume": close * 1_000.0,
-        "trade_count": 10,
-        "taker_buy_base_volume": 500.0,
-        "taker_buy_quote_volume": close * 500.0,
-    }
-
-
-def _universe() -> pd.DataFrame:
-    rows = []
-    for cmc_id, symbol in enumerate(INITIAL_SYMBOLS, start=1):
-        rows.append({
-            "decision_date": "2024-01-01",
-            "effective_date": "2024-01-02",
-            "effective_end_date": "2024-01-06",
-            "cmc_id": cmc_id,
-            "cmc_symbol": symbol[:-4],
-            "binance_symbol": symbol,
-            "market_cap_rank": cmc_id,
-            "cmc_weight": 1.0 / len(SYMBOLS),
-        })
-    for cmc_id, symbol in enumerate(LATER_SYMBOLS, start=7):
-        rows.append({
-            "decision_date": "2024-01-06",
-            "effective_date": "2024-01-07",
-            "effective_end_date": pd.NaT,
-            "cmc_id": cmc_id,
-            "cmc_symbol": symbol[:-4],
-            "binance_symbol": symbol,
-            "market_cap_rank": cmc_id,
-            "cmc_weight": 1.0 / len(SYMBOLS),
-        })
-    return pd.DataFrame(rows)
-
-
-def _klines() -> pd.DataFrame:
-    rows = []
-    for day in CALENDAR:
-        for index, symbol in enumerate(SYMBOLS, start=1):
-            if symbol == "LUSDT":
-                continue
-            if symbol == "EUSDT" and day == pd.Timestamp("2024-01-05"):
-                continue
-            rows.append(_kline_row(
-                day,
-                symbol,
-                close=100.0 + index + (day - CALENDAR[0]).days,
-                placeholder=symbol == "BUSDT" and day == pd.Timestamp("2024-01-04"),
-            ))
-    return pd.DataFrame(rows)
-
-
-def _funding_events() -> pd.DataFrame:
-    return pd.DataFrame([
-        {
-            "funding_time": "2024-01-03 00:00:00",
-            "symbol": "AUSDT",
-            "funding_rate": 0.001,
-            "mark_price": 101.0,
-            "rate_type": "Regular",
-        },
-        {
-            "funding_time": "2024-01-03 08:00:00",
-            "symbol": "AUSDT",
-            "funding_rate": 0.002,
-            "mark_price": 102.0,
-            "rate_type": "Regular",
-        },
-        {
-            "funding_time": "2024-01-03 00:00:00",
-            "symbol": "BUSDT",
-            "funding_rate": -0.001,
-            "mark_price": 101.0,
-            "rate_type": "Regular",
-        },
-        {
-            "funding_time": "2024-01-03 08:00:00",
-            "symbol": "BUSDT",
-            "funding_rate": -0.002,
-            "mark_price": 102.0,
-            "rate_type": "Regular",
-        },
-        {
-            "funding_time": "2024-01-07 00:00:00",
-            "symbol": "GUSDT",
-            "funding_rate": 0.003,
-            "mark_price": 107.0,
-            "rate_type": "Regular",
-        },
-    ])
-
-
-def _full_funding_schedule() -> pd.DataFrame:
-    # Independent settlement evidence for the synthetic world: literal
-    # expected timestamps where the synthetic market settles, explicit empty
-    # lists everywhere else (proving no settlement was applicable).
-    expected_by_key = {
-        (pd.Timestamp("2024-01-03"), "AUSDT"): [
-            "2024-01-03 00:00:00", "2024-01-03 08:00:00",
-        ],
-        (pd.Timestamp("2024-01-03"), "BUSDT"): [
-            "2024-01-03 00:00:00", "2024-01-03 08:00:00",
-        ],
-        (pd.Timestamp("2024-01-07"), "GUSDT"): ["2024-01-07 00:00:00"],
-    }
-    rows = []
-    for day in CALENDAR:
-        for symbol in SYMBOLS:
-            rows.append({
-                "date": day,
-                "symbol": symbol,
-                "expected_times": expected_by_key.get((day, symbol), []),
-            })
-    return pd.DataFrame(rows)
-
-
-def _write_store(path, funding_schedule) -> None:
-    store = CryptoQuantStore(path)
-    universe = _universe()
-    klines = _klines()
-    funding = _funding_events()
-    panel = build_research_panel(
-        universe, klines, funding, CALENDAR[-1], funding_schedule=funding_schedule
-    )
-    panel = panel.merge(
-        universe[["binance_symbol", "decision_date", "market_cap_rank"]],
-        on="binance_symbol",
-        how="left",
-    )
-    store.replace("universe_monthly", universe)
-    store.replace("klines_daily", klines)
-    store.replace("funding_events", funding)
-    store.replace("research_panel_daily", panel)
 
 
 @pytest.fixture
-def scheduled_h5(tmp_path):
-    path = tmp_path / "crypto_quant_scheduled.h5"
-    _write_store(path, _full_funding_schedule())
-    return path
+def complete_h5(h5_fixture):
+    return write_h5_fixture(
+        h5_fixture,
+        calendar=EXAMPLE_CALENDAR,
+        funding_schedule=_complete_funding_schedule(),
+        funding_events=_example_funding_events(),
+    )
 
 
 @pytest.fixture
-def scheduled_manager(tmp_path, scheduled_h5):
+def scheduled_manager(tmp_path, complete_h5):
     return FactorManager(
-        h5_path=scheduled_h5,
+        h5_path=complete_h5,
         base_dir=tmp_path / "factor_results",
         reports_dir=tmp_path / "reports",
     )
 
 
 @pytest.fixture
-def unknown_manager(tmp_path, h5_fixture):
+def partial_h5(h5_fixture):
+    return write_h5_fixture(
+        h5_fixture,
+        calendar=EXAMPLE_CALENDAR,
+        funding_schedule=_funding_schedule(),
+    )
+
+
+@pytest.fixture
+def unknown_manager(tmp_path, partial_h5):
     return FactorManager(
-        h5_path=h5_fixture,
+        h5_path=partial_h5,
         base_dir=tmp_path / "factor_results",
         reports_dir=tmp_path / "reports",
     )
 
 
 @pytest.fixture
-def unknown_schedule_manager(tmp_path):
-    path = tmp_path / "crypto_quant_unknown_schedule.h5"
-    _write_store(path, None)
+def unknown_schedule_manager(tmp_path, h5_fixture):
+    path = write_h5_fixture(
+        h5_fixture,
+        calendar=EXAMPLE_CALENDAR,
+        funding_schedule=None,
+        funding_events=_example_funding_events(),
+    )
     return FactorManager(
         h5_path=path,
         base_dir=tmp_path / "factor_results",
@@ -259,16 +90,9 @@ def unknown_schedule_manager(tmp_path):
     )
 
 
-@pytest.fixture
-def factor_file(tmp_path):
-    path = tmp_path / "e2e_mom.py"
-    path.write_text(FACTOR_SOURCE.format(name="e2e_mom"), encoding="utf-8")
-    return path
-
-
-def test_e2e_complete_chain(scheduled_manager, factor_file, tmp_path):
+def test_e2e_complete_chain(scheduled_manager, tmp_path):
     result = scheduled_manager.evaluate(
-        str(factor_file), params=dict(PARAMS), plot=True
+        str(EXAMPLE_FACTOR), params=dict(PARAMS), plot=True
     )
     assert result["status"] == "complete"
 
@@ -284,12 +108,12 @@ def test_e2e_complete_chain(scheduled_manager, factor_file, tmp_path):
     factor_path = result["paths"]["factor_path"]
     table = pd.read_parquet(factor_path)
     assert list(table.columns) == ["date", "instrument", "factor"]
-    reloaded = scheduled_manager.get_value("e2e_mom", run_id=result["run_id"])
+    reloaded = scheduled_manager.get_value("example_momentum", run_id=result["run_id"])
     pd.testing.assert_frame_equal(reloaded, result["factor_value"])
 
     # The saved evaluation reloads by id with the same certified content.
     loaded = scheduled_manager.get_performance(
-        "e2e_mom", evaluation_id=result["evaluation_id"]
+        "example_momentum", evaluation_id=result["evaluation_id"]
     )
     assert loaded["status"] == "complete"
     pd.testing.assert_frame_equal(loaded["factor_value"], result["factor_value"])
@@ -311,12 +135,12 @@ def test_e2e_complete_chain(scheduled_manager, factor_file, tmp_path):
 
     all_costs = scenarios["all_costs"]
     funding = all_costs["funding"]
-    # The AUSDT 08:00 event settles on the post-trade long quantity; the
-    # 00:00 boundary events predate any holding and produce no rows.
+    # The GUSDT 08:00 event settles on the post-trade long quantity; the
+    # earlier boundary events predate any holding and produce no rows.
     assert len(funding) == 1
     row = funding.iloc[0]
-    assert row["instrument"] == "AUSDT"
-    assert row["funding_time"] == pd.Timestamp("2024-01-03 08:00:00", tz="UTC")
+    assert row["instrument"] == "GUSDT"
+    assert row["funding_time"] == pd.Timestamp("2024-01-23 08:00:00", tz="UTC")
     assert row["resolved"] and not row["price_approximated"]
     assert row["quantity"] > 0.0 and row["funding_rate"] > 0.0
     # Sign convention: longs pay positive rates.
@@ -325,7 +149,7 @@ def test_e2e_complete_chain(scheduled_manager, factor_file, tmp_path):
     )
     assert row["cashflow"] < 0.0
     ac_ledger = all_costs["ledger"]
-    assert ac_ledger.loc[pd.Timestamp("2024-01-03"), "funding_cashflow"] == pytest.approx(
+    assert ac_ledger.loc[pd.Timestamp("2024-01-23"), "funding_cashflow"] == pytest.approx(
         row["cashflow"]
     )
     assert ac_ledger["funding_cashflow"].sum() == pytest.approx(row["cashflow"])
@@ -362,9 +186,9 @@ def test_e2e_complete_chain(scheduled_manager, factor_file, tmp_path):
     assert "Status: complete" in offline.read_text(encoding="utf-8")
 
 
-def test_e2e_unknown_coverage_chain(unknown_manager, factor_file):
+def test_e2e_unknown_coverage_chain(unknown_manager):
     result = unknown_manager.evaluate(
-        str(factor_file), params=dict(PARAMS), plot=True
+        str(EXAMPLE_FACTOR), params=dict(PARAMS), plot=True
     )
     assert result["status"] == "incomplete"
 
@@ -382,7 +206,7 @@ def test_e2e_unknown_coverage_chain(unknown_manager, factor_file):
     assert block["out_of_sample"] is None
 
     # The factor value was persisted before funding data was touched.
-    reloaded = unknown_manager.get_value("e2e_mom", run_id=result["run_id"])
+    reloaded = unknown_manager.get_value("example_momentum", run_id=result["run_id"])
     pd.testing.assert_frame_equal(reloaded, result["factor_value"])
     assert reloaded.notna().any().any()
 
@@ -393,18 +217,34 @@ def test_e2e_unknown_coverage_chain(unknown_manager, factor_file):
     assert "unresolved_funding_coverage" in text
 
 
-def test_e2e_unknown_schedule_is_explicitly_unverified(
-    unknown_schedule_manager, factor_file
+def test_e2e_unknown_schedule_chain_is_incomplete_and_preserves_values(
+    unknown_schedule_manager,
 ):
     result = unknown_schedule_manager.evaluate(
-        str(factor_file), params=dict(PARAMS), plot=True
+        str(EXAMPLE_FACTOR), params=dict(PARAMS), plot=True
     )
 
     assert result["status"] == "incomplete"
-    coverage = result["factor_result"]["scenarios"]["all_costs"]["funding_coverage"]
+    all_costs = result["factor_result"]["scenarios"]["all_costs"]
+    assert all_costs["status"] == "incomplete"
+    assert all_costs["diagnostics"]["halt_reason"] == "unresolved_funding_coverage"
+    coverage = all_costs["funding_coverage"]
     assert "unknown" in set(coverage["status"])
     assert not coverage["accepted"].any()
-    assert result["factor_performance"]["scenarios"]["all_costs"]["full"] is None
+    metrics = result["factor_performance"]["scenarios"]["all_costs"]
+    assert metrics["full"] is None
+    assert metrics["in_sample"] is None
+    assert metrics["out_of_sample"] is None
+
+    reloaded = unknown_schedule_manager.get_value(
+        "example_momentum", run_id=result["run_id"]
+    )
+    pd.testing.assert_frame_equal(reloaded, result["factor_value"])
+    assert reloaded.notna().any().any()
+
+    report = Path(result["paths"]["report_path"]).read_text(encoding="utf-8")
+    assert "Status: incomplete" in report
+    assert "unresolved_funding_coverage" in report
 
 
 def test_acceptance_synthetic_summary_reconciles_artifacts_and_costs(tmp_path):
@@ -412,10 +252,55 @@ def test_acceptance_synthetic_summary_reconciles_artifacts_and_costs(tmp_path):
     summary = verify_factor_common._run_synthetic(tmp_path, failures)
 
     assert failures == []
+    assert summary["factor_name"] == "example_momentum"
+    assert summary["factor_source"] == str(
+        verify_factor_common.EXAMPLE_FACTOR
+    )
     assert summary["parquet_reload_equal"] is True
     assert summary["report_labels_ok"] is True
     assert summary["cash_flow_checks"]["fee_total"] > 0.0
     assert summary["cash_flow_checks"]["funding_total"] < 0.0
+
+
+def test_real_contract_rejects_non_null_incomplete_net_metrics():
+    result = {
+        "status": "incomplete",
+        "factor_performance": {
+            "scenarios": {"all_costs": {"status": "incomplete", "full": {"total_return": 0.1}}}
+        },
+        "factor_result": {
+            "scenarios": {"all_costs": {"status": "incomplete", "funding_coverage": pd.DataFrame()}}
+        },
+    }
+
+    failures, verified = verify_factor_common._validate_real_contract(result)
+
+    assert verified is False
+    assert any("all_costs full metrics must be null" in failure for failure in failures)
+
+
+def test_real_contract_rejects_complete_status_without_complete_coverage():
+    result = {
+        "status": "complete",
+        "factor_performance": {
+            "scenarios": {"all_costs": {"status": "complete", "full": {"total_return": 0.1}}}
+        },
+        "factor_result": {
+            "scenarios": {
+                "all_costs": {
+                    "status": "complete",
+                    "funding_coverage": pd.DataFrame(
+                        [{"status": "unknown", "accepted": False}]
+                    ),
+                }
+            }
+        },
+    }
+
+    failures, verified = verify_factor_common._validate_real_contract(result)
+
+    assert verified is False
+    assert any("complete coverage evidence" in failure for failure in failures)
 
 
 def test_acceptance_kernel_spec_uses_current_interpreter(tmp_path):

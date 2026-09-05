@@ -13,6 +13,13 @@ SYMBOLS = [f"{letter}USDT" for letter in "ABCDEFGHIJKL"]
 INITIAL_SYMBOLS = SYMBOLS[:6]
 LATER_SYMBOLS = SYMBOLS[6:]
 CALENDAR = pd.date_range("2024-01-01", "2024-01-12", freq="D")
+EXAMPLE_CALENDAR = pd.date_range("2024-01-01", "2024-02-19", freq="D")
+EXAMPLE_PARAMS = {
+    "start": "2024-01-22",
+    "end": "2024-01-23",
+    "n_groups": 3,
+    "include_funding": True,
+}
 
 
 def _kline_row(day: pd.Timestamp, symbol: str, *, close: float, placeholder: bool = False) -> dict:
@@ -74,9 +81,9 @@ def _universe() -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def _klines() -> pd.DataFrame:
+def _klines(calendar: pd.DatetimeIndex = CALENDAR) -> pd.DataFrame:
     rows = []
-    for day in CALENDAR:
+    for day in calendar:
         for index, symbol in enumerate(SYMBOLS, start=1):
             if symbol == "LUSDT":
                 continue
@@ -85,7 +92,7 @@ def _klines() -> pd.DataFrame:
             rows.append(_kline_row(
                 day,
                 symbol,
-                close=100.0 + index + (day - CALENDAR[0]).days,
+                close=100.0 + index + (day - calendar[0]).days,
                 placeholder=symbol == "BUSDT" and day == pd.Timestamp("2024-01-04"),
             ))
     return pd.DataFrame(rows)
@@ -143,19 +150,66 @@ def _funding_schedule() -> pd.DataFrame:
     ])
 
 
-@pytest.fixture
-def h5_fixture(tmp_path: Path) -> Path:
-    path = tmp_path / "crypto_quant_fixture.h5"
+def _example_funding_events() -> pd.DataFrame:
+    return pd.concat(
+        [
+            _funding_events(),
+            pd.DataFrame([
+                {
+                    "funding_time": "2024-01-23 08:00:00",
+                    "symbol": "GUSDT",
+                    "funding_rate": 0.001,
+                    "mark_price": 123.0,
+                    "rate_type": "Regular",
+                },
+            ]),
+        ],
+        ignore_index=True,
+    )
+
+
+def _complete_funding_schedule(
+    calendar: pd.DatetimeIndex = EXAMPLE_CALENDAR,
+) -> pd.DataFrame:
+    expected_by_key = {
+        (pd.Timestamp("2024-01-03"), "AUSDT"): [
+            "2024-01-03 00:00:00", "2024-01-03 08:00:00",
+        ],
+        (pd.Timestamp("2024-01-03"), "BUSDT"): [
+            "2024-01-03 00:00:00", "2024-01-03 08:00:00",
+        ],
+        (pd.Timestamp("2024-01-07"), "GUSDT"): ["2024-01-07 00:00:00"],
+        (pd.Timestamp("2024-01-23"), "GUSDT"): ["2024-01-23 08:00:00"],
+    }
+    rows = []
+    for day in calendar:
+        for symbol in SYMBOLS:
+            rows.append({
+                "date": day,
+                "symbol": symbol,
+                "expected_times": expected_by_key.get((day, symbol), []),
+            })
+    return pd.DataFrame(rows)
+
+
+def write_h5_fixture(
+    path: Path,
+    *,
+    calendar: pd.DatetimeIndex = CALENDAR,
+    funding_schedule: pd.DataFrame | None,
+    funding_events: pd.DataFrame | None = None,
+) -> Path:
+    """Write the shared 12-name fixture with caller-supplied coverage evidence."""
     store = CryptoQuantStore(path)
     universe = _universe()
-    klines = _klines()
-    funding = _funding_events()
+    klines = _klines(calendar)
+    funding = _funding_events() if funding_events is None else funding_events
     panel = build_research_panel(
         universe,
         klines,
         funding,
-        pd.Timestamp("2024-01-12"),
-        funding_schedule=_funding_schedule(),
+        calendar[-1],
+        funding_schedule=funding_schedule,
     )
     panel = panel.merge(
         universe[["binance_symbol", "decision_date", "market_cap_rank"]],
@@ -167,3 +221,12 @@ def h5_fixture(tmp_path: Path) -> Path:
     store.replace("funding_events", funding)
     store.replace("research_panel_daily", panel)
     return path
+
+
+@pytest.fixture
+def h5_fixture(tmp_path: Path) -> Path:
+    path = tmp_path / "crypto_quant_fixture.h5"
+    return write_h5_fixture(
+        path,
+        funding_schedule=_funding_schedule(),
+    )

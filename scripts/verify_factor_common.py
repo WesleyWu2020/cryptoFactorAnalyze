@@ -20,7 +20,6 @@ from __future__ import annotations
 
 import argparse
 import hashlib
-import importlib.util
 import json
 import os
 import sys
@@ -33,11 +32,18 @@ if str(_REPO_ROOT) not in sys.path:
 
 from factor_common.manager import FactorManager  # noqa: E402
 from factor_common.validation import scan_future_leaks  # noqa: E402
+from tests.factor_common.conftest import (  # noqa: E402
+    EXAMPLE_CALENDAR,
+    EXAMPLE_PARAMS,
+    _complete_funding_schedule,
+    _example_funding_events,
+    write_h5_fixture,
+)
 
 EXAMPLE_FACTOR = _REPO_ROOT / "factor_analyse" / "factor_mining" / "example_momentum.py"
 NOTEBOOK = _REPO_ROOT / "factor_analyse" / "factor_common_usage.ipynb"
-E2E_MODULE = _REPO_ROOT / "tests" / "factor_common" / "test_e2e.py"
 _CUTOFF_ATOL = 1e-12
+_SYNTHETIC_FEE_RATE = 0.0003
 
 KNOWN_DATA_LIMITATIONS = [
     "The production H5 carries no authoritative historical funding settlement "
@@ -63,13 +69,6 @@ def _fingerprint(path: Path) -> dict:
     }
 
 
-def _load_e2e_module():
-    spec = importlib.util.spec_from_file_location("_verify_e2e_fixture", E2E_MODULE)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
 def _write_kernel_spec(output_dir: Path) -> Path:
     """Write a private kernelspec that launches this interpreter."""
     spec_path = output_dir / "kernels" / "factor-common-verify" / "kernel.json"
@@ -93,6 +92,37 @@ def _write_kernel_spec(output_dir: Path) -> Path:
         encoding="utf-8",
     )
     return spec_path
+
+
+def _validate_real_contract(result: dict) -> tuple[list[str], bool]:
+    """Validate status, all-cost metrics, and funding evidence for real data."""
+    failures = []
+    status = result["status"]
+    performance = result["factor_performance"]["scenarios"]["all_costs"]
+    accounting = result["factor_result"]["scenarios"]["all_costs"]
+    coverage = accounting.get("funding_coverage")
+    coverage_complete = bool(
+        hasattr(coverage, "empty")
+        and not coverage.empty
+        and coverage["accepted"].all()
+        and set(coverage["status"]) <= {"complete", "not_applicable"}
+    )
+
+    if status == "incomplete":
+        if performance.get("full") is not None:
+            failures.append("incomplete real data: all_costs full metrics must be null")
+        return failures, False
+
+    if status != "complete":
+        return failures, False
+
+    if accounting.get("status") != "complete" or not coverage_complete:
+        failures.append(
+            "complete real data requires complete coverage evidence before verified net performance"
+        )
+    if performance.get("full") is None:
+        failures.append("complete real data: all_costs full metrics cannot be null")
+    return failures, not failures
 
 
 def _run_real(h5_path: Path, start: str, end: str, output_dir: Path, failures: list) -> dict:
@@ -144,12 +174,8 @@ def _run_real(h5_path: Path, start: str, end: str, output_dir: Path, failures: l
 
     coverage = result["diagnostics"]["coverage"]["funding"]["status_counts"]
     all_costs_diag = result["factor_result"]["scenarios"]["all_costs"]["diagnostics"]
-    all_costs_status = result["factor_result"]["scenarios"]["all_costs"]["status"]
-    if all_costs_status != "complete" and status != "incomplete":
-        failures.append(
-            f"real run status {status!r} hides incomplete all_costs accounting"
-        )
-    verified_complete = status == "complete" and all_costs_status == "complete"
+    contract_failures, verified_complete = _validate_real_contract(result)
+    failures.extend(contract_failures)
     return {
         "factor_name": "example_momentum",
         "signal_start": start,
@@ -179,24 +205,26 @@ def _run_real(h5_path: Path, start: str, end: str, output_dir: Path, failures: l
 
 
 def _run_synthetic(output_dir: Path, failures: list) -> dict:
-    e2e = _load_e2e_module()
     synth_dir = output_dir / "synthetic"
     synth_dir.mkdir(parents=True, exist_ok=True)
-    h5_path = synth_dir / "crypto_quant_synthetic.h5"
-    e2e._write_store(h5_path, e2e._full_funding_schedule())
-    factor_path = synth_dir / "e2e_mom.py"
-    factor_path.write_text(e2e.FACTOR_SOURCE.format(name="e2e_mom"), encoding="utf-8")
+    h5_path = synth_dir / "crypto_quant_fixture.h5"
+    write_h5_fixture(
+        h5_path,
+        calendar=EXAMPLE_CALENDAR,
+        funding_schedule=_complete_funding_schedule(),
+        funding_events=_example_funding_events(),
+    )
 
     manager = FactorManager(
         h5_path=h5_path,
         base_dir=synth_dir / "factor_results",
         reports_dir=synth_dir / "reports",
     )
-    result = manager.evaluate(str(factor_path), params=dict(e2e.PARAMS), plot=True)
+    result = manager.evaluate(str(EXAMPLE_FACTOR), params=dict(EXAMPLE_PARAMS), plot=True)
     status = result["status"]
     scenarios = result["factor_result"]["scenarios"]
     scenario_status = {name: s["status"] for name, s in scenarios.items()}
-    reloaded = manager.get_value("e2e_mom", run_id=result["run_id"])
+    reloaded = manager.get_value("example_momentum", run_id=result["run_id"])
     parquet_reload_equal = reloaded.equals(result["factor_value"])
     if not parquet_reload_equal:
         failures.append("synthetic factor Parquet reload does not match the matrix")
@@ -211,7 +239,7 @@ def _run_synthetic(output_dir: Path, failures: list) -> dict:
     filled = filled[filled["status"] == "filled"]
     fee_reconciles = bool(
         not filled.empty
-        and (filled["fee"] == filled["notional"] * e2e.FEE_RATE).all()
+        and (filled["fee"] == filled["notional"] * _SYNTHETIC_FEE_RATE).all()
         and abs(fee_total - float(filled["fee"].sum())) <= 1e-12
     )
     funding = all_costs["funding"]
@@ -254,6 +282,8 @@ def _run_synthetic(output_dir: Path, failures: list) -> dict:
             f"scenarios={scenario_status}"
         )
     return {
+        "factor_name": "example_momentum",
+        "factor_source": str(EXAMPLE_FACTOR),
         "status": status,
         "scenario_status": scenario_status,
         "factor_path": result["paths"]["factor_path"],
