@@ -291,6 +291,23 @@ class FactorStorage:
             "metadata_path": run_dir / "metadata.json",
         }
 
+    @staticmethod
+    def _assert_same_evaluation(
+        eval_dir: Path, payload: Mapping, tables: Mapping[str, pd.DataFrame]
+    ) -> None:
+        """Reject a re-save whose content differs from the stored evaluation."""
+        conflict = (
+            "evaluation already exists with different content; "
+            "input fingerprints must change when outputs change"
+        )
+        stored = json.loads((eval_dir / "result.json").read_text())
+        if _canonical_json(stored) != _canonical_json(payload):
+            raise ValueError(conflict)
+        for key, frame in tables.items():
+            existing = pd.read_parquet(eval_dir / f"table-{key}.parquet")
+            if not existing.equals(frame):
+                raise ValueError(conflict)
+
     def get_value(self, factor_id: str, *, run_id: str | None = None) -> pd.DataFrame:
         """Rebuild the stored matrix for a run, defaulting to the latest success."""
         run_dir = self._run_dir(factor_id, run_id)
@@ -319,6 +336,8 @@ class FactorStorage:
         The evaluation ID covers the run ID, the profile, and the evaluation
         input hashes (execution-tail prices, funding events, coverage
         evidence), so cost-only profile changes never overwrite prior results.
+        Re-saving identical content is idempotent; re-saving the same ID with
+        different content raises ``ValueError``, mirroring the value path.
         Only ``status="complete"`` results promote the latest-complete pointer;
         incomplete evaluations stay loadable by explicit ID.
         """
@@ -339,28 +358,28 @@ class FactorStorage:
             }
         )
         eval_dir = run_dir / "evaluations" / evaluation_id
-        if not eval_dir.is_dir():
-            tables = {
-                key: value
-                for key, value in result.items()
-                if isinstance(value, pd.DataFrame)
-            }
-            scalars = {key: value for key, value in result.items() if key not in tables}
+        tables = {
+            key: value
+            for key, value in result.items()
+            if isinstance(value, pd.DataFrame)
+        }
+        scalars = {key: value for key, value in result.items() if key not in tables}
+        payload = {
+            "evaluation_id": evaluation_id,
+            "run_id": run_dir.name,
+            "framework_version": FRAMEWORK_VERSION,
+            "tables": sorted(tables),
+            "result": scalars,
+        }
+        if eval_dir.is_dir():
+            self._assert_same_evaluation(eval_dir, payload, tables)
+        else:
             tmp_dir = _temp_sibling(eval_dir)
             tmp_dir.mkdir(parents=True)
             try:
                 for key, frame in tables.items():
                     frame.to_parquet(tmp_dir / f"table-{key}.parquet")
-                _write_json(
-                    tmp_dir / "result.json",
-                    {
-                        "evaluation_id": evaluation_id,
-                        "run_id": run_dir.name,
-                        "framework_version": FRAMEWORK_VERSION,
-                        "tables": sorted(tables),
-                        "result": scalars,
-                    },
-                )
+                _write_json(tmp_dir / "result.json", payload)
                 os.rename(tmp_dir, eval_dir)
             except BaseException:
                 shutil.rmtree(tmp_dir, ignore_errors=True)

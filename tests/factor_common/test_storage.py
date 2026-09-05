@@ -244,6 +244,54 @@ def test_evaluation_tables_round_trip(tmp_path):
     pd.testing.assert_frame_equal(loaded["ledger"], ledger)
 
 
+def test_identical_evaluation_resave_is_idempotent(tmp_path):
+    ledger = pd.DataFrame(
+        {
+            "date": pd.date_range("2024-01-01", periods=2),
+            "equity": [1.0, 1.1],
+        }
+    )
+    store = FactorStorage(tmp_path)
+    saved = store.save_value("momentum", _matrix(), _metadata())
+    first = store.save_evaluation("momentum", saved["run_id"], _evaluation(ledger=ledger))
+    second = store.save_evaluation(
+        "momentum", saved["run_id"], _evaluation(ledger=ledger.copy())
+    )
+    assert second["evaluation_id"] == first["evaluation_id"]
+    loaded = store.load_evaluation(
+        "momentum", run_id=saved["run_id"], evaluation_id=first["evaluation_id"]
+    )
+    pd.testing.assert_frame_equal(loaded["ledger"], ledger)
+
+
+def test_conflicting_evaluation_resave_is_rejected(tmp_path):
+    store = FactorStorage(tmp_path)
+    saved = store.save_value("momentum", _matrix(), _metadata())
+    ledger = pd.DataFrame({"equity": [1.0, 1.1]})
+    first = store.save_evaluation(
+        "momentum", saved["run_id"], _evaluation(metrics={"sharpe": 1.0}, ledger=ledger)
+    )
+    with pytest.raises(ValueError, match="different content"):
+        store.save_evaluation(
+            "momentum",
+            saved["run_id"],
+            _evaluation(metrics={"sharpe": 2.0}, ledger=ledger),
+        )
+    changed_ledger = pd.DataFrame({"equity": [1.0, 9.9]})
+    with pytest.raises(ValueError, match="different content"):
+        store.save_evaluation(
+            "momentum",
+            saved["run_id"],
+            _evaluation(metrics={"sharpe": 1.0}, ledger=changed_ledger),
+        )
+    loaded = store.load_evaluation(
+        "momentum", run_id=saved["run_id"], evaluation_id=first["evaluation_id"]
+    )
+    assert loaded["metrics"]["sharpe"] == 1.0
+    pd.testing.assert_frame_equal(loaded["ledger"], ledger)
+    assert store.load_evaluation("momentum")["evaluation_id"] == first["evaluation_id"]
+
+
 def test_nonfinite_scalars_become_json_null(tmp_path):
     store = FactorStorage(tmp_path)
     saved = store.save_value(
