@@ -1,0 +1,15 @@
+import numpy as np
+
+TYPE = "regular"
+
+META = {"factor_name": "example_momentum", "author": "local",
+          "level": "daily", "category": "momentum", "description": "N-day log momentum"}
+
+SETTING = {"data_needed": ["close"], "universe": "historical_top50",
+             "warmup_bars": 20, "preprocessing": "mad_rank",
+             "params": {"window": 20}, "factor_direction": 1}
+
+def calc_factor(data_ctx):
+    close = data_ctx["close"]
+    window = SETTING["params"]["window"]
+    return np.log(close / close.shift(window))
