@@ -1,6 +1,6 @@
 """Immutable definitions shared by factor calculation and evaluation code."""
 
-from copy import deepcopy
+from collections.abc import Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Any, Callable
@@ -9,7 +9,7 @@ import pandas as pd
 
 
 def _freeze(value: Any) -> Any:
-    if isinstance(value, dict):
+    if isinstance(value, Mapping):
         return MappingProxyType(
             {_freeze(key): _freeze(item) for key, item in value.items()}
         )
@@ -34,17 +34,15 @@ def _freeze(value: Any) -> Any:
 @dataclass(frozen=True)
 class FactorSpec:
     factor_id: str
-    meta: dict
-    setting: dict
+    meta: Mapping
+    setting: Mapping
     calc_factor: Callable[[dict[str, pd.DataFrame]], pd.DataFrame]
     source_sha256: str
 
     def __post_init__(self) -> None:
-        meta = deepcopy(self.meta)
-        setting = deepcopy(self.setting)
-        if not isinstance(meta, dict):
-            raise TypeError("FactorSpec meta must be a dict")
-        if not isinstance(setting, dict):
-            raise TypeError("FactorSpec setting must be a dict")
-        object.__setattr__(self, "meta", _freeze(meta))
-        object.__setattr__(self, "setting", _freeze(setting))
+        if not isinstance(self.meta, Mapping):
+            raise TypeError("FactorSpec meta must be a mapping")
+        if not isinstance(self.setting, Mapping):
+            raise TypeError("FactorSpec setting must be a mapping")
+        object.__setattr__(self, "meta", _freeze(self.meta))
+        object.__setattr__(self, "setting", _freeze(self.setting))

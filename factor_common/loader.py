@@ -69,6 +69,9 @@ def _validate_meta(meta: dict[str, Any], factor_id: str) -> None:
 
 
 def _validate_settings(setting: dict[str, Any]) -> None:
+    unsupported_keys = [key for key in setting if key not in (*_SETTING_FIELDS, "frequency")]
+    if unsupported_keys:
+        raise ValueError(f"SETTING contains unsupported key(s): {unsupported_keys}")
     missing = [field_name for field_name in _SETTING_FIELDS if field_name not in setting]
     if missing:
         raise ValueError(f"SETTING is missing required field: {missing[0]}")
@@ -84,8 +87,8 @@ def _validate_settings(setting: dict[str, Any]) -> None:
     if unsupported:
         raise ValueError(f"SETTING.data_needed contains unsupported field(s): {unsupported}")
 
-    if not isinstance(setting["universe"], str) or not setting["universe"].strip():
-        raise ValueError("SETTING.universe must be a non-empty string")
+    if setting["universe"] != "historical_top50":
+        raise ValueError("SETTING.universe must be 'historical_top50'")
 
     warmup = setting["warmup_bars"]
     if isinstance(warmup, bool) or not isinstance(warmup, int) or warmup < 0:
@@ -109,14 +112,16 @@ def _validate_settings(setting: dict[str, Any]) -> None:
         )
 
 
-def _load_module(path: Path, factor_id: str, source_sha256: str) -> ModuleType:
+def _load_module(path: Path, factor_id: str, source_sha256: str, source: bytes) -> ModuleType:
     module_name = f"_factor_common_{factor_id}_{source_sha256[:16]}"
     module_spec = importlib.util.spec_from_file_location(module_name, path)
     if module_spec is None or module_spec.loader is None:
         raise ValueError(f"Could not create a Python module spec for {path}")
     module = importlib.util.module_from_spec(module_spec)
     try:
-        module_spec.loader.exec_module(module)
+        # Execute the exact snapshot hashed by load_factor, bypassing stale pyc files.
+        code = compile(source, str(path), "exec", dont_inherit=True)
+        exec(code, module.__dict__)
     except Exception as exc:
         raise ValueError(f"Could not import factor module {path}: {exc}") from exc
     return module
@@ -143,7 +148,7 @@ def load_factor(path: str | Path) -> FactorSpec:
     factor_id = _validate_identifier(factor_path.stem, field_name="factor filename")
     source = factor_path.read_bytes()
     source_sha256 = hashlib.sha256(source).hexdigest()
-    module = _load_module(factor_path, factor_id, source_sha256)
+    module = _load_module(factor_path, factor_id, source_sha256, source)
 
     if getattr(module, "TYPE", None) != "regular":
         raise ValueError("factor TYPE must be 'regular'")

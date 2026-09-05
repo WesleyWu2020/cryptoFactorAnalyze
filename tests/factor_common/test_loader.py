@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import builtins
 import hashlib
+import os
+import py_compile
 import subprocess
 import sys
 from pathlib import Path
@@ -82,6 +84,82 @@ def test_load_factor_builds_immutable_spec_and_hashes_source(tmp_path):
     assert spec.source_sha256 == hashlib.sha256(source.encode()).hexdigest()
     result = spec.calc_factor({"close": pd.DataFrame([[1.0, 2.0]])})
     assert result.iloc[0, 0] == 1.0
+
+
+def test_load_factor_executes_hashed_source_despite_stale_pyc(tmp_path):
+    from factor_common.loader import load_factor
+
+    source = _factor_source(body="return data_ctx['close'] + 1")
+    path = _write_factor(tmp_path, source)
+    original_stat = path.stat()
+    cached = Path(py_compile.compile(
+        str(path), doraise=True,
+        invalidation_mode=py_compile.PycInvalidationMode.TIMESTAMP,
+    ))
+    cached_bytes = cached.read_bytes()
+    changed = source.replace("+ 1", "+ 2").encode()
+    assert len(changed) == original_stat.st_size
+    path.write_bytes(changed)
+    os.utime(path, ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns))
+    assert path.stat().st_mtime_ns == original_stat.st_mtime_ns
+
+    spec = load_factor(path)
+
+    assert spec.source_sha256 == hashlib.sha256(changed).hexdigest()
+    assert spec.calc_factor({"close": 10}) == 12
+    namespace = spec.calc_factor.__globals__
+    assert namespace["__file__"] == str(path)
+    assert namespace["__spec__"].origin == str(path)
+    assert namespace["__loader__"] is namespace["__spec__"].loader
+    assert cached.read_bytes() == cached_bytes
+
+
+def test_load_factor_accepts_nested_mapping_params(tmp_path):
+    from factor_common.loader import load_factor
+
+    source = _factor_source() + '''
+from types import MappingProxyType
+SETTING['params'] = MappingProxyType({
+    'nested': [MappingProxyType({'windows': [10, 20]})],
+})
+META = MappingProxyType(META)
+SETTING = MappingProxyType(SETTING)
+'''
+    spec = load_factor(_write_factor(tmp_path, source))
+
+    assert spec.setting['params']['nested'][0]['windows'] == (10, 20)
+    with pytest.raises(TypeError):
+        spec.setting['params']['nested'][0]['windows'] = ()
+
+
+@pytest.mark.parametrize("key", ["pool", "rebalance_days", "warmup_bar", 42])
+def test_load_factor_rejects_unknown_setting_keys(tmp_path, key):
+    from factor_common.loader import load_factor
+
+    path = _write_factor(tmp_path, _factor_source(setting_overrides={key: "ignored"}))
+    with pytest.raises(ValueError, match="SETTING.*unsupported.*" + str(key)):
+        load_factor(path)
+
+
+@pytest.mark.parametrize("universe", ["current_top50", "all", "", None, []])
+def test_load_factor_rejects_unsupported_universe(tmp_path, universe):
+    from factor_common.loader import load_factor
+
+    path = _write_factor(tmp_path, _factor_source(setting_overrides={"universe": universe}))
+    with pytest.raises(ValueError, match="SETTING.universe.*historical_top50"):
+        load_factor(path)
+
+
+@pytest.mark.parametrize("frequency", ["daily", "hourly", None])
+def test_load_factor_setting_frequency(tmp_path, frequency):
+    from factor_common.loader import load_factor
+
+    path = _write_factor(tmp_path, _factor_source(setting_overrides={"frequency": frequency}))
+    if frequency == "daily":
+        assert load_factor(path).setting["frequency"] == "daily"
+    else:
+        with pytest.raises(ValueError, match="daily.*SETTING.frequency"):
+            load_factor(path)
 
 
 @pytest.mark.parametrize("missing", ["factor_name", "author", "level", "category", "description"])

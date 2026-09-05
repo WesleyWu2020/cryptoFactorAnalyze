@@ -1,4 +1,6 @@
 from dataclasses import FrozenInstanceError, fields
+from collections import UserDict
+from types import MappingProxyType
 
 import pandas as pd
 import pytest
@@ -12,6 +14,25 @@ def _calc_factor(data: dict[str, pd.DataFrame]) -> pd.DataFrame:
 
 class MutableMetadata:
     pass
+
+
+@pytest.mark.parametrize("mapping", [dict, MappingProxyType, UserDict])
+def test_factor_spec_recursively_copies_and_freezes_mappings(mapping):
+    windows = [10, 20]
+    nested = mapping({"windows": windows})
+    meta = mapping({"nested": (nested,)})
+    setting = mapping({"params": mapping({"items": [nested]})})
+
+    spec = FactorSpec("mapping", meta, setting, _calc_factor, "sha")
+    windows.append(30)
+
+    assert spec.meta["nested"][0]["windows"] == (10, 20)
+    assert spec.setting["params"]["items"][0]["windows"] == (10, 20)
+    with pytest.raises(TypeError):
+        spec.setting["params"]["items"][0]["windows"] = ()
+    copied = FactorSpec("copy", spec.meta, spec.setting, _calc_factor, "sha")
+    assert copied.meta == spec.meta
+    assert copied.setting == spec.setting
 
 
 def test_factor_spec_has_immutable_contract_and_copies_inputs():
