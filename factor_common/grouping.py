@@ -28,22 +28,7 @@ import numpy as np
 import pandas as pd
 
 from .profiles import BacktestProfile
-
-
-def _validate_axes(matrix, *, name):
-    if not isinstance(matrix, pd.DataFrame):
-        raise TypeError(f"{name} must be a DataFrame with daily axes")
-    index = matrix.index
-    if not isinstance(index, pd.DatetimeIndex):
-        raise ValueError(f"{name} date axis must be a DatetimeIndex")
-    if index.tz is not None or index.hasnans or not index.equals(index.normalize()):
-        raise ValueError(f"{name} date axis must be daily UTC-naive midnight without NaT")
-    if not index.is_unique or not matrix.columns.is_unique:
-        raise ValueError(f"{name} axes must be unique")
-    if not index.is_monotonic_increasing:
-        raise ValueError(f"{name} date axis must be increasing")
-    if len(index) and not index.equals(pd.date_range(index[0], index[-1], freq="D")):
-        raise ValueError(f"{name} date axis must preserve every calendar day")
+from .value_engine import _validate_axes
 
 
 def assign_groups(values: pd.DataFrame, n_groups: int) -> tuple[pd.DataFrame, dict[str, list]]:
