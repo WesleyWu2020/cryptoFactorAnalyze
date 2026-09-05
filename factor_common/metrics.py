@@ -308,14 +308,24 @@ def _ic_decay(values: pd.DataFrame, labels: pd.DataFrame) -> list:
     return decay
 
 
-def _rank_ic_autocorr(daily: pd.DataFrame) -> list:
-    """Autocorrelation of the daily RankIC series at calendar lags 1..20."""
-    series = daily["rank_ic"].dropna() if not daily.empty else pd.Series(dtype="float64")
+def _rank_ic_autocorr(daily: pd.DataFrame, calendar: pd.DatetimeIndex) -> list:
+    """Autocorrelation of the daily RankIC series at exact calendar lags 1..20.
+
+    The series is reindexed onto the full daily calendar — NaN where a date has
+    no valid cross-section — so lag ``k`` always spans ``k`` calendar days,
+    never ``k`` surviving rows. Each lag correlates the series with its
+    calendar-shifted self pairwise, dropping NaN pairs.
+    """
+    if daily.empty:
+        series = pd.Series(np.nan, index=calendar, dtype="float64")
+    else:
+        series = daily.set_index("date")["rank_ic"].reindex(calendar)
     autocorr = []
     for lag in AUTOCORR_LAGS:
+        pairs = pd.concat([series, series.shift(lag)], axis=1).dropna()
         value = None
-        if len(series) > lag:
-            value = _finite_or_none(series.autocorr(lag=lag))
+        if len(pairs) >= 2:
+            value = _finite_or_none(pairs.iloc[:, 0].corr(pairs.iloc[:, 1]))
         autocorr.append({"lag": lag, "autocorr": value})
     return autocorr
 
@@ -449,7 +459,7 @@ def evaluate_metrics(values, labels, accounting, profile) -> dict:
         samples[name] = {
             "ic": _ic_summary(daily, periods_per_year=ppy),
             "ic_decay": decay,
-            "rank_ic_autocorr": _rank_ic_autocorr(daily),
+            "rank_ic_autocorr": _rank_ic_autocorr(daily, values.index),
             "rank_ic_half_life": _half_life(decay),
             "coverage": _coverage(values, sliced_labels, date_mask),
         }

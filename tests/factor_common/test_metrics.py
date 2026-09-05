@@ -4,7 +4,12 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from factor_common.metrics import _half_life, evaluate_metrics, summarize_returns
+from factor_common.metrics import (
+    _half_life,
+    _rank_ic_autocorr,
+    evaluate_metrics,
+    summarize_returns,
+)
 from factor_common.profiles import resolve_profile
 
 
@@ -333,3 +338,54 @@ def test_half_life_missing_without_crossing_or_base():
     no_crossing = [{"horizon": h, "rank_ic": 0.9} for h in range(1, 11)]
     assert _half_life(no_crossing) is None
     assert _half_life([{"horizon": 1, "rank_ic": None}]) is None
+
+
+# ---------------------------------------------------------------------------
+# RankIC autocorrelation: exact calendar lags
+# ---------------------------------------------------------------------------
+
+
+def test_rank_ic_autocorr_uses_calendar_not_positional_lags():
+    calendar = pd.date_range("2024-01-01", periods=5, freq="D")
+    # 2024-01-03 has no valid cross-section: the RankIC series has a gap.
+    daily = pd.DataFrame(
+        {
+            "date": [calendar[0], calendar[1], calendar[3], calendar[4]],
+            "rank_ic": [0.0, 0.0, 1.0, 1.0],
+        }
+    )
+    by_lag = {row["lag"]: row["autocorr"] for row in _rank_ic_autocorr(daily, calendar)}
+    # Calendar lag 1 pairs (d1,d2)=(0,0) and (d4,d5)=(1,1); pairs spanning the
+    # gap (d2,d3) and (d3,d4) are dropped, giving corr == 1.0.
+    assert by_lag[1] == pytest.approx(1.0)
+    # Positional lag 1 over the compacted series [0,0,1,1] would give ~0.577.
+    positional = pd.Series([0.0, 0.0, 1.0, 1.0]).autocorr(lag=1)
+    assert abs(by_lag[1] - positional) > 0.1
+    # Calendar lag 2 leaves a single usable pair across the gap -> missing.
+    assert by_lag[2] is None
+
+
+def test_evaluate_metrics_autocorr_respects_missing_cross_section_date():
+    dates = pd.date_range("2024-01-01", periods=8, freq="D")
+    values = _values(dates, seed=5)
+    # Constant cross-section on day 4: no valid RankIC that date.
+    values.loc[dates[3]] = 0.5
+    labels = _values(dates, seed=9)
+    profile = resolve_profile("perp_1d", {"split_date": "2024-01-06"})
+    result = evaluate_metrics(values, labels, _accounting(_ledger_frame([0.0] * 8)), profile)
+
+    daily_rows = result["samples"]["full"]["ic"]["daily"]
+    assert dates[3].date().isoformat() not in [row["date"] for row in daily_rows]
+
+    # Independent calendar-lag expectation: reindex onto the full calendar and
+    # correlate pairwise against the shifted series.
+    series = pd.Series(
+        {pd.Timestamp(row["date"]): row["rank_ic"] for row in daily_rows}
+    ).reindex(dates)
+    for lag in (1, 2, 3):
+        expected = series.corr(series.shift(lag))
+        got = result["samples"]["full"]["rank_ic_autocorr"][lag - 1]["autocorr"]
+        if pd.isna(expected):
+            assert got is None, f"lag {lag}"
+        else:
+            assert got == pytest.approx(expected), f"lag {lag}"
