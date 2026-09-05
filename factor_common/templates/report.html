@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>$page_title</title>
+<script type="text/javascript" src="https://assets.pyecharts.org/assets/v5/echarts.min.js"></script>
+<style>
+body { font-family: -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; margin: 24px; color: #1f2933; }
+h1 { font-size: 22px; }
+h2 { font-size: 17px; margin-top: 32px; border-bottom: 1px solid #d9e2ec; padding-bottom: 4px; }
+h3 { font-size: 14px; margin-top: 20px; }
+table { border-collapse: collapse; margin: 8px 0; font-size: 13px; }
+th, td { border: 1px solid #cbd2d9; padding: 4px 10px; text-align: right; }
+th { background: #f0f4f8; text-align: left; }
+td:first-child { text-align: left; }
+.banner { padding: 10px 14px; border-radius: 4px; margin: 12px 0; font-size: 14px; }
+.banner.complete { background: #e3f2e5; border: 1px solid #7ba889; }
+.banner.incomplete { background: #fdecea; border: 1px solid #d98080; }
+.banner.warning { background: #fff8e1; border: 1px solid #d9b44a; }
+.null { color: #9aa5b1; font-style: italic; }
+.unavailable { color: #7b8794; background: #f5f7fa; border: 1px dashed #cbd2d9; padding: 10px 14px; border-radius: 4px; font-size: 13px; margin: 8px 0; }
+.chart { width: 100%; height: 420px; }
+.note { color: #52606d; font-size: 12px; }
+ul.warnings { color: #8a6116; font-size: 13px; }
+</style>
+</head>
+<body>
+<h1>$page_title</h1>
+$status_banner
+$summary_section
+$warnings_section
+<h2>Scenario performance</h2>
+$scenario_metrics_section
+<h2>IC summary</h2>
+$ic_metrics_section
+<h2>Net asset value</h2>
+$nav_section
+<h2>Group returns</h2>
+$group_nav_section
+$group_demeaned_section
+<h2>Cumulative RankIC</h2>
+$cumic_section
+<h2>Turnover</h2>
+$turnover_section
+<h2>Positions</h2>
+$positions_section
+<h2>RankIC decay</h2>
+$decay_section
+<h2>RankIC autocorrelation</h2>
+$autocorr_section
+<h2>Latest groups</h2>
+$groups_section
+<h2>Diagnostics</h2>
+$diagnostics_section
+<p class="note">All dates are UTC daily boundaries. Charts are rendered from the saved
+evaluation result only; no market data was re-read and no portfolio was re-simulated
+to produce this report.</p>
+</body>
+</html>
