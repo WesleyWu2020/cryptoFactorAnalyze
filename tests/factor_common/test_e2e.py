@@ -16,6 +16,7 @@ Two chains over the shared 12-name H5 fixture shape:
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -437,6 +438,28 @@ def test_acceptance_kernel_spec_uses_current_interpreter(tmp_path):
 
     assert spec_path == tmp_path / "kernels" / "factor-common-verify" / "kernel.json"
     assert spec["argv"] == [sys.executable, "-m", "ipykernel_launcher", "-f", "{connection_file}"]
+
+
+def test_notebook_runtime_dir_is_under_output_dir(tmp_path, monkeypatch):
+    import nbclient
+
+    observed = {}
+
+    class FakeNotebookClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def execute(self):
+            observed["runtime_dir"] = Path(os.environ["JUPYTER_RUNTIME_DIR"])
+
+    monkeypatch.setattr(nbclient, "NotebookClient", FakeNotebookClient)
+
+    verify_factor_common._execute_notebook(
+        tmp_path / "fixture.h5", "2024-02-01", "2024-03-15", tmp_path, []
+    )
+
+    assert observed["runtime_dir"] == tmp_path / "jupyter_runtime"
+    assert observed["runtime_dir"].is_dir()
 
 
 def test_cli_refuses_nonempty_output_dir(tmp_path):

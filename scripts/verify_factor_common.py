@@ -377,7 +377,9 @@ def _execute_notebook(
     os.environ["FACTOR_COMMON_REPO_ROOT"] = str(_REPO_ROOT)
     os.environ["FACTOR_COMMON_NOTEBOOK"] = str(NOTEBOOK)
     os.environ["IPYTHONDIR"] = str(output_dir / "ipython")
+    os.environ["JUPYTER_RUNTIME_DIR"] = str(output_dir / "jupyter_runtime")
     (output_dir / "ipython").mkdir(parents=True, exist_ok=True)
+    (output_dir / "jupyter_runtime").mkdir(parents=True, exist_ok=True)
 
     executed_path = output_dir / "factor_common_usage.executed.ipynb"
     notebook = nbformat.read(NOTEBOOK, as_version=4)
