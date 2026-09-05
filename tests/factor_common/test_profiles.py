@@ -77,7 +77,11 @@ def test_profile_is_frozen():
         ("n_groups", 1, "n_groups"),
         ("gross_exposure", 0, "gross_exposure"),
         ("funding_price_mode", "loose", "funding_price_mode"),
-        ("rebalance_days", 2, "daily"),
+        ("rebalance_days", 0, "rebalance_days"),
+        ("rebalance_days", -1, "rebalance_days"),
+        ("rebalance_days", True, "rebalance_days"),
+        ("rebalance_days", 1.5, "rebalance_days"),
+        ("rebalance_days", "2", "rebalance_days"),
         ("price_field", "close", "open"),
         ("signal_delay_days", 0, "one-day"),
     ],
@@ -85,3 +89,11 @@ def test_profile_is_frozen():
 def test_profile_overrides_are_validated(field, value, message):
     with pytest.raises(ValueError, match=message):
         resolve_profile("perp_1d", {field: value})
+
+
+@pytest.mark.parametrize("days", [1, 2, 7, 30, 365])
+def test_daily_profile_supports_positive_integer_rebalance_days(days):
+    profile = resolve_profile("perp_1d", {"rebalance_days": days})
+    assert profile.rebalance_days == days
+    assert profile.signal_delay_days == 1
+    assert profile.price_field == "open"

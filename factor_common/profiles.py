@@ -53,8 +53,6 @@ def _validate_iso_date(field_name: str, value: str | None) -> None:
 def _validate_profile(profile: BacktestProfile, requested_profile_id: str) -> None:
     if profile.profile_id != requested_profile_id or profile.profile_id != _SUPPORTED_PROFILE:
         raise ValueError(f"Unsupported profile: {profile.profile_id}")
-    if profile.rebalance_days != 1:
-        raise ValueError("perp_1d is a daily profile and requires rebalance_days=1")
     if profile.signal_delay_days != 1:
         raise ValueError("daily profile requires a one-day signal delay")
     if profile.price_field != "open":
