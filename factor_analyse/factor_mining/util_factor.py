@@ -446,36 +446,14 @@ def group_apply_with_progress(df: pd.DataFrame, by: str, func) -> list[pd.DataFr
     return out
 
 def winsorize_by_date(df: pd.DataFrame, col: str, n_std: float = 3.0) -> pd.DataFrame:
-    """使用 median ± n * 1.4826 * MAD 去极值（向量化实现，避免 groupby.apply 丢列问题）。"""
-    out = df.copy()
-    if out.empty:
-        return out
-
-    # MAD 与 σ 的换算：对正态分布 σ ≈ 1.4826 * MAD
-    scale = n_std * 1.4826
-
-    med = out.groupby("date")[col].transform("median")
-    abs_dev = (out[col] - med).abs()
-    mad = abs_dev.groupby(out["date"]).transform("median")
-
-    # 当 MAD 非常小时，保持原值
-    valid = mad >= 1e-12
-    lower = med - scale * mad
-    upper = med + scale * mad
-    out.loc[valid, col] = out.loc[valid, col].clip(lower=lower[valid], upper=upper[valid])
-    return out
+    """Delegate to the shared daily MAD preprocessing implementation."""
+    from factor_common.preprocessing import winsorize_by_date as winsorize
+    return winsorize(df, col, n_std)
 
 def rank_to_unit_by_date(df: pd.DataFrame, col: str, out_col: str = "factor") -> pd.DataFrame:
-    """按日截面将 rank 映射到 [-1, 1]（向量化实现，避免 groupby.apply 丢列问题）。"""
-    out = df.copy()
-    if out.empty:
-        out[out_col] = []
-        return out
-
-    rank_ = out.groupby("date")[col].rank(method="average")
-    n = out.groupby("date")[col].transform("count")
-    out[out_col] = np.where(n <= 1, 0.0, 2 * (rank_ - 1) / (n - 1) - 1)
-    return out
+    """Delegate to the shared daily rank preprocessing implementation."""
+    from factor_common.preprocessing import rank_to_unit_by_date as rank
+    return rank(df, col, out_col)
 
 def save_factor_df(factor_df: pd.DataFrame, file_prefix: str, suffix: str = "") -> str:
     os.makedirs(FACTOR_DIR, exist_ok=True)
