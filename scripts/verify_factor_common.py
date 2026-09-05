@@ -206,6 +206,8 @@ def _run_real(h5_path: Path, start: str, end: str, output_dir: Path, failures: l
     if scan_findings:
         failures.append(f"static scan findings: {scan_findings}")
 
+    all_costs_diag = result["factor_result"]["scenarios"]["all_costs"]["diagnostics"]
+    halt_reason = all_costs_diag.get("halt_reason")
     report_path = result["paths"]["report_path"]
     report_labels_ok = False
     if report_path and Path(report_path).is_file():
@@ -214,13 +216,12 @@ def _run_real(h5_path: Path, start: str, end: str, output_dir: Path, failures: l
             "all_costs" in html
             and f"Status: {status}" in html
             and "Funding coverage (all_costs)" in html
-            and (status == "complete" or "unresolved_funding_coverage" in html)
+            and (status == "complete" or bool(halt_reason and halt_reason in html))
         )
     if not report_labels_ok:
         failures.append("report missing or does not label cost scenarios/status")
 
     coverage = result["diagnostics"]["coverage"]["funding"]["status_counts"]
-    all_costs_diag = result["factor_result"]["scenarios"]["all_costs"]["diagnostics"]
     contract_failures, verified_complete = _validate_real_contract(result)
     failures.extend(contract_failures)
     return {

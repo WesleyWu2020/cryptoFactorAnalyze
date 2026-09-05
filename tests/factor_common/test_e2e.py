@@ -265,6 +265,71 @@ def test_acceptance_synthetic_summary_reconciles_artifacts_and_costs(tmp_path):
     assert summary["cash_flow_checks"]["funding_total"] < 0.0
 
 
+def test_run_real_accepts_unresolved_funding_report_reason(tmp_path, monkeypatch):
+    factor_value = pd.DataFrame([[1.0]], index=pd.DatetimeIndex(["2024-02-01"]))
+    report_path = tmp_path / "real-report.html"
+    report_path.write_text(
+        "Status: incomplete all_costs Funding coverage (all_costs) "
+        "unresolved_funding",
+        encoding="utf-8",
+    )
+    fake_result = {
+        "status": "incomplete",
+        "run_id": "run-id",
+        "evaluation_id": "evaluation-id",
+        "factor_value": factor_value,
+        "paths": {
+            "factor_path": str(tmp_path / "factor.parquet"),
+            "report_path": str(report_path),
+        },
+        "diagnostics": {
+            "validation": {
+                "cutoff": {
+                    "status": "verified",
+                    "cutoffs": [{"cutoff": "2024-02-01", "max_abs_diff": 0.0}],
+                }
+            },
+            "coverage": {"funding": {"status_counts": {"missing": 1}}},
+        },
+        "factor_result": {
+            "scenarios": {
+                "all_costs": {
+                    "status": "incomplete",
+                    "diagnostics": {"halt_reason": "unresolved_funding"},
+                    "funding_coverage": pd.DataFrame(
+                        [{"status": "missing", "accepted": False}]
+                    ),
+                }
+            }
+        },
+        "factor_performance": {
+            "scenarios": {"all_costs": {"full": None}}
+        },
+    }
+
+    class FakeManager:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+        def evaluate(self, *args, **kwargs):
+            return fake_result
+
+        def get_value(self, *args, **kwargs):
+            return factor_value
+
+    monkeypatch.setattr(verify_factor_common, "FactorManager", FakeManager)
+    monkeypatch.setattr(verify_factor_common, "scan_future_leaks", lambda paths: [])
+
+    failures = []
+    summary = verify_factor_common._run_real(
+        tmp_path / "fixture.h5", "2024-02-01", "2024-02-01", tmp_path, failures
+    )
+
+    assert failures == []
+    assert summary["all_costs_halt_reason"] == "unresolved_funding"
+    assert summary["report_labels_ok"] is True
+
+
 def test_real_contract_rejects_non_null_incomplete_net_metrics():
     result = {
         "status": "incomplete",
