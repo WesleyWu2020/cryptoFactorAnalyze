@@ -263,15 +263,28 @@ class FactorManager:
     def _cutoff_check(self, spec, full_values, start, end) -> dict:
         span = (end - start).days
         candidates = [start + pd.Timedelta(days=span // 2), end - pd.Timedelta(days=1)]
-        cutoffs = sorted({day for day in candidates if start <= day < end}) or [end]
+        cutoffs = sorted({day for day in candidates if start <= day < end})
+        if cutoffs:
+            replay_start = start
+        else:
+            # Single-day window: a cutoff at ``end`` compares the full result
+            # against an identically truncated replay (tautological). Extend
+            # the replay start so the pre-end cutoff has a non-empty prefix.
+            replay_start = start - pd.Timedelta(days=2)
+            cutoffs = [end - pd.Timedelta(days=1)]
 
         def compute(cutoff):
             if cutoff is None:
-                return full_values
+                if replay_start == start:
+                    return full_values
+                matrix, _ = compute_factor(
+                    spec, self.dp, start=replay_start, end=end
+                )
+                return matrix
             cutoff = pd.Timestamp(cutoff)
             truncated = DataProvider(self.h5_path, as_of=cutoff)
             matrix, _ = compute_factor(
-                spec, truncated, start=start, end=min(end, cutoff)
+                spec, truncated, start=replay_start, end=min(end, cutoff)
             )
             return matrix
 
@@ -342,6 +355,12 @@ class FactorManager:
         if spec is not None and "factor_direction" not in overrides:
             overrides["factor_direction"] = spec.setting["factor_direction"]
         profile = resolve_profile(profile_id, overrides)
+
+        # Snapshot the input store ahead of the first value-phase read;
+        # save_value re-stats the same file and aborts on any change before
+        # the atomic write. Store reads are read-only (mode="r"), so the
+        # manager's own reads never disturb the snapshot.
+        stat_before = snapshot_source_stats([self.h5_path])
 
         if spec is not None:
             end = end_param if end_param is not None else self._default_end()
@@ -423,11 +442,10 @@ class FactorManager:
 
         # Persist values before touching execution-tail or funding data so a
         # later funding failure can never discard the computed factor value.
-        # The H5 store's read path bumps the file mtime on every open, so the
-        # change-detection snapshot is taken only after the final value-phase
-        # read; save_value re-stats the file and aborts if it changed between
-        # this snapshot and the write.
-        value_metadata["source_stat_before"] = snapshot_source_stats([self.h5_path])
+        # The pre-read snapshot is attached here; save_value re-stats the
+        # file and raises ConcurrentSourceChangeError if it changed between
+        # the first value-phase read and this write.
+        value_metadata["source_stat_before"] = stat_before
         saved = self.storage.save_value(factor_id, values, value_metadata)
         run_id = saved["run_id"]
 

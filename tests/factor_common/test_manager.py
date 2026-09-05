@@ -6,6 +6,7 @@ autouse fixture hard-fails any attempted network use.
 
 from __future__ import annotations
 
+import os
 import socket
 from pathlib import Path
 
@@ -14,6 +15,7 @@ import pandas as pd
 import pytest
 
 from factor_common.manager import FactorManager
+from factor_common.storage import ConcurrentSourceChangeError
 
 FACTOR_SOURCE = '''
 import numpy as np
@@ -277,6 +279,68 @@ def test_cutoff_replay_verified_for_module_source(manager, factor_file):
     assert cutoff["status"] == "verified"
     assert cutoff["cutoffs"]
     assert all(entry["max_abs_diff"] == 0.0 for entry in cutoff["cutoffs"])
+
+
+def test_snapshot_precedes_value_phase_reads(manager, factor_file, monkeypatch):
+    """An H5 mtime bump during the value phase must abort the run.
+
+    Store reads are read-only, so the pre-read snapshot taken by the manager
+    stays valid; the simulated mid-eval change is detected by save_value's
+    before/after stat verification.
+    """
+    from factor_common.data_provider import DataProvider
+
+    original = DataProvider.get_single_data
+    bumped = []
+
+    def wrapped(self, field, *, start, end):
+        if not bumped:
+            bumped.append(True)
+            os.utime(manager.h5_path, ns=(1_600_000_000_000_000_000,) * 2)
+        return original(self, field, start=start, end=end)
+
+    monkeypatch.setattr(DataProvider, "get_single_data", wrapped)
+    with pytest.raises(ConcurrentSourceChangeError, match="changed"):
+        manager.evaluate(str(factor_file), params=dict(BASE_PARAMS), plot=False)
+    assert bumped  # the tamper happened inside the value phase
+
+
+def test_pure_reads_do_not_disturb_snapshot(manager, factor_file):
+    """Control: repeated evaluations over pure reads keep a stable stat."""
+    first = manager.evaluate(str(factor_file), params=dict(BASE_PARAMS), plot=False)
+    second = manager.evaluate(str(factor_file), params=dict(BASE_PARAMS), plot=False)
+    assert first["run_id"] == second["run_id"]
+
+
+def test_short_window_cutoff_replay_uses_pre_end_cutoff(manager, factor_file):
+    """Single-day evaluations must replay against a cutoff strictly before end."""
+    params = {**BASE_PARAMS, "start": "2024-01-06", "end": "2024-01-06"}
+    result = manager.evaluate(str(factor_file), params=params, plot=False)
+    assert result["status"] == "complete"
+    cutoff = result["diagnostics"]["validation"]["cutoff"]
+    assert cutoff["status"] == "verified"
+    assert len(cutoff["cutoffs"]) == 1
+    entry = cutoff["cutoffs"][0]
+    assert pd.Timestamp(entry["cutoff"]) < pd.Timestamp("2024-01-06")
+
+
+def test_short_window_cutoff_replay_catches_future_leak(manager, tmp_path):
+    """A leak evading the static scan must be caught by the short-window replay.
+
+    The reversal trick computes value[t] = close[t+1]/close[t] - 1 without any
+    banned AST pattern; a tautological cutoff at ``end`` would pass it.
+    """
+    factor = _write_factor(
+        tmp_path,
+        name="sneaky_leak",
+        formula=(
+            "future_close = close.iloc[::-1].shift(1).iloc[::-1]\n"
+            "    return future_close / close - 1.0"
+        ),
+    )
+    params = {**BASE_PARAMS, "start": "2024-01-06", "end": "2024-01-06"}
+    with pytest.raises(ValueError, match="future leak"):
+        manager.evaluate(str(factor), params=params, plot=False)
 
 
 def test_get_value_round_trip(manager, factor_file):

@@ -72,11 +72,16 @@ class CryptoQuantStore:
 
     def read(self, name: str, where: str | None = None) -> pd.DataFrame:
         if name == "_metadata":
-            with pd.HDFStore(self.path, mode="a") as hdf:
-                return hdf.select(name, where=where) if name in hdf else pd.DataFrame(columns=["key", "value", "updated_at_utc"])
+            empty = pd.DataFrame(columns=["key", "value", "updated_at_utc"])
+            if not self.path.exists():
+                return empty
+            with pd.HDFStore(self.path, mode="r") as hdf:
+                return hdf.select(name, where=where) if name in hdf else empty
         if name not in TABLE_SPECS:
             raise KeyError(f"unknown table: {name}")
-        with pd.HDFStore(self.path, mode="a") as hdf:
+        if not self.path.exists():
+            return pd.DataFrame(columns=TABLE_SPECS[name].columns)
+        with pd.HDFStore(self.path, mode="r") as hdf:
             if f"/{name}" not in hdf.keys():
                 return pd.DataFrame(columns=TABLE_SPECS[name].columns)
             return hdf.select(name, where=where)
@@ -136,7 +141,9 @@ class CryptoQuantStore:
                 hdf.put("_metadata", frame, format="table", data_columns=["key"], min_itemsize={"key": 128, "value": 16384}, index=False)
 
     def keys(self) -> set[str]:
-        with pd.HDFStore(self.path, mode="a") as hdf:
+        if not self.path.exists():
+            return set()
+        with pd.HDFStore(self.path, mode="r") as hdf:
             return {key.lstrip("/") for key in hdf.keys()}
 
 
