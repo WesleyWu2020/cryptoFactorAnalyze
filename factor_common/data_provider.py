@@ -202,6 +202,52 @@ class DataProvider:
         for field in QUALITY_FIELDS:
             if field in panel.columns:
                 result.loc[panel.index, field] = panel[field]
+
+        # A position can survive one execution boundary after its last
+        # membership day while it is being closed. The research panel only
+        # contains active-universe rows, so use the prior complete panel row
+        # plus the current raw event cadence for that exit day. The prior
+        # day's event times must all reappear today (+-1s, matching the
+        # pipeline's drift tolerance): extra events (a funding-cadence
+        # increase mid-day) are observed data and resolvable, while a missing
+        # prior-cadence event means an unobserved settlement and stays
+        # unknown. This fallback never fills an active-universe gap and never
+        # treats an empty event day as complete.
+        accepted = {"complete", "not_applicable"}
+        universe = self.get_universe(start=start, end=end)
+        event_data = self.get_funding(start=start, end=end, symbols=requested)
+        if not event_data.empty:
+            event_data["_time"] = (
+                pd.to_datetime(event_data["funding_time"], utc=True)
+                .dt.tz_convert("UTC").dt.tz_localize(None)
+            )
+            event_data["_date"] = event_data["_time"].dt.normalize()
+            event_times: dict[tuple[pd.Timestamp, str], list[pd.Timestamp]] = {}
+            for (day, instrument), group in event_data.groupby(["_date", "instrument"]):
+                event_times[(day, str(instrument))] = sorted(group["_time"].tolist())
+            for (day, instrument), events in event_data.groupby(["_date", "instrument"]):
+                key = (day, str(instrument))
+                if key not in result.index or bool(universe.loc[day, str(instrument)]):
+                    continue
+                previous = (day - pd.Timedelta(days=1), str(instrument))
+                if previous in panel.index:
+                    previous_status = panel.loc[previous, "funding_coverage_status"]
+                elif previous in result.index:
+                    previous_status = result.loc[previous, "funding_coverage_status"]
+                else:
+                    continue
+                previous_times = event_times.get(previous, [])
+                actual_hours = [t - t.normalize() for t in events["_time"].tolist()]
+                cadence_kept = bool(previous_times) and all(
+                    any(
+                        abs((a - a.normalize()) - b) <= pd.Timedelta(seconds=1)
+                        for b in actual_hours
+                    )
+                    for a in previous_times
+                )
+                valid_prices = events["mark_price_valid"].fillna(False).astype(bool).all()
+                if previous_status in accepted and cadence_kept and valid_prices:
+                    result.loc[key, "funding_coverage_status"] = "complete"
         return result
 
 

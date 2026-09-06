@@ -1,5 +1,5 @@
 import json
-from datetime import date
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 import pandas as pd
@@ -161,6 +161,20 @@ def test_fetch_history_sends_full_utc_timestamps_for_daily_closed_window(fake_cl
 
     assert fake_client.calls[0][1]["time_start"] == "2024-01-01T00:00:00Z"
     assert fake_client.calls[0][1]["time_end"] == "2024-01-02T23:59:59Z"
+
+
+def test_fetch_history_caps_current_day_end_at_current_utc_time(monkeypatch):
+    class FrozenDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return cls(2026, 9, 5, 2, 55, tzinfo=tz or timezone.utc)
+
+    monkeypatch.setattr("data.crypto_quant.cmc.datetime", FrozenDateTime)
+    client = FakeClient({"status": {"error_code": 0}, "data": []})
+
+    fetch_cmc_history(client, date(2026, 9, 5), date(2026, 9, 5))
+
+    assert client.calls[0][1]["time_end"] == "2026-09-05T02:55:00Z"
 
 
 def test_normalize_rejects_malformed_status(fixture_payload):

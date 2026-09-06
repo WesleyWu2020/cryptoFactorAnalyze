@@ -18,14 +18,18 @@ Each scenario dict carries:
 - ``"status"``: ``"complete"`` when the portfolio was fully liquidated with
   every cash flow resolved, else ``"incomplete"``.
 - ``"ledger"``: DataFrame indexed by date with columns ``equity``, ``return``,
-  ``price_pnl``, ``funding_cashflow``, ``fee``, ``trade_notional``. The row for
+  ``price_pnl``, ``funding_cashflow``, ``fee``, ``slippage``,
+  ``trade_notional``. The row for
   date ``D`` values holdings at ``D``'s open and includes orders executed at
   that open plus every funding cash flow with a timestamp in ``[D, D+1)`` that
   belongs to held quantities. The first row's ``return`` is relative to
   ``profile.initial_equity``, so the inception fee is visible in the series.
 - ``"orders"``: DataFrame with columns ``date``, ``instrument``, ``side``,
   ``target_weight``, ``target_quantity``, ``order_quantity``, ``price``,
-  ``notional``, ``fee``, ``status`` (``filled``/``failed``), ``reason``.
+  ``notional``, ``fee``, ``slippage``, ``status`` (``filled``/``failed``),
+  ``reason``. ``fee`` is commission (``notional * fee_rate``) and ``slippage``
+  is the market-impact cost (``notional * slippage``); both are per-fill
+  one-sided charges and zero in the ``gross`` scenario.
 - ``"positions"``: date x instrument DataFrame of post-trade quantities.
 - ``"valuation_prices"``: date x instrument DataFrame of the last boundary
   open price used to value each holding.
@@ -94,7 +98,7 @@ from .value_engine import _validate_axes
 
 PORTFOLIO = "long_short"
 SCENARIOS = ("gross", "trading_net", "all_costs")
-LEDGER_COLUMNS = ("equity", "return", "price_pnl", "funding_cashflow", "fee", "trade_notional")
+LEDGER_COLUMNS = ("equity", "return", "price_pnl", "funding_cashflow", "fee", "slippage", "trade_notional")
 ORDER_COLUMNS = (
     "date",
     "instrument",
@@ -105,6 +109,7 @@ ORDER_COLUMNS = (
     "price",
     "notional",
     "fee",
+    "slippage",
     "status",
     "reason",
 )
@@ -185,6 +190,7 @@ def _empty_scenario(instruments) -> dict:
 def _run_scenario(ctx: _Context, *, fees: bool, funding: bool) -> dict:
     profile = ctx.profile
     fee_rate = profile.fee_rate if fees else 0.0
+    slippage_rate = profile.slippage if fees else 0.0
     equity = profile.initial_equity
     prev_equity = profile.initial_equity
     quantities = {instrument: 0.0 for instrument in ctx.instruments}
@@ -241,6 +247,7 @@ def _run_scenario(ctx: _Context, *, fees: bool, funding: bool) -> dict:
 
         # 3. Execute scheduled orders against equity after already-due funding.
         fee = 0.0
+        slippage = 0.0
         trade_notional = 0.0
         if day in ctx.scheduled_set:
             signal = ctx.signal_row(day)
@@ -265,6 +272,7 @@ def _run_scenario(ctx: _Context, *, fees: bool, funding: bool) -> dict:
                         "price": np.nan,
                         "notional": 0.0,
                         "fee": 0.0,
+                        "slippage": 0.0,
                         "status": "failed",
                         "reason": "invalid_price",
                     })
@@ -283,6 +291,7 @@ def _run_scenario(ctx: _Context, *, fees: bool, funding: bool) -> dict:
                         "price": float(price),
                         "notional": 0.0,
                         "fee": 0.0,
+                        "slippage": 0.0,
                         "status": "failed",
                         "reason": "prior_bar_ineligible",
                     })
@@ -292,8 +301,10 @@ def _run_scenario(ctx: _Context, *, fees: bool, funding: bool) -> dict:
                     continue
                 notional = abs(delta) * float(price)
                 order_fee = notional * fee_rate
+                order_slippage = notional * slippage_rate
                 trade_notional += notional
                 fee += order_fee
+                slippage += order_slippage
                 order_rows.append({
                     "date": day,
                     "instrument": inst,
@@ -304,6 +315,7 @@ def _run_scenario(ctx: _Context, *, fees: bool, funding: bool) -> dict:
                     "price": float(price),
                     "notional": notional,
                     "fee": order_fee,
+                    "slippage": order_slippage,
                     "status": "filled",
                     "reason": None,
                 })
@@ -311,7 +323,7 @@ def _run_scenario(ctx: _Context, *, fees: bool, funding: bool) -> dict:
                 last_price[inst] = float(price)
                 if ctx.placeholder_same_day(day, inst):
                     retrospective.append({"date": _iso(day), "instrument": str(inst)})
-            equity -= fee
+            equity -= fee + slippage
 
         held_post = {inst: qty for inst, qty in quantities.items() if qty != 0.0}
 
@@ -355,6 +367,7 @@ def _run_scenario(ctx: _Context, *, fees: bool, funding: bool) -> dict:
             "price_pnl": price_pnl,
             "funding_cashflow": funding_cash,
             "fee": fee,
+            "slippage": slippage,
             "trade_notional": trade_notional,
         })
         prev_equity = equity

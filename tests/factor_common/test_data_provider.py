@@ -82,6 +82,51 @@ def test_provider_returns_panel_quality_without_inference(h5_fixture):
     assert pd.notna(close.loc["2024-01-03", "AUSDT"])
 
 
+def test_exit_day_fallback_accepts_cadence_superset_rejects_missing(tmp_path):
+    # AUSDT/BUSDT membership ends 2024-01-06; 2024-01-07 is an exit day with
+    # no panel row. The fallback certifies it from the prior complete day when
+    # every prior event time reappears (extra events are observed data), and
+    # refuses when a prior-cadence event is unobserved.
+    import pandas as pd
+    from factor_common.data_provider import DataProvider
+    from tests.factor_common.conftest import write_h5_fixture
+
+    def event(day, hour, symbol):
+        return {
+            "funding_time": f"2024-01-0{day} {hour:02d}:00:00",
+            "symbol": symbol,
+            "funding_rate": 0.001,
+            "mark_price": 100.0,
+            "rate_type": "Regular",
+        }
+
+    events = pd.DataFrame([
+        event(6, 0, "AUSDT"), event(6, 8, "AUSDT"),
+        event(6, 0, "BUSDT"), event(6, 8, "BUSDT"),
+        # Superset: the 04:00 event is extra; prior cadence is preserved.
+        event(7, 0, "AUSDT"), event(7, 4, "AUSDT"), event(7, 8, "AUSDT"),
+        # Missing: the 08:00 event of the prior cadence is unobserved.
+        event(7, 0, "BUSDT"),
+    ])
+    schedule = pd.DataFrame([
+        {"date": "2024-01-06", "symbol": "AUSDT",
+         "expected_times": ["2024-01-06 00:00:00", "2024-01-06 08:00:00"]},
+        {"date": "2024-01-06", "symbol": "BUSDT",
+         "expected_times": ["2024-01-06 00:00:00", "2024-01-06 08:00:00"]},
+    ])
+    path = write_h5_fixture(
+        tmp_path / "fixture.h5", funding_schedule=schedule, funding_events=events
+    )
+
+    quality = DataProvider(path).get_quality(
+        start="2024-01-06", end="2024-01-08", symbols=["AUSDT", "BUSDT"]
+    )
+    statuses = quality["funding_coverage_status"]
+    assert statuses.loc[(pd.Timestamp("2024-01-06"), "AUSDT")] == "complete"
+    assert statuses.loc[(pd.Timestamp("2024-01-07"), "AUSDT")] == "complete"
+    assert statuses.loc[(pd.Timestamp("2024-01-07"), "BUSDT")] == "unknown"
+
+
 def test_provider_keeps_quality_unknown_for_legacy_panel_flags(h5_fixture):
     from data.crypto_quant.store import CryptoQuantStore
     from factor_common.data_provider import DataProvider

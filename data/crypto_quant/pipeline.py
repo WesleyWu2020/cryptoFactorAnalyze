@@ -18,10 +18,10 @@ from .binance import DAY_MS
 from .config import PipelineConfig
 from .http import HttpRequestError
 from .mapping import build_contract_mappings, load_mapping_rules
-from .panel import build_research_panel, last_complete_panel_date
+from .panel import build_funding_schedule, build_research_panel, last_complete_panel_date
 from .schemas import TABLE_SPECS
 from .store import CryptoQuantStore, staged_store
-from .universe import build_monthly_universe
+from .universe import HISTORICAL_CONTRACT_END_DATES, build_monthly_universe
 from .validation import validate_store
 
 
@@ -86,6 +86,7 @@ class CryptoQuantPipeline:
         funding_end_ms = int(run_at.timestamp() * 1000)
         fingerprint = self._fingerprint(mode)
         with staged_store(self.config.store_path, self.config.staging_path, fingerprint, reset_staging=reset_staging, lock_path=self.config.lock_path) as store:
+            self._migrate_legacy_schema(store)
             prior_target = store.read_metadata().get("run_target_as_of")
             if prior_target is not None and run_at.isoformat() < str(prior_target) and not reset_staging:
                 from .store import StagingMismatchError
@@ -134,16 +135,36 @@ class CryptoQuantPipeline:
             return RunSummary(mode, run_at, self.config.store_path, last_kline, complete.date() if complete is not None else None, counts, warnings, symbol_status)
 
     @staticmethod
+    def _migrate_legacy_schema(store: CryptoQuantStore) -> None:
+        """Rewrite existing tables when a schema removes or renames columns."""
+        existing = store.keys()
+        for name, spec in TABLE_SPECS.items():
+            if name not in existing:
+                continue
+            frame = store.read(name)
+            if tuple(frame.columns) == tuple(spec.columns):
+                continue
+            missing = [column for column in spec.columns if column not in frame.columns]
+            if name == "research_panel_daily":
+                # This derived table is rebuilt below; normalize additive quality
+                # columns while preserving the raw source tables.
+                store.replace(name, frame)
+                continue
+            if missing:
+                raise ValueError(f"cannot migrate {name}; missing columns: {missing}")
+            store.replace(name, frame.loc[:, list(spec.columns)])
+
+    @staticmethod
     def _empty_frame(name: str) -> pd.DataFrame:
         frame = pd.DataFrame(columns=TABLE_SPECS[name].columns)
         for column in frame.columns:
             if column in {"cmc_id", "trade_count", "funding_event_count", "market_cap_rank"}:
                 frame[column] = pd.Series(dtype="int64")
-            elif column in {"has_complete_kline", "has_complete_funding"}:
+            elif column in {"has_complete_kline", "has_complete_funding", "has_placeholder_kline"}:
                 frame[column] = pd.Series(dtype="bool")
             elif column.endswith("_time") or column in {"date", "decision_date", "effective_date", "effective_end_date", "onboard_date", "valid_from", "valid_to"}:
                 frame[column] = pd.Series(dtype="datetime64[ns]")
-            elif column not in {"symbol", "binance_symbol", "cmc_symbol", "base_asset", "quote_asset", "contract_type", "status", "mapping_source", "rate_type", "name"}:
+            elif column not in {"symbol", "binance_symbol", "cmc_symbol", "base_asset", "quote_asset", "contract_type", "status", "mapping_source", "rate_type", "name", "funding_coverage_status"}:
                 frame[column] = pd.Series(dtype="float64")
         return frame
 
@@ -157,9 +178,9 @@ class CryptoQuantPipeline:
                 values[column] = pd.Timestamp("1970-01-01", tz="UTC")
             elif column in {"cmc_id", "trade_count", "funding_event_count", "market_cap_rank"}:
                 values[column] = 0
-            elif column in {"has_complete_kline", "has_complete_funding"}:
+            elif column in {"has_complete_kline", "has_complete_funding", "has_placeholder_kline"}:
                 values[column] = False
-            elif column in {"symbol", "binance_symbol", "cmc_symbol", "base_asset", "quote_asset", "contract_type", "status", "mapping_source", "rate_type", "name"}:
+            elif column in {"symbol", "binance_symbol", "cmc_symbol", "base_asset", "quote_asset", "contract_type", "status", "mapping_source", "rate_type", "name", "funding_coverage_status"}:
                 values[column] = "__EMPTY__"
             else:
                 values[column] = 0.0
@@ -591,21 +612,21 @@ class CryptoQuantPipeline:
             constituents, mappings, klines, self.config.universe_start, cmc_end,
             top_n=self.config.top_n, current_trading_symbols=current_symbols,
             current_observed_date=current_observed,
+            contract_end_dates=HISTORICAL_CONTRACT_END_DATES,
         )
         universe = universe.rename(columns={"weight": "cmc_weight"})
         store.replace("universe_monthly", universe)
-        panel_klines = klines.rename(columns={"quote_volume": "quote_asset_volume"}) if "quote_volume" in klines else klines
-        funding_through = panel_end if funding_complete else None
-        panel = build_research_panel(universe, panel_klines, store.read("funding_events"), panel_end, funding_through)
+        # Fetch checkpoints describe request coverage, not settlement completeness.
+        funding = store.read("funding_events")
+        schedule = build_funding_schedule(universe, funding, panel_end)
+        panel = build_research_panel(
+            universe, klines, funding, panel_end, funding_schedule=schedule
+        )
         panel = panel.merge(
             universe[["effective_date", "binance_symbol", "decision_date", "market_cap_rank"]],
             left_on=["universe_effective_date", "binance_symbol"],
             right_on=["effective_date", "binance_symbol"], how="left",
         ).drop(columns=["effective_date"])
-        if "quote_asset_volume" in panel:
-            panel = panel.rename(columns={"quote_asset_volume": "quote_volume"})
-        if "open_time" not in panel:
-            panel["open_time"] = pd.NaT
         for column in ("funding_rate_sum", "funding_rate_mean", "funding_rate_last"):
             panel[column] = pd.to_numeric(panel[column], errors="coerce").astype("float64")
         panel = panel.reindex(columns=TABLE_SPECS["research_panel_daily"].columns)

@@ -63,6 +63,87 @@ def test_factor_round_trip(tmp_path):
     pd.testing.assert_frame_equal(store.get_value("momentum", run_id=saved["run_id"]), matrix)
 
 
+def test_flat_factor_cache_uses_one_stable_parquet_and_meta(tmp_path):
+    matrix = _matrix()
+    store = FactorStorage(tmp_path, flat=True)
+    metadata = _metadata()
+    saved = store.save_value("Volume_Stability_Factor", matrix, metadata)
+    assert saved["factor_path"] == tmp_path / "volume_stability_factor.parquet"
+    assert saved["metadata_path"] == tmp_path / "volume_stability_factor.meta.json"
+    assert not (tmp_path / "Volume_Stability_Factor").exists()
+    cached = store.load_cached_value(
+        "Volume_Stability_Factor",
+        source_sha256="abc",
+        settings={"window": 5},
+        requested_start="2024-01-01",
+        requested_end="2024-01-02",
+    )
+    assert cached is not None
+    pd.testing.assert_frame_equal(cached[0], matrix)
+
+
+def test_flat_factor_cache_invalid_meta_is_a_miss(tmp_path):
+    store = FactorStorage(tmp_path, flat=True)
+    store.save_value("momentum", _matrix(), _metadata())
+    assert store.load_cached_value(
+        "momentum",
+        source_sha256="changed",
+        settings={"window": 5},
+        requested_start="2024-01-01",
+        requested_end="2024-01-02",
+    ) is None
+
+
+def test_flat_factor_cache_pipeline_fingerprint_mismatch_is_a_miss(tmp_path):
+    store = FactorStorage(tmp_path, flat=True)
+    store.save_value(
+        "momentum", _matrix(), {**_metadata(), "pipeline_fingerprint": "old-code"}
+    )
+    query = {
+        "source_sha256": "abc",
+        "settings": {"window": 5},
+        "requested_start": "2024-01-01",
+        "requested_end": "2024-01-02",
+    }
+    assert store.load_cached_value(
+        "momentum", pipeline_fingerprint="new-code", **query
+    ) is None
+    # Caches written before the fingerprint existed are also rejected.
+    store.save_value("momentum", _matrix(), _metadata())
+    assert store.load_cached_value(
+        "momentum", pipeline_fingerprint="new-code", **query
+    ) is None
+    assert store.load_cached_value(
+        "momentum", pipeline_fingerprint=None, **query
+    ) is not None
+
+
+def test_flat_evaluation_keeps_only_current_result_without_index_directory(tmp_path):
+    ledger = pd.DataFrame({"date": pd.date_range("2024-01-01", periods=2), "equity": [1.0, 1.1]})
+    store = FactorStorage(tmp_path, flat=True)
+    saved = store.save_value("momentum", _matrix(), _metadata())
+    first = store.save_evaluation(
+        "momentum", saved["run_id"], _evaluation(ledger=ledger)
+    )
+
+    assert (tmp_path / "momentum.evaluation.json").is_file()
+    assert (tmp_path / "momentum.evaluation.ledger.parquet").is_file()
+    assert not (tmp_path / "momentum.evaluations").exists()
+    assert not (tmp_path / "momentum.evaluations.json").exists()
+
+    second = store.save_evaluation(
+        "momentum",
+        saved["run_id"],
+        _evaluation(profile=replace(BacktestProfile(), fee_rate=0.0001)),
+    )
+    assert second["evaluation_id"] != first["evaluation_id"]
+    assert not (tmp_path / "momentum.evaluation.ledger.parquet").exists()
+    loaded = store.load_evaluation("momentum")
+    assert loaded["evaluation_id"] == second["evaluation_id"]
+    with pytest.raises(FileNotFoundError):
+        store.load_evaluation("momentum", evaluation_id=first["evaluation_id"])
+
+
 def test_round_trip_preserves_nan_and_empty_rows(tmp_path):
     matrix = pd.DataFrame(
         {"AUSDT": [0.2, None, 0.4], "BUSDT": [None, None, np.inf]},

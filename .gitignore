@@ -64,6 +64,10 @@ logs/
 # 如果您希望追踪某些特定的数据文件，可以使用!符号
 data/factor_data/*
 data/kline_data/*
+# 因子值缓存(派生数据,可由 evaluate 随时重建)
+data/factor_results/
+# 数据管线运行时锁文件
+.crypto_quant.lock
 # 排除报告文件夹，但保留示例
 reports/*
 !reports/README.md

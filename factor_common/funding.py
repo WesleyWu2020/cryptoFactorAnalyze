@@ -105,8 +105,8 @@ def settle_funding(
     if missing:
         raise ValueError(f"events missing columns: {sorted(missing)}")
 
-    open_prices = _open_lookup(opens)
     approx = profile.funding_price_mode == "daily_open_approx"
+    open_prices = _open_lookup(opens) if approx else {}
 
     records = events.copy(deep=True)
     times = pd.to_datetime(records["funding_time"], utc=True)
@@ -203,13 +203,24 @@ def check_funding_coverage(
     unless an independent schedule proves zero events (``not_applicable``).
     """
 
+    held_intervals = list(held_intervals)
     if "funding_coverage_status" not in quality.columns:
         raise ValueError("quality must carry funding_coverage_status")
     if not isinstance(quality.index, pd.MultiIndex) or quality.index.nlevels != 2:
         raise ValueError("quality must be indexed by (date, instrument)")
 
+    requested_keys = set()
+    for instrument, start, end in held_intervals:
+        day = _as_utc_naive(start).normalize()
+        end_ts = _as_utc_naive(end)
+        while day < end_ts:
+            requested_keys.add((day, str(instrument)))
+            day += pd.Timedelta(days=1)
+    relevant_quality = quality.loc[quality.index.isin(requested_keys)]
     status_by_key: dict[tuple[pd.Timestamp, str], object] = {}
-    for (day, instrument), status in zip(quality.index, quality["funding_coverage_status"]):
+    for (day, instrument), status in zip(
+        relevant_quality.index, relevant_quality["funding_coverage_status"]
+    ):
         status_by_key[(_as_utc_naive(day).normalize(), str(instrument))] = status
 
     rows = []

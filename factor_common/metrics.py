@@ -186,12 +186,13 @@ def summarize_returns(returns, *, periods_per_year: int = 365) -> dict:
 def _mean_turnover(ledger: pd.DataFrame):
     """Mean daily traded notional over pretrade equity (no 1/2 factor).
 
-    Pretrade equity is the recorded post-fee equity plus the day's fees — the
-    exact sizing equity when no intraday funding cash flow intervenes.
+    Pretrade equity is the recorded post-cost equity plus the day's trading
+    costs (fees and slippage) — the exact sizing equity when no intraday
+    funding cash flow intervenes.
     """
     if ledger.empty:
         return None
-    pretrade = ledger["equity"] + ledger["fee"]
+    pretrade = ledger["equity"] + ledger["fee"] + ledger.get("slippage", 0.0)
     valid = pretrade > 0.0
     if not valid.any():
         return None

@@ -2,17 +2,22 @@
 
 The manager wires together the focused ``factor_common`` modules without
 duplicating their internals: loading/validation (``loader``,
-``validation``), value computation (``value_engine``), versioned artifacts
-(``storage``), accounting (``backtest``), metrics (``metrics``), grouping
+``validation``), value computation (``value_engine``), flat factor caches and
+evaluation artifacts (``storage``), accounting (``backtest``), metrics
+(``metrics``), grouping
 (``grouping``), evaluation-only labels (``labels``), and HTML rendering
 (``reporting``).
 
 Workflow per ``evaluate`` call: resolve dates/Profile/source -> snapshot the
 input store and build metadata -> compute and validate values -> persist
 values -> load execution-tail prices, funding events, and quality evidence ->
-backtest -> evaluate metrics -> persist the evaluation -> optionally render.
+backtest -> evaluate metrics -> optionally persist the evaluation -> render.
 Values are persisted before any funding/execution data is touched, so a
 funding failure can never discard a successfully computed factor value.
+
+Evaluation persistence is opt-in via ``persist_evaluations=True``. The default
+keeps the complete evaluation in the returned result for immediate reporting,
+without writing the accounting tables to disk.
 
 Data limitations surface as structured results (``status="incomplete"`` or
 ``"insufficient_data"``); invalid user configuration, corrupt schemas, and
@@ -45,7 +50,7 @@ from .profiles import resolve_profile
 from .reporting import render_result
 from .storage import FactorStorage, snapshot_source_stats
 from .validation import check_cutoff, scan_future_leaks
-from .value_engine import compute_factor
+from .value_engine import compute_factor, value_pipeline_fingerprint
 
 _SCENARIO_TABLES = (
     "ledger",
@@ -62,6 +67,7 @@ _PROFILE_PARAM_KEYS = frozenset({
     "n_groups",
     "factor_direction",
     "fee_rate",
+    "slippage",
     "include_funding",
     "funding_price_mode",
     "split_date",
@@ -196,7 +202,7 @@ class FactorManager:
     """
 
     def __init__(self, h5_path=None, base_dir=None, *, reports_dir=None,
-                 project_root=None):
+                 project_root=None, persist_evaluations=False):
         if project_root is not None:
             root = Path(project_root).resolve()
         else:
@@ -211,7 +217,10 @@ class FactorManager:
         self.reports_dir = (
             Path(reports_dir) if reports_dir is not None else root / "reports"
         )
-        self.storage = FactorStorage(self.base_dir)
+        if not isinstance(persist_evaluations, bool):
+            raise TypeError("persist_evaluations must be a boolean")
+        self.persist_evaluations = persist_evaluations
+        self.storage = FactorStorage(self.base_dir, flat=True)
         self._dp: DataProvider | None = None
 
     @property
@@ -362,6 +371,7 @@ class FactorManager:
         # manager's own reads never disturb the snapshot.
         stat_before = snapshot_source_stats([self.h5_path])
 
+        cached = None
         if spec is not None:
             end = end_param if end_param is not None else self._default_end()
             start = (
@@ -382,11 +392,6 @@ class FactorManager:
             input_hashes["membership"] = _hash_frame(
                 self.dp.get_universe(start=history_start, end=end)
             )
-            values, value_diag = compute_factor(spec, self.dp, start=start, end=end)
-            validation = {
-                "static_scan": {"status": "clean", "findings": []},
-                "cutoff": self._cutoff_check(spec, values, start, end),
-            }
             value_metadata = {
                 "source_type": "module",
                 "source_sha256": spec.source_sha256,
@@ -396,7 +401,42 @@ class FactorManager:
                 "loaded_start": _iso(history_start),
                 "loaded_end": _iso(end),
                 "input_hashes": input_hashes,
+                "pipeline_fingerprint": value_pipeline_fingerprint(),
             }
+            cached = self.storage.load_cached_value(
+                factor_id,
+                source_sha256=spec.source_sha256,
+                settings=spec.setting,
+                requested_start=_iso(start),
+                requested_end=_iso(end),
+                source_stat=stat_before,
+                pipeline_fingerprint=value_metadata["pipeline_fingerprint"],
+            )
+            if cached is not None:
+                values, cached_payload = cached
+                eligible = self.dp.get_universe(start=start, end=end)
+                value_diag = {
+                    "eligible_count": int(eligible.to_numpy().sum()),
+                    "ineligible_count": int(eligible.size - eligible.to_numpy().sum()),
+                    "missing_count": int((eligible & values.isna()).to_numpy().sum()),
+                    "valid_count": int((eligible & values.notna()).to_numpy().sum()),
+                }
+                validation = cached_payload["metadata"].get(
+                    "validation",
+                    {"static_scan": {"status": "cached"}, "cutoff": {"status": "cached"}},
+                )
+                saved = {
+                    "run_id": cached_payload["run_id"],
+                    "factor_path": self.storage._flat_paths(factor_id)[0],
+                    "metadata_path": self.storage._flat_paths(factor_id)[1],
+                }
+            else:
+                values, value_diag = compute_factor(spec, self.dp, start=start, end=end)
+                validation = {
+                    "static_scan": {"status": "clean", "findings": []},
+                    "cutoff": self._cutoff_check(spec, values, start, end),
+                }
+                value_metadata["validation"] = validation
             preprocessing = spec.setting["preprocessing"]
             source_type = "module"
         else:
@@ -446,7 +486,8 @@ class FactorManager:
         # file and raises ConcurrentSourceChangeError if it changed between
         # the first value-phase read and this write.
         value_metadata["source_stat_before"] = stat_before
-        saved = self.storage.save_value(factor_id, values, value_metadata)
+        if cached is None:
+            saved = self.storage.save_value(factor_id, values, value_metadata)
         run_id = saved["run_id"]
 
         tail_end = end + pd.Timedelta(days=1 + profile.rebalance_days)
@@ -555,15 +596,20 @@ class FactorManager:
         stored.update(_flatten_accounting(accounting))
         if benchmark is not None:
             stored["benchmark"] = benchmark
-        saved_evaluation = self.storage.save_evaluation(factor_id, run_id, stored)
-        evaluation_id = saved_evaluation["evaluation_id"]
+        if self.persist_evaluations:
+            saved_evaluation = self.storage.save_evaluation(factor_id, run_id, stored)
+            evaluation_id = saved_evaluation["evaluation_id"]
+            evaluation_dir = str(saved_evaluation["dir"])
+        else:
+            evaluation_id = None
+            evaluation_dir = None
 
         paths = {
             "run_id": run_id,
             "evaluation_id": evaluation_id,
             "factor_path": str(saved["factor_path"]),
             "metadata_path": str(saved["metadata_path"]),
-            "evaluation_dir": str(saved_evaluation["dir"]),
+            "evaluation_dir": evaluation_dir,
             "report_path": None,
         }
         result = {
@@ -607,7 +653,7 @@ class FactorManager:
         return self.storage.get_value(factor_name, run_id=run_id)
 
     def get_performance(self, factor_name, *, run_id=None, evaluation_id=None):
-        """Return saved metrics for an explicitly selected or latest complete evaluation."""
+        """Return a persisted evaluation selected by run/evaluation identity."""
         try:
             loaded = self.storage.load_evaluation(
                 factor_name, run_id=run_id, evaluation_id=evaluation_id

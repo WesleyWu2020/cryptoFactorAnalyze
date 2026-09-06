@@ -18,7 +18,8 @@ def test_daily_defaults_include_strict_funding():
         "factor_direction": 1,
         "initial_equity": 1.0,
         "gross_exposure": 1.0,
-        "fee_rate": 0.0003,
+        "fee_rate": 0.0005,
+        "slippage": 0.001,
         "include_funding": True,
         "funding_price_mode": "strict",
         "out_of_sample_days": 180,
@@ -42,6 +43,12 @@ def test_unknown_profile_is_rejected():
 def test_illegal_fees_are_rejected(fee_rate):
     with pytest.raises(ValueError, match="fee_rate"):
         resolve_profile("perp_1d", {"fee_rate": fee_rate})
+
+
+@pytest.mark.parametrize("slippage", [-0.0001, 1.0, float("inf")])
+def test_illegal_slippage_is_rejected(slippage):
+    with pytest.raises(ValueError, match="slippage"):
+        resolve_profile("perp_1d", {"slippage": slippage})
 
 
 def test_unknown_override_is_rejected_before_replacement():

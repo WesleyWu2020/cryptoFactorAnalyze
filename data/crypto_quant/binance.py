@@ -52,7 +52,7 @@ def fetch_exchange_info(client: JsonHttpClient, fetched_at: pd.Timestamp | None 
 
 
 def _normalize_klines(rows: list[list[Any]], symbol: str) -> pd.DataFrame:
-    columns = ["date", "symbol", "open", "high", "low", "close", "volume", "close_time", "quote_asset_volume", "trade_count", "taker_buy_base_volume", "taker_buy_quote_volume"]
+    columns = ["date", "symbol", "open", "high", "low", "close", "volume", "close_time", "quote_volume", "trade_count", "taker_buy_base_volume", "taker_buy_quote_volume"]
     normalized = []
     for row in rows:
         normalized.append([
@@ -65,7 +65,7 @@ def _normalize_klines(rows: list[list[Any]], symbol: str) -> pd.DataFrame:
             "date": "datetime64[ns]", "close_time": "datetime64[ns]",
             "open": "float64", "high": "float64", "low": "float64",
             "close": "float64", "volume": "float64",
-            "quote_asset_volume": "float64", "trade_count": "int64",
+            "quote_volume": "float64", "trade_count": "int64",
             "taker_buy_base_volume": "float64", "taker_buy_quote_volume": "float64",
         },
     )

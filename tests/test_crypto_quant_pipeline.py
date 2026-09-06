@@ -36,7 +36,7 @@ def _cmc_frame(start=date(2024, 1, 1), end=date(2024, 2, 25), extra=False):
 def _klines(symbols=SYMBOLS, start=date(2023, 12, 31), end=date(2024, 2, 24)):
     dates = pd.date_range(start, end, freq="D")
     return pd.DataFrame([{
-        "date": d, "symbol": s, "open_time": d, "close_time": d + pd.Timedelta(hours=23, minutes=59),
+        "date": d, "symbol": s, "close_time": d + pd.Timedelta(hours=23, minutes=59),
         "open": 100.0, "high": 101.0, "low": 99.0, "close": 100.5, "volume": 1000.0,
         "quote_volume": 100000.0, "trade_count": 10, "taker_buy_base_volume": 500.0,
         "taker_buy_quote_volume": 50000.0,
@@ -107,6 +107,24 @@ def _run(tmp_path, cmc=None, binance=None, as_of=datetime(2024, 2, 25, 12, tzinf
     return CryptoQuantPipeline(_config(tmp_path), cmc or FakeCmc(), binance or FakeBinance()).backfill(as_of)
 
 
+def test_legacy_kline_schema_is_migrated_before_new_rows_are_appended(tmp_path):
+    path = _config(tmp_path).store_path
+    legacy = _klines([SYMBOLS[0]], date(2024, 1, 1), date(2024, 1, 1))
+    legacy["quote_volume"] = float("nan")
+    with pd.HDFStore(path, mode="w") as hdf:
+        hdf.put("klines_daily", legacy, format="table", data_columns=["date", "symbol"], index=False)
+
+    store = CryptoQuantStore(path)
+    CryptoQuantPipeline._migrate_legacy_schema(store)
+
+    migrated = store.read("klines_daily")
+    assert list(migrated.columns) == [
+        "date", "symbol", "close_time", "open", "high", "low", "close", "volume",
+        "quote_volume", "trade_count", "taker_buy_base_volume", "taker_buy_quote_volume",
+    ]
+    assert migrated["quote_volume"].isna().all()
+
+
 def test_backfill_writes_all_seven_tables_and_metadata(tmp_path):
     summary = _run(tmp_path)
     store = CryptoQuantStore(tmp_path / "data" / "crypto_quant.h5")
@@ -116,7 +134,7 @@ def test_backfill_writes_all_seven_tables_and_metadata(tmp_path):
     assert summary.symbol_status and metadata["symbol_status"] == summary.symbol_status
 
 
-def test_complete_empty_funding_response_is_published_as_complete(tmp_path):
+def test_complete_empty_fetch_does_not_prove_settlement_completeness(tmp_path):
     _run(tmp_path)
     store = CryptoQuantStore(_config(tmp_path).store_path)
     metadata = store.read_metadata()
@@ -127,7 +145,8 @@ def test_complete_empty_funding_response_is_published_as_complete(tmp_path):
     panel = store.read("research_panel_daily")
     assert panel["funding_event_count"].eq(0).all()
     assert panel["funding_rate_mean"].isna().all()
-    assert panel["has_complete_funding"].all()
+    assert not panel["has_complete_funding"].any()
+    assert panel["funding_coverage_status"].eq("no_events").all()
 
 
 def test_completed_funding_checkpoint_does_not_hide_empty_extension(tmp_path):
@@ -587,10 +606,9 @@ def test_pipeline_cutoff_replay_matches_full_raw_and_derived_prefix(tmp_path):
         max_abs_diff = max((left[column].fillna(0).to_numpy() - right[column].fillna(0).to_numpy()).__abs__().max(initial=0.0) for column in numeric) if len(numeric) else 0.0
         assert max_abs_diff == 0.0
         if name == "research_panel_daily":
-            assert left["has_complete_funding"].all()
+            assert not left["has_complete_funding"].any()
             assert not right["has_complete_funding"].any()
-            left = left.drop(columns=["has_complete_funding"])
-            right = right.drop(columns=["has_complete_funding"])
+
         pd.testing.assert_frame_equal(left, right, check_dtype=False)
 
 

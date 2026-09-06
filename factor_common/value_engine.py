@@ -1,11 +1,32 @@
 """Calculate label-independent daily factor values using historical context."""
 
+import hashlib
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 from pandas.api.types import is_bool_dtype
 
+from data.crypto_quant import reader as _cq_reader
+
+from . import data_provider as _data_provider
+from . import preprocessing as _preprocessing
 from .definitions import FactorSpec
 from .preprocessing import rank_to_unit_by_date, winsorize_by_date
+
+
+def value_pipeline_fingerprint() -> str:
+    """Hash of the sources that define cached factor-value semantics.
+
+    Masking, preprocessing, and universe/quality access all shape the saved
+    value matrix, so any edit to those modules must invalidate cached factor
+    values instead of silently reusing a matrix built by older code.
+    """
+
+    digest = hashlib.sha256()
+    for path in (_cq_reader.__file__, _data_provider.__file__, _preprocessing.__file__, __file__):
+        digest.update(Path(path).read_bytes())
+    return digest.hexdigest()
 
 
 def _validate_axes(matrix, *, name, expected=None):

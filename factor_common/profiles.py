@@ -18,7 +18,8 @@ class BacktestProfile:
     factor_direction: int = 1
     initial_equity: float = 1.0
     gross_exposure: float = 1.0
-    fee_rate: float = 0.0003
+    fee_rate: float = 0.0005
+    slippage: float = 0.001
     include_funding: bool = True
     funding_price_mode: str = "strict"
     out_of_sample_days: int = 180
@@ -75,6 +76,8 @@ def _validate_profile(profile: BacktestProfile, requested_profile_id: str) -> No
         raise ValueError("gross_exposure must be finite and in (0, 1]")
     if not _is_finite_number(profile.fee_rate) or not 0 <= profile.fee_rate < 1:
         raise ValueError("fee_rate must be finite and in [0, 1)")
+    if not _is_finite_number(profile.slippage) or not 0 <= profile.slippage < 1:
+        raise ValueError("slippage must be finite and in [0, 1)")
     if not isinstance(profile.include_funding, bool):
         raise ValueError("include_funding must be a boolean")
     if profile.funding_price_mode not in _FUNDING_PRICE_MODES:

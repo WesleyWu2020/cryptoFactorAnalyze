@@ -92,10 +92,10 @@ def test_factor_construction_modules_scan_clean():
         "value_engine.py", "data_provider.py", "validation.py",
     }
     assert scan_future_leaks(scanned) == []
-    # Recorded evidence, not a violation: metrics.py:298 negatively shifts the
+    # Recorded evidence, not a violation: metrics.py:299 negatively shifts the
     # evaluation-only labels matrix (allowed future data), never factor values.
     findings = scan_future_leaks([REPO_ROOT / "factor_common" / "metrics.py"])
-    assert [(f["line"], f["pattern"]) for f in findings] == [(298, "shift_negative_periods")]
+    assert [(f["line"], f["pattern"]) for f in findings] == [(299, "shift_negative_periods")]
     assert "labels.shift" in findings[0]["source"]
 
 

@@ -131,6 +131,7 @@ def example_manager(tmp_path, example_h5):
         h5_path=example_h5,
         base_dir=tmp_path / "factor_results",
         reports_dir=tmp_path / "reports",
+        persist_evaluations=True,
     )
 
 

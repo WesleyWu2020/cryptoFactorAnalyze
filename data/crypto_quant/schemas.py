@@ -20,11 +20,11 @@ _STRING_SIZES = {
     "symbol": 32, "binance_symbol": 32, "cmc_symbol": 32, "base_asset": 32,
     "quote_asset": 16, "name": 256, "status": 32, "mapping_source": 64,
     "contract_type": 32,
-    "rate_type": 32,
+    "rate_type": 32, "funding_coverage_status": 32,
 }
 _STRING_COLUMNS = set(_STRING_SIZES) | {"rate_type"}
 _INTEGER_COLUMNS = {"cmc_id"}
-_BOOLEAN_COLUMNS = {"has_complete_kline", "has_complete_funding"}
+_BOOLEAN_COLUMNS = {"has_complete_kline", "has_complete_funding", "has_placeholder_kline"}
 _DATE_COLUMNS = {
     "date", "decision_date", "effective_date", "effective_end_date",
     "onboard_date", "valid_from", "valid_to", "universe_effective_date",
@@ -64,10 +64,10 @@ TABLE_SPECS = {
     "cmc100_daily": _spec(("date", "index_value", "source_update_time", "fetched_at_utc"), ("date",)),
     "cmc100_constituents": _spec(("date", "cmc_id", "symbol", "name", "weight"), ("date", "cmc_id")),
     "futures_contracts": _spec(("cmc_id", "cmc_symbol", "binance_symbol", "base_asset", "quote_asset", "contract_type", "onboard_date", "status", "mapping_source", "valid_from", "valid_to"), ("cmc_id", "valid_from")),
-    "klines_daily": _spec(("date", "symbol", "open_time", "close_time", "open", "high", "low", "close", "volume", "quote_volume", "trade_count", "taker_buy_base_volume", "taker_buy_quote_volume"), ("date", "symbol")),
+    "klines_daily": _spec(("date", "symbol", "close_time", "open", "high", "low", "close", "volume", "quote_volume", "trade_count", "taker_buy_base_volume", "taker_buy_quote_volume"), ("date", "symbol")),
     "funding_events": _spec(("funding_time", "symbol", "funding_rate", "mark_price", "rate_type"), ("funding_time", "symbol", "rate_type")),
     "universe_monthly": _spec(("decision_date", "effective_date", "effective_end_date", "cmc_id", "cmc_symbol", "binance_symbol", "market_cap_rank", "cmc_weight"), ("effective_date", "binance_symbol")),
-    "research_panel_daily": _spec(("date", "binance_symbol", "open_time", "close_time", "open", "high", "low", "close", "volume", "quote_volume", "trade_count", "taker_buy_base_volume", "taker_buy_quote_volume", "decision_date", "universe_effective_date", "market_cap_rank", "cmc_weight_at_decision", "funding_rate_sum", "funding_rate_mean", "funding_rate_last", "funding_event_count", "has_complete_kline", "has_complete_funding"), ("date", "binance_symbol")),
+    "research_panel_daily": _spec(("date", "binance_symbol", "close_time", "open", "high", "low", "close", "volume", "quote_volume", "trade_count", "taker_buy_base_volume", "taker_buy_quote_volume", "decision_date", "universe_effective_date", "market_cap_rank", "cmc_weight_at_decision", "funding_rate_sum", "funding_rate_mean", "funding_rate_last", "funding_event_count", "has_complete_kline", "has_complete_funding", "has_placeholder_kline", "funding_coverage_status", "funding_invalid_price_count"), ("date", "binance_symbol")),
 }
 
 
@@ -75,6 +75,11 @@ def normalize_table(name: str, frame: pd.DataFrame) -> pd.DataFrame:
     if name not in TABLE_SPECS:
         raise KeyError(f"unknown table: {name}")
     spec = TABLE_SPECS[name]
+    if name == "research_panel_daily":
+        frame = frame.copy()
+        for column, default in {"has_placeholder_kline": False, "funding_coverage_status": "unknown", "funding_invalid_price_count": float("nan")}.items():
+            if column not in frame:
+                frame[column] = default
     missing = [c for c in spec.columns if c not in frame.columns]
     if missing:
         raise ValueError(f"missing columns for {name}: {missing}")

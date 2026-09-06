@@ -19,6 +19,10 @@ EXAMPLE_PARAMS = {
     "end": "2024-01-23",
     "n_groups": 3,
     "include_funding": True,
+    # Pin trading costs so fee reconciliation is independent of the profile
+    # defaults.
+    "fee_rate": 0.0003,
+    "slippage": 0.0,
 }
 
 

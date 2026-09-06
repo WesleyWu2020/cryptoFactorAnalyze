@@ -16,7 +16,12 @@ CMC100_HISTORY_URL = "https://pro-api.coinmarketcap.com/public-api/v3/index/cmc1
 
 def _cmc_day_timestamp(value: date, *, end_of_day: bool = False) -> str:
     day_time = time(23, 59, 59) if end_of_day else time.min
-    return datetime.combine(value, day_time, tzinfo=timezone.utc).isoformat().replace(
+    timestamp = datetime.combine(value, day_time, tzinfo=timezone.utc)
+    if end_of_day:
+        now = datetime.now(timezone.utc).replace(microsecond=0)
+        if value == now.date():
+            timestamp = min(timestamp, now)
+    return timestamp.isoformat().replace(
         "+00:00", "Z"
     )
 

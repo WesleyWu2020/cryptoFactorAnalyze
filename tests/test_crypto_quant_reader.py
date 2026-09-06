@@ -14,7 +14,7 @@ from data.crypto_quant.store import CryptoQuantStore
 
 
 MARKET_COLUMNS = [
-    "date", "instrument", "open_time", "close_time", "open", "high", "low", "close",
+    "date", "instrument", "close_time", "open", "high", "low", "close",
     "volume", "quote_volume", "trade_count", "taker_buy_base_volume", "taker_buy_quote_volume",
 ]
 
@@ -23,7 +23,6 @@ def _market_row(day, symbol, close=100.0):
     return {
         "date": day,
         "symbol": symbol,
-        "open_time": pd.Timestamp(day),
         "close_time": pd.Timestamp(day) + pd.Timedelta(hours=23, minutes=59),
         "open": close - 1,
         "high": close + 1,
@@ -58,7 +57,7 @@ def _store_fixture(tmp_path):
     for day in pd.date_range("2024-03-09", "2024-03-11"):
         for symbol in ["AUSDT", "BUSDT"] if day <= pd.Timestamp("2024-03-10") else ["CUSDT"]:
             panel_rows.append({
-                "date": day, "binance_symbol": symbol, "open_time": day, "close_time": day,
+                "date": day, "binance_symbol": symbol, "close_time": day,
                 "open": 1.0, "high": 1.0, "low": 1.0, "close": 1.0, "volume": 1.0,
                 "quote_volume": 1.0, "trade_count": 1, "taker_buy_base_volume": 1.0,
                 "taker_buy_quote_volume": 1.0, "decision_date": day - pd.Timedelta(days=1),
@@ -174,7 +173,7 @@ def test_load_market_history_empty_result_keeps_full_market_schema(tmp_path):
     assert list(out.columns) == MARKET_COLUMNS
 
 
-@pytest.mark.parametrize("missing", ["date", "open_time"])
+@pytest.mark.parametrize("missing", ["date", "quote_volume"])
 def test_load_market_history_reports_malformed_hdf_before_where(tmp_path, missing):
     path = _store_fixture(tmp_path)
     malformed = pd.DataFrame([_market_row("2024-03-10", "AUSDT")]).drop(columns=[missing])

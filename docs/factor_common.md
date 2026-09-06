@@ -55,8 +55,9 @@ params=None, plot=True)` executes, in order:
 
 1. **Resolve parameters.** `params` may contain only `start`, `end`, and the
    profile fields `rebalance_days`, `anchor_date`, `n_groups`,
-   `factor_direction`, `fee_rate`, `include_funding`, `funding_price_mode`,
-   `split_date`, `out_of_sample_days`. Unknown keys raise `ValueError`;
+   `factor_direction`, `fee_rate`, `slippage`, `include_funding`,
+   `funding_price_mode`, `split_date`, `out_of_sample_days`. Unknown keys
+   raise `ValueError`;
    formula parameters belong in the module's `SETTING["params"]`. When
    `start`/`end` are omitted, `end` defaults to the last stored market date
    and `start` to 364 days earlier.
@@ -83,7 +84,12 @@ params=None, plot=True)` executes, in order:
    persisted.
 6. **Persist values.** The factor matrix is written before any
    execution-tail or funding data is touched, so a later funding failure can
-   never discard a successfully computed value.
+   never discard a successfully computed value. The flat value cache is keyed
+   on the factor source hash, settings, date range, input-store stat, and a
+   `pipeline_fingerprint` of the value-pipeline sources (`value_engine`,
+   `preprocessing`, `data_provider`, `data/crypto_quant/reader`); any edit to
+   those modules — or a cache written before the fingerprint existed —
+   invalidates the cache instead of silently reusing stale values.
 7. **Load evaluation inputs.** Execution-tail opens (through
    `end + 1 + rebalance_days`), raw funding events, and per-day quality
    flags for the value columns; the content hashes of all three are recorded
@@ -161,16 +167,24 @@ result, and re-saving identical fingerprints with different content raises.
   pre-read source snapshot. `latest_run.json` points at the latest
   successful run.
 
-### Evaluation — `<factor_id>/<run_id>/evaluations/<evaluation_id>/`
+### Evaluation
 
-- `result.json`: status, profile, evaluation-input hashes, metrics
-  (`factor_performance`), diagnostics, and the scenario scalar blocks.
-- `table-<key>.parquet`: one table per saved DataFrame — `factor_value` is
-  not duplicated (it loads from the run); the flattened accounting tables
-  are `<scenario>__<table>` plus `group_returns` and the optional
-  `benchmark`.
-- Only `"complete"` evaluations promote `latest_complete.json`; incomplete
-  evaluations remain loadable by explicit id.
+Evaluation persistence is opt-in with `FactorManager(..., persist_evaluations=True)`.
+The default `FactorManager` keeps the complete evaluation in the returned
+`result` only, so running `evaluate()` does not create evaluation artifacts.
+When persistence is enabled, the manager's flat storage mode retains only the
+current evaluation:
+
+- `<factor_id>.evaluation.json`: status, profile, evaluation-input hashes,
+  metrics (`factor_performance`), diagnostics, and the scenario scalar blocks.
+- `<factor_id>.evaluation.<key>.parquet`: one sidecar per saved DataFrame —
+  `factor_value` is not duplicated because it loads from the factor cache; the
+  flattened accounting tables are `<scenario>__<table>` plus `group_returns`
+  and the optional `benchmark`.
+
+Saving a new evaluation atomically replaces the current evaluation and removes
+table sidecars that are no longer referenced. Historical evaluation archives
+are available only in the non-flat storage mode.
 
 ### Scenario tables (per scenario `gross` / `trading_net` / `all_costs`)
 
@@ -201,7 +215,11 @@ result, and re-saving identical fingerprints with different content raises.
 - **`fee_rate`** is charged per unit of traded notional on every fill
   (`fee = |order_quantity * price| * fee_rate`), sized after the day's
   already-due funding and deducted from equity after sizing. The default
-  `0.0003` is 3 bps per trade.
+  `0.0005` is 5 bps per side.
+- **`slippage`** is charged the same way (`slippage = notional * slippage`)
+  as a separate ledger/order column, modelling the one-sided market-impact
+  cost of crossing the spread at the open. The default `0.001` is 0.1% per
+  side. Both `fee` and `slippage` are zero in the `gross` scenario.
 - **Scenarios** are independent accountings sharing signals and schedule:
   `gross` (no fees, no funding), `trading_net` (fees only), and `all_costs`
   (fees plus funding when `include_funding=True`). Each sizes orders from

@@ -80,6 +80,7 @@ def manager(tmp_path, h5_fixture):
         h5_path=h5_fixture,
         base_dir=tmp_path / "factor_results",
         reports_dir=tmp_path / "reports",
+        persist_evaluations=True,
     )
 
 
@@ -156,6 +157,22 @@ def test_evaluate_dataframe_source_requires_explicit_identity(manager):
     )
 
 
+def test_evaluate_does_not_persist_evaluation_by_default(tmp_path, h5_fixture, factor_file):
+    manager = FactorManager(
+        h5_path=h5_fixture,
+        base_dir=tmp_path / "factor_results",
+        reports_dir=tmp_path / "reports",
+    )
+
+    result = manager.evaluate(
+        str(factor_file), params=dict(BASE_PARAMS), plot=False
+    )
+
+    assert result["evaluation_id"] is None
+    assert result["paths"]["evaluation_dir"] is None
+    assert list((tmp_path / "factor_results").glob("mom1.evaluation*")) == []
+
+
 def test_evaluate_dataframe_long_table(manager):
     matrix = _external_matrix()
     long = matrix.reset_index().melt(
@@ -208,8 +225,8 @@ def test_factor_run_reused_when_only_fees_change(manager, factor_file):
     second_equity = second["factor_result"]["scenarios"]["trading_net"]["ledger"]["equity"]
     assert not first_equity.equals(second_equity)
 
-    loaded = manager.get_performance("mom1", evaluation_id=first["evaluation_id"])
-    assert loaded["evaluation_id"] == first["evaluation_id"]
+    with pytest.raises(FileNotFoundError, match="unknown evaluation"):
+        manager.get_performance("mom1", evaluation_id=first["evaluation_id"])
     assert manager.get_performance("mom1")["evaluation_id"] == second["evaluation_id"]
 
 
@@ -360,7 +377,7 @@ def test_plot_result_renders_saved_group_sections(manager, factor_file, tmp_path
     output = tmp_path / "loaded_report.html"
     manager.plot_result(loaded, output_path=output)
     html = output.read_text(encoding="utf-8")
-    assert "Group NAV (from saved group returns)" in html
+    assert "Group cumulative return (simple sum, from saved group returns)" in html
     assert "the saved result contains no group return table" not in html
     assert "Group membership on" in html
     assert "the saved result contains no factor value matrix" not in html

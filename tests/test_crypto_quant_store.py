@@ -28,10 +28,10 @@ EXPECTED_COLUMNS = {
     "cmc100_daily": "date index_value source_update_time fetched_at_utc",
     "cmc100_constituents": "date cmc_id symbol name weight",
     "futures_contracts": "cmc_id cmc_symbol binance_symbol base_asset quote_asset contract_type onboard_date status mapping_source valid_from valid_to",
-    "klines_daily": "date symbol open_time close_time open high low close volume quote_volume trade_count taker_buy_base_volume taker_buy_quote_volume",
+    "klines_daily": "date symbol close_time open high low close volume quote_volume trade_count taker_buy_base_volume taker_buy_quote_volume",
     "funding_events": "funding_time symbol funding_rate mark_price rate_type",
     "universe_monthly": "decision_date effective_date effective_end_date cmc_id cmc_symbol binance_symbol market_cap_rank cmc_weight",
-    "research_panel_daily": "date binance_symbol open_time close_time open high low close volume quote_volume trade_count taker_buy_base_volume taker_buy_quote_volume decision_date universe_effective_date market_cap_rank cmc_weight_at_decision funding_rate_sum funding_rate_mean funding_rate_last funding_event_count has_complete_kline has_complete_funding",
+    "research_panel_daily": "date binance_symbol close_time open high low close volume quote_volume trade_count taker_buy_base_volume taker_buy_quote_volume decision_date universe_effective_date market_cap_rank cmc_weight_at_decision funding_rate_sum funding_rate_mean funding_rate_last funding_event_count has_complete_kline has_complete_funding has_placeholder_kline funding_coverage_status funding_invalid_price_count",
 }
 
 

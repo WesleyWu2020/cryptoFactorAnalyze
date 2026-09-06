@@ -56,6 +56,7 @@ def scheduled_manager(tmp_path, complete_h5):
         h5_path=complete_h5,
         base_dir=tmp_path / "factor_results",
         reports_dir=tmp_path / "reports",
+        persist_evaluations=True,
     )
 
 
@@ -74,6 +75,7 @@ def unknown_manager(tmp_path, partial_h5):
         h5_path=partial_h5,
         base_dir=tmp_path / "factor_results",
         reports_dir=tmp_path / "reports",
+        persist_evaluations=True,
     )
 
 
@@ -89,6 +91,7 @@ def unknown_schedule_manager(tmp_path, h5_fixture):
         h5_path=path,
         base_dir=tmp_path / "factor_results",
         reports_dir=tmp_path / "reports",
+        persist_evaluations=True,
     )
 
 

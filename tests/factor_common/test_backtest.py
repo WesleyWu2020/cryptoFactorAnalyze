@@ -19,6 +19,7 @@ def _profile(**overrides):
         "anchor_date": "2024-01-01",
         "rebalance_days": 1,
         "fee_rate": 0.0,
+        "slippage": 0.0,
         "include_funding": False,
     }
     base.update(overrides)
@@ -97,7 +98,8 @@ def test_long_short_ten_percent_return_container_shape():
     }
     assert scenario["status"] == "complete"
     assert list(scenario["ledger"].columns) == [
-        "equity", "return", "price_pnl", "funding_cashflow", "fee", "trade_notional",
+        "equity", "return", "price_pnl", "funding_cashflow", "fee", "slippage",
+        "trade_notional",
     ]
     assert scenario["ledger"].index.name == "date"
 
@@ -162,6 +164,35 @@ def test_fee_fixture_equity_path():
     all_costs = result["scenarios"]["all_costs"]["ledger"]
     pd.testing.assert_frame_equal(all_costs, trading)
     assert result["status"] == "complete"
+
+
+def test_slippage_fixture_equity_path():
+    # Constant price 100: entry turnover 1 -> fee .0005 + slippage .001 ->
+    # equity .9985; liquidation turnover 1 -> another .0015 -> equity .997.
+    values, opens = _frames(
+        3,
+        {0: {"A": 2.0, "B": 1.0}},
+        {offset: {"A": 100.0, "B": 100.0} for offset in range(3)},
+    )
+    profile = _profile(fee_rate=0.0005, slippage=0.001, include_funding=True)
+    result = _run(values, opens, profile=profile)
+
+    trading = result["scenarios"]["trading_net"]["ledger"]
+    assert trading["equity"].tolist() == pytest.approx([0.9985, 0.997])
+    assert trading["fee"].tolist() == pytest.approx([0.0005, 0.0005])
+    assert trading["slippage"].tolist() == pytest.approx([0.001, 0.001])
+
+    orders = result["scenarios"]["trading_net"]["orders"]
+    filled = orders[orders["status"] == "filled"]
+    assert filled["fee"].tolist() == pytest.approx(
+        (filled["notional"] * 0.0005).tolist()
+    )
+    assert filled["slippage"].tolist() == pytest.approx(
+        (filled["notional"] * 0.001).tolist()
+    )
+
+    gross = result["scenarios"]["gross"]["ledger"]
+    assert gross["slippage"].sum() == 0.0
 
 
 def test_boundary_funding_settles_on_pre_trade_quantities():

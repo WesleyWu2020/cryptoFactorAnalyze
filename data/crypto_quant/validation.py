@@ -93,7 +93,7 @@ def _validate_duplicate_keys(frames: Mapping[str, pd.DataFrame], issues: list[Va
 def _validate_klines(klines: pd.DataFrame, issues: list[ValidationIssue]) -> None:
     if klines.empty:
         return
-    for column in ("volume", "quote_volume", "quote_asset_volume", "trade_count", "taker_buy_base_volume", "taker_buy_quote_volume"):
+    for column in ("volume", "quote_volume", "trade_count", "taker_buy_base_volume", "taker_buy_quote_volume"):
         if column in klines:
             bad = pd.to_numeric(klines[column], errors="coerce") < 0
             if bad.any():
@@ -204,8 +204,18 @@ def _validate_panel(panel: pd.DataFrame, universe: pd.DataFrame, issues: list[Va
     if {"date", "binance_symbol"}.issubset(panel.columns):
         for timestamp, group in panel.groupby("date"):
             count = group["binance_symbol"].nunique()
-            if count != 50:
-                _issue(issues, "panel_universe_size", f"date={timestamp!s}, memberships={count}")
+            expected = 50
+            if not universe.empty and {"effective_date", "effective_end_date"}.issubset(universe.columns):
+                date_value = pd.Timestamp(timestamp).normalize()
+                starts = _parse_timestamps(universe["effective_date"]).dt.tz_localize(None).dt.normalize()
+                ends = _parse_timestamps(universe["effective_end_date"]).dt.tz_localize(None).dt.normalize()
+                expected = int((starts.le(date_value) & (ends.isna() | ends.ge(date_value))).sum())
+            if count != expected:
+                _issue(
+                    issues,
+                    "panel_universe_size",
+                    f"date={timestamp!s}, memberships={count}, expected={expected}",
+                )
         if not universe.empty and {"effective_date", "effective_end_date"}.issubset(universe.columns):
             panel_dates = _parse_timestamps(panel["date"]).dt.tz_localize(None).dt.normalize()
             universe_starts = _parse_timestamps(universe["effective_date"]).dt.tz_localize(None).dt.normalize()

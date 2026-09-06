@@ -82,7 +82,7 @@ def test_tie_breaks_by_cmc_id_and_closes_intervals(synthetic_inputs):
     accepted = out.sort_values(["decision_date", "market_cap_rank"])
     assert accepted.loc[accepted["decision_date"] == pd.Timestamp("2024-02-01"), "cmc_id"].tolist() == [1, 2]
     january = accepted[accepted["decision_date"] == pd.Timestamp("2024-01-01")]
-    assert january["effective_end_date"].eq(pd.Timestamp("2024-02-01") - pd.Timedelta(days=1)).all()
+    assert january["effective_end_date"].eq(pd.Timestamp("2024-02-01")).all()
     assert accepted[accepted["decision_date"] == pd.Timestamp("2024-02-01")]["effective_end_date"].isna().all()
 
 
@@ -200,7 +200,7 @@ def test_uses_first_available_cmc_snapshot_in_october_and_delays_effective_date(
         pd.Timestamp("2024-11-01"), pd.Timestamp("2024-11-01"),
     ]
     assert october_rows["effective_date"].eq(pd.Timestamp("2024-10-03")).all()
-    assert october_rows["effective_end_date"].eq(pd.Timestamp("2024-10-31")).all()
+    assert october_rows["effective_end_date"].eq(pd.Timestamp("2024-11-01")).all()
     assert not out["effective_date"].eq(pd.Timestamp("2024-10-02")).any()
 
 
@@ -293,6 +293,48 @@ def test_october_snapshot_cannot_change_universe_before_its_decision(synthetic_i
     later = out[out["decision_date"] == pd.Timestamp("2024-10-02")]
     assert set(prior["cmc_id"]) == {1, 2}
     assert prior["effective_date"].eq(pd.Timestamp("2024-09-02")).all()
-    assert prior["effective_end_date"].eq(pd.Timestamp("2024-10-01")).all()
+    assert prior["effective_end_date"].eq(pd.Timestamp("2024-10-02")).all()
     assert set(later["cmc_id"]) == {55, 56}
     assert later["effective_date"].eq(pd.Timestamp("2024-10-03")).all()
+
+
+def test_placeholder_prior_day_is_ineligible_without_future_filtering(synthetic_inputs):
+    constituents, mappings, klines = synthetic_inputs
+    klines = klines.copy()
+    klines["volume"] = 10.0
+    for column in ["open", "high", "low", "close"]:
+        klines[column] = 1.0
+    mask = (klines.symbol == "C1USDT") & (klines.date == pd.Timestamp("2023-12-31"))
+    klines.loc[mask, "volume"] = 0.0
+    full = build_monthly_universe(constituents, mappings, klines, date(2024, 1, 1), date(2024, 1, 31))
+    assert "C1USDT" not in set(full.binance_symbol)
+    assert "C52USDT" in set(full.binance_symbol)
+    cutoff = build_monthly_universe(constituents, mappings, klines[klines.date <= pd.Timestamp("2023-12-31")], date(2024, 1, 1), date(2024, 1, 31))
+    pd.testing.assert_frame_equal(full, cutoff)
+
+
+def test_memberships_continue_until_next_effective_day(synthetic_inputs):
+    from data.crypto_quant.reader import _membership_by_date
+    constituents, mappings, klines = synthetic_inputs
+    february = constituents.assign(date=date(2024, 2, 1))
+    full = build_monthly_universe(
+        pd.concat([constituents, february], ignore_index=True), mappings, klines,
+        date(2024, 1, 1), date(2024, 2, 29), top_n=2,
+    )
+    short = build_monthly_universe(
+        constituents, mappings, klines, date(2024, 1, 1), date(2024, 1, 31), top_n=2,
+    )
+    days = _membership_by_date(full, pd.Timestamp('2024-01-02'), pd.Timestamp('2024-02-02'))
+    assert all(len(members) == 2 for members in days.values())
+    cutoff = pd.Timestamp('2024-02-01')
+    assert _membership_by_date(full, cutoff, cutoff) == _membership_by_date(short, cutoff, cutoff)
+
+
+def test_contract_lifecycle_caps_membership_before_terminal_open(synthetic_inputs):
+    constituents, mappings, klines = synthetic_inputs
+    out = build_monthly_universe(
+        constituents, mappings, klines, date(2024, 1, 1), date(2024, 1, 31),
+        top_n=2, contract_end_dates={"C1USDT": date(2024, 1, 10)},
+    )
+    rows = out[out["binance_symbol"] == "C1USDT"]
+    assert rows["effective_end_date"].eq(pd.Timestamp("2024-01-10")).all()

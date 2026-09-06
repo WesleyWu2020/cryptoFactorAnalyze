@@ -1,6 +1,6 @@
-"""Versioned Parquet/JSON persistence for factor values and evaluations.
+"""Parquet/JSON persistence for factor values and evaluations.
 
-Factor matrices are stored per ``<factor_id>/<run_id>/`` as a long-format
+The legacy versioned mode stores factor matrices per ``<factor_id>/<run_id>/`` as a long-format
 ``factor.parquet`` (columns ``date``, ``instrument``, ``factor``; unique,
 stably sorted keys) plus a ``metadata.json`` recording the full date/column
 axes so rows or columns without any finite value round-trip exactly. Run IDs
@@ -9,14 +9,23 @@ are content-derived from canonical JSON over the caller-supplied metadata
 hashes including membership) and the framework version, so a parameter or
 data-fingerprint change can never silently reuse a previous result.
 
-Evaluations live under ``<run_id>/evaluations/<evaluation_id>/``; the
+In versioned storage, evaluations live under
+``<run_id>/evaluations/<evaluation_id>/``. In flat storage, only the current
+evaluation is kept in ``<factor_id>.evaluation.json`` and table sidecars. The
 evaluation ID additionally covers the profile and the evaluation input hashes
 (execution-tail prices, funding events, coverage evidence), so a fee-only
 profile change produces a new evaluation without touching the factor value.
-Artifacts are written in a sibling temporary directory, renamed when complete,
-and only then is a small success pointer atomically replaced. Incomplete
-evaluations remain loadable by ID without promoting the latest-complete
-pointer; a successful factor value is promoted independently.
+Artifacts are written through temporary files and promoted only after they are
+complete. Incomplete evaluations remain loadable by an explicit current ID,
+while the default lookup accepts only a current complete evaluation.
+
+The manager uses flat mode: one ``<factor_id>.parquet`` and one
+``<factor_id>.meta.json`` for factor values. Evaluation JSON and table
+sidecars are written only when the manager is constructed with
+``persist_evaluations=True``. A cache is accepted only when source code,
+settings, requested start, requested end, and source-file statistics still
+match. If the date range is insufficient or metadata differs, the caller
+recomputes the factor and atomically replaces the cache files.
 
 Only Parquet tables and JSON scalars are written — code and arbitrary objects
 are never pickled. Non-finite JSON scalars are serialized as ``null``.
@@ -198,10 +207,47 @@ def _temp_sibling(final_dir: Path) -> Path:
 
 
 class FactorStorage:
-    """Atomic versioned storage rooted at ``base_dir``."""
+    """Atomic factor storage rooted at ``base_dir``.
 
-    def __init__(self, base_dir: str | Path):
+    ``flat=True`` stores one stable value file and metadata file per factor.
+    Evaluation artifacts are also flat and keep only the current evaluation;
+    a new evaluation replaces the previous evaluation and its table sidecars.
+    """
+
+    def __init__(self, base_dir: str | Path, *, flat: bool = False):
         self.base_dir = Path(base_dir)
+        self.flat = flat
+
+    @staticmethod
+    def _flat_name(factor_id: str) -> str:
+        _validate_factor_id(factor_id)
+        return factor_id.lower()
+
+    def _flat_paths(self, factor_id: str) -> tuple[Path, Path]:
+        name = self._flat_name(factor_id)
+        return (
+            self.base_dir / f"{name}.parquet",
+            self.base_dir / f"{name}.meta.json",
+        )
+
+    def _flat_evaluation_path(self, factor_id: str) -> Path:
+        return self.base_dir / f"{self._flat_name(factor_id)}.evaluation.json"
+
+    def _flat_evaluation_table_path(self, factor_id: str, key: str) -> Path:
+        if (
+            not isinstance(key, str)
+            or not key
+            or "/" in key
+            or "\\" in key
+        ):
+            raise ValueError(f"invalid evaluation table key: {key!r}")
+        return self.base_dir / f"{self._flat_name(factor_id)}.evaluation.{key}.parquet"
+
+    def _evaluation_root(self, factor_id: str, run_id: str) -> Path:
+        _validate_factor_id(factor_id)
+        if self.flat:
+            return self.base_dir / f"{self._flat_name(factor_id)}.evaluations" / run_id
+        return self.base_dir / factor_id / "evaluations" / run_id
 
     def _factor_dir(self, factor_id: str) -> Path:
         _validate_factor_id(factor_id)
@@ -239,6 +285,8 @@ class FactorStorage:
         """
         if not isinstance(metadata, Mapping):
             raise TypeError("metadata must be a mapping")
+        if self.flat:
+            return self._save_flat_value(factor_id, matrix, metadata)
         normalized = _normalize_matrix(matrix)
         table = _to_long_table(normalized)
         axes = _axes_payload(normalized)
@@ -291,6 +339,107 @@ class FactorStorage:
             "metadata_path": run_dir / "metadata.json",
         }
 
+    def _save_flat_value(
+        self, factor_id: str, matrix: pd.DataFrame, metadata: Mapping
+    ) -> dict[str, Any]:
+        normalized = _normalize_matrix(matrix)
+        table = _to_long_table(normalized)
+        axes = _axes_payload(normalized)
+        run_id = _artifact_id(
+            {
+                "framework_version": FRAMEWORK_VERSION,
+                "metadata": {
+                    key: value
+                    for key, value in metadata.items()
+                    if key not in _VOLATILE_METADATA_KEYS
+                },
+            }
+        )
+        factor_path, metadata_path = self._flat_paths(factor_id)
+        _verify_source_stats(metadata.get("source_stat_before"))
+        payload = {
+            "run_id": run_id,
+            "factor_id": factor_id,
+            "framework_version": FRAMEWORK_VERSION,
+            "axes": axes,
+            "diagnostics": {
+                "valid_count": int(len(table)),
+                "missing_count": int(normalized.size - len(table)),
+            },
+            "metadata": dict(metadata),
+        }
+        factor_path.parent.mkdir(parents=True, exist_ok=True)
+        temp_factor = factor_path.with_name(f".{factor_path.name}.tmp-{os.getpid()}")
+        temp_meta = metadata_path.with_name(f".{metadata_path.name}.tmp-{os.getpid()}")
+        try:
+            table.to_parquet(temp_factor, index=False)
+            _write_json(temp_meta, payload)
+            os.replace(temp_factor, factor_path)
+            os.replace(temp_meta, metadata_path)
+        except BaseException:
+            for path in (temp_factor, temp_meta):
+                path.unlink(missing_ok=True)
+            raise
+        return {
+            "run_id": run_id,
+            "factor_path": factor_path,
+            "metadata_path": metadata_path,
+        }
+
+    def load_cached_value(
+        self,
+        factor_id: str,
+        *,
+        source_sha256: str,
+        settings: Mapping,
+        requested_start: str,
+        requested_end: str,
+        source_stat: Mapping | None = None,
+        pipeline_fingerprint: str | None = None,
+    ) -> tuple[pd.DataFrame, dict[str, Any]] | None:
+        """Load a flat factor only when source/settings/date metadata still fit.
+
+        ``pipeline_fingerprint`` identifies the value-pipeline code that
+        produced the matrix; caches written before the fingerprint existed
+        (or by older code) are rejected rather than silently reused.
+        """
+        if not self.flat:
+            return None
+        factor_path, metadata_path = self._flat_paths(factor_id)
+        if not factor_path.is_file() or not metadata_path.is_file():
+            return None
+        try:
+            payload = json.loads(metadata_path.read_text())
+            metadata = payload["metadata"]
+            if metadata.get("source_sha256") != source_sha256:
+                return None
+            if _canonical_json(metadata.get("settings")) != _canonical_json(settings):
+                return None
+            if metadata.get("requested_start") != requested_start:
+                return None
+            if metadata.get("requested_end", "") < requested_end:
+                return None
+            saved_stats = metadata.get("source_stat_before")
+            if source_stat is not None and saved_stats != _json_safe(source_stat):
+                return None
+            if pipeline_fingerprint is not None and metadata.get(
+                "pipeline_fingerprint"
+            ) != pipeline_fingerprint:
+                return None
+            table = pd.read_parquet(factor_path)
+            if table.duplicated(["date", "instrument"]).any():
+                raise ValueError(f"duplicate date/instrument key in {factor_path}")
+            axes = payload["axes"]
+            matrix = table.pivot(index="date", columns="instrument", values="factor")
+            matrix = matrix.reindex(
+                index=_dates_index(axes["dates"]), columns=pd.Index(axes["columns"])
+            ).astype("float64")
+            matrix.index.name = "date"
+            matrix.columns.name = None
+            return matrix.loc[requested_start:requested_end], payload
+        except (KeyError, OSError, ValueError, TypeError, pd.errors.ParserError):
+            return None
+
     @staticmethod
     def _assert_same_evaluation(
         eval_dir: Path, payload: Mapping, tables: Mapping[str, pd.DataFrame]
@@ -308,8 +457,103 @@ class FactorStorage:
             if not existing.equals(frame):
                 raise ValueError(conflict)
 
+    def _save_flat_evaluation(
+        self, factor_id: str, run_id: str, result: Mapping
+    ) -> dict[str, Any]:
+        """Persist only the current evaluation in flat sidecar files."""
+        evaluation_id = _artifact_id(
+            {
+                "framework_version": FRAMEWORK_VERSION,
+                "run_id": run_id,
+                "profile": result.get("profile"),
+                "evaluation_inputs": result.get("evaluation_inputs"),
+            }
+        )
+        evaluation_path = self._flat_evaluation_path(factor_id)
+        tables = {
+            key: value
+            for key, value in result.items()
+            if isinstance(value, pd.DataFrame)
+        }
+        scalars = {key: value for key, value in result.items() if key not in tables}
+        payload = {
+            "evaluation_id": evaluation_id,
+            "run_id": run_id,
+            "framework_version": FRAMEWORK_VERSION,
+            "tables": sorted(tables),
+            "result": scalars,
+        }
+        conflict = (
+            "evaluation already exists with different content; "
+            "input fingerprints must change when outputs change"
+        )
+
+        previous = None
+        if evaluation_path.is_file():
+            previous = json.loads(evaluation_path.read_text())
+            if _canonical_json(previous) == _canonical_json(payload):
+                for key in tables:
+                    table_path = self._flat_evaluation_table_path(factor_id, key)
+                    if not table_path.is_file() or not pd.read_parquet(table_path).equals(tables[key]):
+                        raise ValueError(conflict)
+                return {
+                    "evaluation_id": evaluation_id,
+                    "dir": evaluation_path.parent,
+                    "path": evaluation_path,
+                }
+
+        evaluation_path.parent.mkdir(parents=True, exist_ok=True)
+        temp_files: list[tuple[Path, Path]] = []
+        try:
+            for key, frame in tables.items():
+                final_path = self._flat_evaluation_table_path(factor_id, key)
+                temp_path = final_path.with_name(
+                    f".{final_path.name}.tmp-{os.getpid()}-{uuid.uuid4().hex}"
+                )
+                frame.to_parquet(temp_path)
+                temp_files.append((temp_path, final_path))
+            temp_json = evaluation_path.with_name(
+                f".{evaluation_path.name}.tmp-{os.getpid()}-{uuid.uuid4().hex}"
+            )
+            _write_json(temp_json, payload)
+            for temp_path, final_path in temp_files:
+                os.replace(temp_path, final_path)
+            os.replace(temp_json, evaluation_path)
+        except BaseException:
+            for temp_path, _ in temp_files:
+                temp_path.unlink(missing_ok=True)
+            if "temp_json" in locals():
+                temp_json.unlink(missing_ok=True)
+            raise
+
+        if previous is not None:
+            previous_tables = set(previous.get("tables", []))
+            for key in previous_tables - set(tables):
+                self._flat_evaluation_table_path(factor_id, key).unlink(missing_ok=True)
+        return {
+            "evaluation_id": evaluation_id,
+            "dir": evaluation_path.parent,
+            "path": evaluation_path,
+        }
+
     def get_value(self, factor_id: str, *, run_id: str | None = None) -> pd.DataFrame:
         """Rebuild the stored matrix for a run, defaulting to the latest success."""
+        if self.flat:
+            factor_path, metadata_path = self._flat_paths(factor_id)
+            if not factor_path.is_file() or not metadata_path.is_file():
+                raise FileNotFoundError(f"no flat factor artifact for {factor_id!r}")
+            payload = json.loads(metadata_path.read_text())
+            table = pd.read_parquet(factor_path)
+            if table.duplicated(["date", "instrument"]).any():
+                raise ValueError(f"duplicate date/instrument key in {factor_path}")
+            matrix = table.pivot(index="date", columns="instrument", values="factor")
+            matrix = matrix.reindex(
+                index=_dates_index(payload["axes"]["dates"]),
+                columns=pd.Index(payload["axes"]["columns"]),
+            ).astype("float64")
+            matrix.index.name = "date"
+            matrix.columns.name = None
+            return matrix
         run_dir = self._run_dir(factor_id, run_id)
         metadata_path = run_dir / "metadata.json"
         table_path = run_dir / "factor.parquet"
@@ -348,6 +592,8 @@ class FactorStorage:
             raise ValueError(
                 f"evaluation status must be one of {sorted(VALID_EVALUATION_STATUS)}"
             )
+        if self.flat:
+            return self._save_flat_evaluation(factor_id, run_id, result)
         run_dir = self._run_dir(factor_id, run_id)
         evaluation_id = _artifact_id(
             {
@@ -399,7 +645,40 @@ class FactorStorage:
         evaluation_id: str | None = None,
     ) -> dict[str, Any]:
         """Load an evaluation, defaulting to the latest run's latest complete one."""
-        run_dir = self._run_dir(factor_id, run_id)
+        if self.flat:
+            result_path = self._flat_evaluation_path(factor_id)
+            if not result_path.is_file():
+                raise FileNotFoundError(
+                    f"no evaluation recorded for {factor_id!r}"
+                )
+            payload = json.loads(result_path.read_text())
+            saved_run_id = payload.get("run_id")
+            saved_evaluation_id = payload.get("evaluation_id")
+            if evaluation_id is None and payload.get("result", {}).get("status") != "complete":
+                raise FileNotFoundError(
+                    f"no complete evaluation recorded for {factor_id!r}"
+                )
+            if run_id is not None and run_id != saved_run_id:
+                raise FileNotFoundError(
+                    f"unknown run {run_id!r} for {factor_id!r}"
+                )
+            if evaluation_id is not None and evaluation_id != saved_evaluation_id:
+                raise FileNotFoundError(
+                    f"unknown evaluation {evaluation_id!r} for {factor_id!r}"
+                )
+            result = dict(payload["result"])
+            for key in payload["tables"]:
+                table_path = self._flat_evaluation_table_path(factor_id, key)
+                if not table_path.is_file():
+                    raise FileNotFoundError(
+                        f"missing evaluation table {key!r} for {factor_id!r}"
+                    )
+                result[key] = pd.read_parquet(table_path)
+            result["run_id"] = saved_run_id
+            result["evaluation_id"] = saved_evaluation_id
+            return result
+        else:
+            run_dir = self._run_dir(factor_id, run_id)
         evaluations_dir = run_dir / "evaluations"
         if evaluation_id is None:
             pointer = evaluations_dir / "latest_complete.json"

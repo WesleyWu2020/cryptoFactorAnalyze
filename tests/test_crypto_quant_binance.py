@@ -91,14 +91,25 @@ def test_klines_discard_candle_after_completed_day_boundary(kline_payload):
 def test_klines_normalize_ohlc_trade_count_and_taker_fields(kline_payload):
     client = SequentialClient([kline_payload, []])
     out = fetch_daily_klines(client, "BTCUSDT", date(2024, 1, 1), date(2024, 1, 3))
-    assert list(out.columns) == ["date", "symbol", "open", "high", "low", "close", "volume", "close_time", "quote_asset_volume", "trade_count", "taker_buy_base_volume", "taker_buy_quote_volume"]
+    assert list(out.columns) == ["date", "symbol", "open", "high", "low", "close", "volume", "close_time", "quote_volume", "trade_count", "taker_buy_base_volume", "taker_buy_quote_volume"]
     assert out.iloc[0][["open", "high", "low", "close"]].tolist() == [42000.0, 43000.0, 41000.0, 42500.0]
     assert out.iloc[0]["trade_count"] == 1200
     assert out.iloc[0]["taker_buy_base_volume"] == 50.25
     assert out.iloc[0]["taker_buy_quote_volume"] == 2125000.0
-    for column in ["open", "high", "low", "close", "volume", "quote_asset_volume", "taker_buy_base_volume", "taker_buy_quote_volume"]:
+    for column in ["open", "high", "low", "close", "volume", "quote_volume", "taker_buy_base_volume", "taker_buy_quote_volume"]:
         assert pd.api.types.is_float_dtype(out[column])
     assert pd.api.types.is_integer_dtype(out["trade_count"])
+
+
+def test_klines_use_canonical_quote_volume_and_do_not_store_open_time(kline_payload):
+    client = SequentialClient([kline_payload, []])
+
+    out = fetch_daily_klines(client, "BTCUSDT", date(2024, 1, 1), date(2024, 1, 3))
+
+    assert "open_time" not in out.columns
+    assert "quote_asset_volume" not in out.columns
+    assert out["quote_volume"].notna().all()
+    assert out.loc[0, "quote_volume"] == 4250000.0
 
 
 def test_klines_empty_result_has_stable_dtypes():
@@ -106,7 +117,7 @@ def test_klines_empty_result_has_stable_dtypes():
     out = fetch_daily_klines(client, "BTCUSDT", date(2024, 1, 1), date(2024, 1, 3))
     assert out["date"].dtype == "datetime64[ns]"
     assert out["close_time"].dtype == "datetime64[ns]"
-    for column in ["open", "high", "low", "close", "volume", "quote_asset_volume", "taker_buy_base_volume", "taker_buy_quote_volume"]:
+    for column in ["open", "high", "low", "close", "volume", "quote_volume", "taker_buy_base_volume", "taker_buy_quote_volume"]:
         assert out[column].dtype == "float64"
     assert out["trade_count"].dtype == "int64"
 

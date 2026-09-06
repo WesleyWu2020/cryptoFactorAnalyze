@@ -21,6 +21,13 @@ UNIVERSE_COLUMNS = [
     "market_cap_rank",
 ]
 
+# Historical Binance automatic-settlement boundaries. The dates are maintained
+# as contract lifecycle facts and are not inferred from missing candles.
+HISTORICAL_CONTRACT_END_DATES = {
+    "MATICUSDT": pd.Timestamp("2024-09-02"),
+    "EOSUSDT": pd.Timestamp("2025-05-19"),
+}
+
 
 def _timestamp_column(frame: pd.DataFrame, column: str) -> pd.Series:
     return pd.to_datetime(frame[column], errors="coerce").dt.normalize()
@@ -35,6 +42,16 @@ def _month_starts(start: date, end: date) -> list[pd.Timestamp]:
     return [timestamp for timestamp in pd.date_range(first, end_ts, freq="MS") if timestamp >= start_ts]
 
 
+def placeholder_kline_mask(klines: pd.DataFrame) -> pd.Series:
+    """Identify explicit no-trade flat bars; never infer a historical delisting."""
+    columns = ["open", "high", "low", "close", "volume"]
+    if not set(columns).issubset(klines.columns):
+        return pd.Series(False, index=klines.index)
+    values = klines[columns].apply(pd.to_numeric, errors="coerce")
+    prices = values[["open", "high", "low", "close"]]
+    return values["volume"].eq(0) & prices.notna().all(axis=1) & prices.eq(prices["close"], axis=0).all(axis=1)
+
+
 def build_monthly_universe(
     constituents: pd.DataFrame,
     mappings: pd.DataFrame,
@@ -44,6 +61,7 @@ def build_monthly_universe(
     top_n: int = 50,
     current_trading_symbols: set[str] | None = None,
     current_observed_date: date | None = None,
+    contract_end_dates: dict[str, date | pd.Timestamp] | None = None,
 ) -> pd.DataFrame:
     """Build monthly accepted memberships using only information known at decision time."""
     if top_n < 1:
@@ -60,6 +78,7 @@ def build_monthly_universe(
     kline_data["_date"] = _timestamp_column(kline_data, "date")
     if "completed" in kline_data:
         kline_data = kline_data[kline_data["completed"].map(lambda value: type(value) is bool and value)]
+    kline_data = kline_data[~placeholder_kline_mask(kline_data)]
     completed_keys = kline_data[["_date", "symbol"]].drop_duplicates()
 
     accepted_months: list[pd.DataFrame] = []
@@ -127,5 +146,14 @@ def build_monthly_universe(
     decisions = output["decision_date"].drop_duplicates().sort_values().tolist()
     for current, following in zip(decisions, decisions[1:]):
         mask = output["decision_date"] == current
-        output.loc[mask, "effective_end_date"] = following - pd.Timedelta(days=1)
+        # The replacement starts on following + 1 day. Inclusive membership
+        # must retain the prior basket throughout the replacement decision day.
+        output.loc[mask, "effective_end_date"] = following
+    for symbol, end_date in (contract_end_dates or {}).items():
+        end = pd.Timestamp(end_date).normalize()
+        mask = output["binance_symbol"].astype(str).eq(str(symbol))
+        existing = output.loc[mask, "effective_end_date"]
+        output.loc[mask, "effective_end_date"] = existing.where(
+            existing.notna() & existing.le(end), end
+        )
     return output[UNIVERSE_COLUMNS]

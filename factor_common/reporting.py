@@ -385,7 +385,7 @@ def _turnover_section(result, start, end) -> str:
         ledger = _slice(result["factor_result"]["scenarios"][name].get("ledger"), start, end)
         if ledger is None or ledger.empty:
             continue
-        pretrade = ledger["equity"] + ledger["fee"]
+        pretrade = ledger["equity"] + ledger["fee"] + ledger.get("slippage", 0.0)
         turnover = ledger["trade_notional"].where(pretrade > 0.0) / pretrade.where(
             pretrade > 0.0
         )
@@ -430,7 +430,7 @@ def _group_sections(result, start, end) -> tuple[str, str]:
     if group_returns is None:
         reason = "the saved result contains no group return table"
         return (
-            _unavailable("Group NAV", reason),
+            _unavailable("Group cumulative return", reason),
             _unavailable("Demeaned group returns", reason),
         )
     if not isinstance(group_returns, pd.DataFrame):
@@ -439,14 +439,20 @@ def _group_sections(result, start, end) -> tuple[str, str]:
     if sliced is None or sliced.empty:
         reason = "no group return rows fall inside the display window"
         return (
-            _unavailable("Group NAV", reason),
+            _unavailable("Group cumulative return", reason),
             _unavailable("Demeaned group returns", reason),
         )
     sliced = sliced.dropna(how="all")
-    nav = (1.0 + sliced).cumprod()
-    x_labels, aligned_nav = _aligned({str(c): nav[c] for c in nav.columns})
+    # Simple-sum (non-compounded) accumulation: each day's cross-sectional
+    # mean label return is added, not multiplied, so the curve shows the
+    # arithmetic PnL of a fixed-notional daily rebalanced group sleeve.
+    cumulative = sliced.cumsum()
+    x_labels, aligned_nav = _aligned({str(c): cumulative[c] for c in cumulative.columns})
     nav_chart = _line_chart(
-        "Group NAV (from saved group returns)", x_labels, aligned_nav, y_name="NAV"
+        "Group cumulative return (simple sum, from saved group returns)",
+        x_labels,
+        aligned_nav,
+        y_name="cumulative return",
     )
     demeaned = sliced.sub(sliced.mean(axis=1), axis=0)
     demeaned_map = {str(c): demeaned[c] for c in demeaned.columns}
@@ -703,12 +709,16 @@ def _diagnostics_section(result) -> str:
             for label, key in _SCENARIO_DIAGNOSTIC_ROWS
         ]
         ledger = scenario.get("ledger")
-        total_fees = (
-            float(ledger["fee"].sum())
-            if isinstance(ledger, pd.DataFrame) and not ledger.empty
-            else None
-        )
+        if isinstance(ledger, pd.DataFrame) and not ledger.empty:
+            total_fees = float(ledger["fee"].sum())
+            total_slippage = (
+                float(ledger["slippage"].sum()) if "slippage" in ledger.columns else 0.0
+            )
+        else:
+            total_fees = None
+            total_slippage = None
         rows.append([_esc("Total fees (from ledger)"), _fmt(total_fees)])
+        rows.append([_esc("Total slippage (from ledger)"), _fmt(total_slippage)])
         rows.append(
             [_esc("Blocked orders"), _fmt(len(scenario_diag.get("blocked_orders", [])))]
         )
