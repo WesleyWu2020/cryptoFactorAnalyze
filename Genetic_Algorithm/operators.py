@@ -30,11 +30,18 @@ def absolute(a: pd.DataFrame) -> pd.DataFrame:
     return a.abs()
 
 
+def _validate_window(window: int) -> None:
+    if type(window) is not int or window <= 0:
+        raise ValueError("window must be positive")
+
+
 def lag(a: pd.DataFrame, window: int) -> pd.DataFrame:
+    _validate_window(window)
     return a.shift(window)
 
 
 def delta(a: pd.DataFrame, window: int) -> pd.DataFrame:
+    _validate_window(window)
     return a - a.shift(window)
 
 

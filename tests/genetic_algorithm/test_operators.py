@@ -1,5 +1,6 @@
 import numpy as np
 import pandas as pd
+import pytest
 
 from Genetic_Algorithm.operators import safe_div
 from Genetic_Algorithm.operators import (
@@ -7,6 +8,7 @@ from Genetic_Algorithm.operators import (
     rolling_mean,
     rolling_std,
 )
+from Genetic_Algorithm.operators import delta, lag
 
 
 def test_safe_div_preserves_missing():
@@ -44,3 +46,19 @@ def test_rank_treats_unknown_eligibility_as_ineligible():
     assert result.iloc[0, 0] == 0.5
     assert pd.isna(result.iloc[0, 1])
     assert result.iloc[0, 2] == 1.0
+
+
+@pytest.mark.parametrize("operator", [lag, delta])
+@pytest.mark.parametrize("window", [0, -1, -7])
+def test_direct_lag_and_delta_reject_non_positive_windows_before_shift(
+    operator, window, monkeypatch
+):
+    values = pd.DataFrame({"close": [1.0, 2.0, 3.0]})
+
+    def unexpected_shift(*args, **kwargs):
+        raise AssertionError("invalid windows must be rejected before shift")
+
+    monkeypatch.setattr(pd.DataFrame, "shift", unexpected_shift)
+
+    with pytest.raises(ValueError, match="positive"):
+        operator(values, window)
