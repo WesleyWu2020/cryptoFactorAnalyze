@@ -72,6 +72,9 @@ def _value_payload(frame: pd.DataFrame) -> dict[str, Any]:
         raise ValueError("training value panels require a unique DatetimeIndex")
     if frame.columns.has_duplicates:
         raise ValueError("training value panels require unique instrument columns")
+    serialized_columns = [str(value) for value in frame.columns]
+    if len(serialized_columns) != len(set(serialized_columns)):
+        raise ValueError("training value panel column label collision after serialization")
     frame = frame.sort_index().sort_index(axis=1)
     numeric = frame.astype("float64")
     array = numeric.to_numpy(copy=True)
@@ -109,15 +112,7 @@ def write_value_artifact(path: str | Path, panels: Mapping[str, Any]) -> ValueAr
     encoded = json.dumps(
         document, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False
     ).encode("utf-8")
-    descriptor = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
-    try:
-        with os.fdopen(descriptor, "wb") as handle:
-            descriptor = -1
-            handle.write(encoded)
-            handle.write(b"\n")
-    finally:
-        if descriptor != -1:
-            os.close(descriptor)
+    _write_exclusive_atomic(target, encoded)
     return ValueArtifact(target, str(document[_DIGEST_FIELD]))
 
 
@@ -196,6 +191,30 @@ def _manifest_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
     return clean
 
 
+def _write_exclusive_atomic(target: Path, encoded: bytes) -> None:
+    """Publish an immutable file without exposing a partial final path."""
+    descriptor, temporary = tempfile.mkstemp(prefix=f".{target.name}.", dir=target.parent)
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            descriptor = -1
+            handle.write(encoded)
+            handle.write(b"\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.link(temporary, target)
+        directory_fd = os.open(target.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+        os.unlink(temporary)
+    finally:
+        if descriptor != -1:
+            os.close(descriptor)
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+
+
 def write_artifact(path: str | Path, payload: Mapping[str, Any], *, immutable: bool | None = None) -> Path:
     """Write JSON safely; manifests are immutable and progress files are replaceable.
 
@@ -210,16 +229,7 @@ def write_artifact(path: str | Path, payload: Mapping[str, Any], *, immutable: b
         document, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False
     ).encode("utf-8")
     if is_manifest:
-        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
-        descriptor = os.open(target, flags, 0o644)
-        try:
-            with os.fdopen(descriptor, "wb") as handle:
-                descriptor = -1
-                handle.write(encoded)
-                handle.write(b"\n")
-        finally:
-            if descriptor != -1:
-                os.close(descriptor)
+        _write_exclusive_atomic(target, encoded)
     else:
         fd, temporary = tempfile.mkstemp(prefix=f".{target.name}.", dir=target.parent)
         try:
@@ -264,6 +274,23 @@ def _file_hash(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def _confined_code_path(repository_root: Path, path: str | Path) -> tuple[str, Path]:
+    root = repository_root.resolve(strict=True)
+    candidate = Path(path)
+    if ".." in candidate.parts:
+        raise ValueError(f"selected code path cannot traverse: {path!r}")
+    resolved = candidate.resolve() if candidate.is_absolute() else (root / candidate).resolve()
+    try:
+        common = Path(os.path.commonpath((str(root), str(resolved))))
+    except ValueError as exc:
+        raise ValueError(f"selected code path is outside repository: {path!r}") from exc
+    if common != root:
+        raise ValueError(f"selected code path is outside repository: {path!r}")
+    if not resolved.is_file():
+        raise ValueError(f"selected code path is not a file: {path!r}")
+    return resolved.relative_to(root).as_posix(), resolved
+
+
 def working_tree_patch_hash(repository_root: str | Path) -> str:
     """Hash tracked patches and untracked files in the working tree."""
     root = Path(repository_root)
@@ -305,9 +332,10 @@ def build_provenance(
 ) -> dict[str, Any]:
     """Build provenance with training and validation identities kept separate."""
     root = Path(repository_root)
-    code_hashes = {
-        str(Path(path)): _file_hash(root / path) for path in sorted(map(str, selected_code_paths))
-    }
+    code_hashes = {}
+    for path in selected_code_paths:
+        relative, resolved = _confined_code_path(root, path)
+        code_hashes[relative] = _file_hash(resolved)
     versions = {}
     package_names = tuple(
         dict.fromkeys((*_requirement_names(root), *(str(name) for name in package_names)))

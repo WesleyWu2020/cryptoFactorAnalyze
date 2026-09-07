@@ -364,6 +364,27 @@ def test_run_search_provenance_records_effective_config_and_complete_code_paths(
     assert "Genetic_Algorithm/configs/smoke.json" in code_paths
 
 
+def test_run_search_fails_before_new_immutable_writes_on_manifest_rerun(tmp_path, monkeypatch):
+    audit_path = tmp_path / "audit_train.json"
+    audit_path.write_text(
+        json.dumps({"training_only": True, "fingerprint": "train-fingerprint", "stage": {"name": "train"}}),
+        encoding="utf-8",
+    )
+    destination = tmp_path / "run"
+    destination.mkdir()
+    write_artifact(destination / "provenance.json", {"old": True}, immutable=True)
+    monkeypatch.setattr(search_module, "run_training_audit", lambda *args, **kwargs: audit_path)
+
+    with pytest.raises(FileExistsError):
+        search_module.run_search(
+            "unused.h5", audit_path, stage=STAGES["train"], warmup_days=0,
+            fields=["close"], search_stage=lambda path: SearchResult((), (), 0),
+            artifact_dir=destination, repository_root=REPOSITORY_ROOT,
+        )
+
+    assert not (destination / "training_values.json").exists()
+
+
 def test_run_search_provenance_fingerprints_stage_read_sources_and_merges_package_defaults(
     tmp_path, monkeypatch
 ):

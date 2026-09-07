@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import hashlib
+import inspect
 import os
 import re
 import shutil
@@ -22,6 +24,7 @@ from .artifacts import (
 )
 from .config import SearchConfig, Stage, load_config
 from .data import run_training_audit
+from .expression import Node, canonical_tree
 from .selection import deduplicate_training
 from factor_common.profiles import resolve_profile
 
@@ -193,13 +196,17 @@ def _default_code_paths(repository_root: str | Path) -> tuple[str, ...]:
 
 def _resolved_config(config: Any) -> Mapping[str, Any]:
     overrides = dict(config) if isinstance(config, Mapping) else {}
+    runtime_inputs = {"initial_trees": (), "evaluate_candidate": None}
     if hasattr(config, "__dataclass_fields__"):
+        runtime_inputs.update({name: getattr(config, name) for name in runtime_inputs})
         overrides = {
             name: getattr(config, name)
             for name in config.__dataclass_fields__
-            if name not in {"initial_trees", "evaluate_candidate"}
+            if name not in runtime_inputs
         }
-    runtime_fields = {"initial_trees", "evaluate_candidate"}
+    elif isinstance(config, Mapping):
+        runtime_inputs.update({name: config.get(name, default) for name, default in runtime_inputs.items()})
+    runtime_fields = set(runtime_inputs)
     default_config = load_config(Path(__file__).with_name("configs") / "default.json")
     defaults = {
         name: getattr(default_config, name)
@@ -208,11 +215,69 @@ def _resolved_config(config: Any) -> Mapping[str, Any]:
     }
     defaults.update({key: value for key, value in overrides.items() if key not in runtime_fields})
     effective = SearchConfig(**defaults)
-    return {
+    resolved = {
         name: getattr(effective, name)
         for name in effective.__dataclass_fields__
         if name not in runtime_fields
     }
+    trees = [canonical_tree(tree) for tree in runtime_inputs["initial_trees"]]
+    tree_payload = [_tree_payload(tree) for tree in trees]
+    tree_bytes = json.dumps(tree_payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    resolved["initial_trees"] = {
+        "canonical": tree_bytes.decode("utf-8"),
+        "trees": tree_payload,
+        "sha256": hashlib.sha256(tree_bytes).hexdigest(),
+    }
+    evaluator = runtime_inputs["evaluate_candidate"]
+    if evaluator is None:
+        identity = {
+            "identity": "none", "module": None, "qualname": None,
+            "source": None, "source_hash": None,
+        }
+    else:
+        module = getattr(evaluator, "__module__", type(evaluator).__module__)
+        qualname = getattr(evaluator, "__qualname__", type(evaluator).__qualname__)
+        try:
+            source = inspect.getsource(evaluator)
+        except (OSError, TypeError):
+            source = None
+        identity = {
+            "identity": f"{module}:{qualname}",
+            "module": module,
+            "qualname": qualname,
+            "source": source,
+            "source_hash": hashlib.sha256(source.encode("utf-8")).hexdigest()
+            if source is not None else None,
+        }
+    identity_bytes = json.dumps(
+        identity, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    ).encode("utf-8")
+    identity["sha256"] = hashlib.sha256(identity_bytes).hexdigest()
+    resolved["evaluate_candidate"] = identity
+    return resolved
+
+
+def _tree_payload(tree: Node) -> dict[str, Any]:
+    return {
+        "op": tree.op,
+        "field": tree.field,
+        "window": tree.window,
+        "children": [_tree_payload(child) for child in tree.children],
+    }
+
+
+def _ensure_publishable_destination(destination: Path) -> None:
+    """Reject reruns before copying or creating immutable artifacts."""
+    destination.mkdir(parents=True, exist_ok=True)
+    conflicts = (
+        destination / "provenance.json",
+        destination / "training_candidates.json",
+        destination / "training_values.json",
+        destination / "training_values.new.json",
+    )
+    for path in conflicts:
+        if path.exists():
+            raise FileExistsError(f"immutable training artifact already exists: {path}")
 
 
 def _copy_archive_value_artifacts(
@@ -304,7 +369,7 @@ def _write_training_artifacts(
     if hasattr(result, "candidates") and tuple(selected) != candidates:
         result = replace(result, candidates=tuple(selected))
     destination = Path(artifact_dir)
-    _copy_archive_value_artifacts(archive_path, archive_entries, destination)
+    _ensure_publishable_destination(destination)
     provenance = build_provenance(
         config=_resolved_config(config),
         stage_content_hashes={"train": training_fingerprint},
@@ -318,6 +383,7 @@ def _write_training_artifacts(
         validation_attempts=validation_attempts,
         validation_experiment_id=validation_experiment_id,
     )
+    _copy_archive_value_artifacts(archive_path, archive_entries, destination)
     value_panels = {
         candidate.expression_id: _frame(current_values.get(candidate.expression_id))
         for candidate in selected
