@@ -146,7 +146,7 @@ def deduplicate_training(
 ) -> DeduplicationResult:
     """Order, compare, and cap candidates using training-only novelty evidence."""
     minimum_days = int(_value(config, "min_overlap_days", 120))
-    limit = int(_value(config, "validation_limit", 20))
+    limit = min(20, int(_value(config, "validation_limit", 20)))
     correlation_limit = float(_value(config, "correlation_limit", 0.90))
     ordered = sorted(tuple(candidates), key=_candidate_score)
     archive_items = tuple(archive)

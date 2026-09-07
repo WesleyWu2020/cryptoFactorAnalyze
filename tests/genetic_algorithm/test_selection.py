@@ -94,6 +94,16 @@ def test_selection_order_and_limit_are_deterministic():
     assert [candidate.expression_id for candidate in result] == sorted(str(i) for i in range(25))[:20]
 
 
+def test_selection_never_exceeds_absolute_validation_candidate_cap():
+    values = {str(i): _metadata(_values(i)) for i in range(25)}
+    candidates = [_candidate(str(i)) for i in range(25)]
+
+    result = deduplicate_training(candidates, values, [], {"validation_limit": 25})
+
+    assert len(result) == 20
+    assert len(result.rejected) == 5
+
+
 def test_incompatible_archive_reference_rejects_candidate_before_correlation():
     values = _values()
     result = deduplicate_training(
