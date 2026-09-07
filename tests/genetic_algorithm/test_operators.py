@@ -33,3 +33,14 @@ def test_rank_uses_average_percentiles_and_singletons_are_missing():
     assert result.iloc[0, :3].tolist() == [0.5, 0.5, 1.0]
     singleton = cross_sectional_rank(values.iloc[:, :1], eligible.iloc[:, :1])
     assert singleton.isna().all().all()
+
+
+def test_rank_treats_unknown_eligibility_as_ineligible():
+    values = pd.DataFrame([[1.0, 2.0, 3.0]])
+    eligible = pd.DataFrame([[True, np.nan, True]])
+
+    result = cross_sectional_rank(values, eligible)
+
+    assert result.iloc[0, 0] == 0.5
+    assert pd.isna(result.iloc[0, 1])
+    assert result.iloc[0, 2] == 1.0

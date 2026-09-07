@@ -1,8 +1,10 @@
+from collections import OrderedDict
+
 import numpy as np
 import pandas as pd
 
 from Genetic_Algorithm.evaluator import evaluate_tree
-from Genetic_Algorithm.expression import Node
+from Genetic_Algorithm.expression import Node, expression_hash
 
 
 def _ctx():
@@ -25,7 +27,7 @@ def _ctx():
 
 def test_evaluate_tree_applies_eligibility_to_nested_rank_and_final_result():
     ctx, dates, symbols = _ctx()
-    eligible = pd.DataFrame(True, index=dates, columns=symbols)
+    eligible = pd.DataFrame(True, index=dates, columns=symbols, dtype=object)
     eligible.loc[dates[1], "C"] = False
     tree = Node("rank", (Node("rank", (Node("close"),)),))
     result = evaluate_tree(tree, ctx, eligible)
@@ -33,6 +35,18 @@ def test_evaluate_tree_applies_eligibility_to_nested_rank_and_final_result():
     assert result.columns.tolist() == symbols
     assert pd.isna(result.loc[dates[1], "C"])
     assert result.loc[dates[0]].tolist() == [2 / 3, 2 / 3, 2 / 3]
+
+
+def test_evaluate_tree_treats_unknown_eligibility_as_ineligible():
+    ctx, dates, symbols = _ctx()
+    eligible = pd.DataFrame(True, index=dates, columns=symbols, dtype=object)
+    eligible.loc[dates[0], "B"] = np.nan
+    tree = Node("rank", (Node("close"),))
+
+    result = evaluate_tree(tree, ctx, eligible)
+
+    assert pd.isna(result.loc[dates[0], "B"])
+    assert result.loc[dates[0], ["A", "C"]].tolist() == [0.75, 0.75]
 
 
 def test_evaluate_tree_has_cumulative_history_and_ignores_future_only_symbols():
@@ -52,6 +66,55 @@ def test_evaluator_cache_respects_byte_budget():
     cache = {}
     evaluate_tree(Node("close"), ctx, eligible, cache=cache, cache_bytes=1)
     assert cache == {}
+
+
+def test_evaluator_cache_enforces_new_budget_on_existing_entries_and_lru_order():
+    ctx, dates, symbols = _ctx()
+    eligible = pd.DataFrame(True, index=dates, columns=symbols)
+    cache = OrderedDict()
+    entry_bytes = 4 * 3 * 8
+    cache_bytes = entry_bytes * 2
+
+    evaluate_tree(Node("close"), ctx, eligible, cache=cache, cache_bytes=cache_bytes)
+    evaluate_tree(Node("open"), ctx, eligible, cache=cache, cache_bytes=cache_bytes)
+    evaluate_tree(Node("close"), ctx, eligible, cache=cache, cache_bytes=cache_bytes)
+    evaluate_tree(Node("high"), ctx, eligible, cache=cache, cache_bytes=cache_bytes)
+
+    assert len(cache) == 2
+    assert [key[0] for key in cache] == [
+        expression_hash(Node("close")), expression_hash(Node("high")),
+    ]
+
+
+def test_evaluator_cache_drops_existing_entries_when_budget_becomes_zero_or_entry_is_oversized():
+    ctx, dates, symbols = _ctx()
+    eligible = pd.DataFrame(True, index=dates, columns=symbols)
+    cache = {}
+
+    evaluate_tree(Node("close"), ctx, eligible, cache=cache)
+    assert cache
+    evaluate_tree(Node("close"), ctx, eligible, cache=cache, cache_bytes=0)
+    assert cache == {}
+
+    evaluate_tree(Node("close"), ctx, eligible, cache=cache)
+    evaluate_tree(Node("open"), ctx, eligible, cache=cache, cache_bytes=1)
+    assert cache == {}
+
+
+def test_evaluator_cache_fingerprint_preserves_axis_label_types():
+    labels = [pd.Timestamp("2025-01-01"), pd.Timestamp("2025-01-02")]
+    frame = pd.DataFrame([[1.0, 2.0], [3.0, 4.0]], index=labels, columns=["A", "B"])
+    string_frame = frame.copy()
+    string_frame.index = pd.Index([str(label) for label in labels], dtype=object)
+    cache = {}
+    eligible = pd.DataFrame(True, index=frame.index, columns=frame.columns)
+    string_eligible = pd.DataFrame(True, index=string_frame.index, columns=string_frame.columns)
+
+    evaluate_tree(Node("close"), {"close": frame}, eligible, cache=cache)
+    result = evaluate_tree(Node("close"), {"close": string_frame}, string_eligible, cache=cache)
+
+    assert result.index.tolist() == string_frame.index.tolist()
+    assert all(isinstance(label, str) for label in result.index)
 
 
 def test_evaluator_cache_fingerprint_includes_eligibility_axes():

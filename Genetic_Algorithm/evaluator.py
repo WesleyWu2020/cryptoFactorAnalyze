@@ -16,10 +16,21 @@ from .expression import Node, expression_hash, validate_tree
 from .features import evaluate_terminal
 
 
+def _typed_axis_labels(axis: pd.Index) -> str:
+    labels = [
+        {
+            "type": f"{type(label).__module__}.{type(label).__qualname__}",
+            "repr": repr(label),
+        }
+        for label in axis
+    ]
+    return json.dumps(labels, sort_keys=True, separators=(",", ":"), default=str)
+
+
 def _frame_fingerprint(frame: pd.DataFrame) -> str:
     digest = hashlib.sha256()
-    digest.update(json.dumps([str(x) for x in frame.index], default=str).encode())
-    digest.update(json.dumps([str(x) for x in frame.columns]).encode())
+    digest.update(_typed_axis_labels(frame.index).encode())
+    digest.update(_typed_axis_labels(frame.columns).encode())
     values = frame.astype("float64").to_numpy(copy=True)
     values[np.isnan(values)] = 0.0
     digest.update(np.ascontiguousarray(values).tobytes())
@@ -45,8 +56,8 @@ def _operator_source_hash() -> str:
 def _eligible_fingerprint(eligible: pd.DataFrame) -> str:
     digest = hashlib.sha256()
     digest.update(json.dumps(list(eligible.shape)).encode())
-    digest.update(json.dumps([str(x) for x in eligible.index], default=str).encode())
-    digest.update(json.dumps([str(x) for x in eligible.columns], default=str).encode())
+    digest.update(_typed_axis_labels(eligible.index).encode())
+    digest.update(_typed_axis_labels(eligible.columns).encode())
     values = eligible.astype(bool).to_numpy(dtype=np.uint8)
     digest.update(np.ascontiguousarray(values).tobytes())
     return digest.hexdigest()
@@ -65,7 +76,24 @@ def _apply(node: Node, data_ctx: dict[str, pd.DataFrame], eligible: pd.DataFrame
     return operators.OPERATORS[node.op](*children)
 
 
+def _trim_cache(cache: dict, cache_bytes: int) -> None:
+    if cache_bytes == 0:
+        cache.clear()
+        return
+    total = sum(
+        int(item.to_numpy(copy=False).nbytes)
+        for item in cache.values()
+        if isinstance(item, pd.DataFrame)
+    )
+    while total > cache_bytes and cache:
+        oldest = next(iter(cache))
+        removed = cache.pop(oldest)
+        if isinstance(removed, pd.DataFrame):
+            total -= int(removed.to_numpy(copy=False).nbytes)
+
+
 def _cache_put(cache: dict, key: tuple, value: pd.DataFrame, cache_bytes: int) -> None:
+    _trim_cache(cache, cache_bytes)
     size = int(value.to_numpy(copy=False).nbytes)
     if size > cache_bytes:
         return
@@ -74,12 +102,7 @@ def _cache_put(cache: dict, key: tuple, value: pd.DataFrame, cache_bytes: int) -
         cache.move_to_end(key)
     else:
         cache[key] = value
-    total = sum(int(item.to_numpy(copy=False).nbytes) for item in cache.values() if isinstance(item, pd.DataFrame))
-    while total > cache_bytes and cache:
-        oldest = next(iter(cache))
-        removed = cache.pop(oldest)
-        if isinstance(removed, pd.DataFrame):
-            total -= int(removed.to_numpy(copy=False).nbytes)
+    _trim_cache(cache, cache_bytes)
 
 
 def evaluate_tree(
@@ -95,6 +118,9 @@ def evaluate_tree(
         raise ValueError("cache_bytes must be non-negative")
     if not isinstance(eligible, pd.DataFrame):
         raise TypeError("eligible must be a DataFrame")
+    eligible = eligible.fillna(False).astype(bool)
+    if cache is not None:
+        _trim_cache(cache, cache_bytes)
     key = (
         expression_hash(node), _ctx_fingerprint(data_ctx), _operator_source_hash(),
         _eligible_fingerprint(eligible),

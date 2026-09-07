@@ -61,7 +61,7 @@ def rolling_correlation(a: pd.DataFrame, b: pd.DataFrame, window: int) -> pd.Dat
 def cross_sectional_rank(
     a: pd.DataFrame, eligible: pd.DataFrame
 ) -> pd.DataFrame:
-    masked = a.where(eligible.astype(bool))
+    masked = a.where(eligible.fillna(False).astype(bool))
     counts = masked.notna().sum(axis=1)
     ranked = masked.rank(axis=1, method="average", pct=True)
     return ranked.where(counts.gt(1), np.nan)
