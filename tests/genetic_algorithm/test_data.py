@@ -59,8 +59,16 @@ def test_load_stage_quality_requires_current_membership_and_complete_non_placeho
 
     assert loaded.eligible.loc[pd.Timestamp("2024-01-04"), "BUSDT"]
     assert not loaded.quality_eligible.loc[pd.Timestamp("2024-01-04"), "BUSDT"]
-    assert loaded.audit["quality_counts"]["ineligible_placeholder"] >= 1
     assert loaded.audit["quality_counts"]["unknown"] >= 1
+    assert loaded.audit["quality_counts"]["ineligible_placeholder"] == 0
+    assert loaded.audit["quality_counts"]["ineligible_incomplete_kline"] == 0
+    counts = loaded.audit["quality_counts"]
+    assert counts["eligible"] == (
+        counts["quality_eligible"]
+        + counts["unknown"]
+        + counts["ineligible_placeholder"]
+        + counts["ineligible_incomplete_kline"]
+    )
 
 
 def test_load_stage_rejects_missing_membership_axis(stage_fixture, monkeypatch):
@@ -123,7 +131,7 @@ def test_load_stage_full_and_cutoff_inputs_have_identical_training_rows(tmp_path
     assert full_data.audit["provider_cutoff"] == cutoff_data.audit["provider_cutoff"]
 
 
-def test_warmup_availability_counts_rows_with_data(tmp_path):
+def test_warmup_availability_counts_only_rows_in_warmup_window(tmp_path):
     from Genetic_Algorithm.data import load_stage
 
     calendar = pd.DatetimeIndex(["2024-01-01", "2024-01-03", "2024-01-04"])
@@ -132,14 +140,14 @@ def test_warmup_availability_counts_rows_with_data(tmp_path):
     )
     loaded = load_stage(
         path,
-        Stage("fixture", "2024-01-01", "2024-01-04"),
-        warmup_days=0,
+        Stage("fixture", "2024-01-03", "2024-01-04"),
+        warmup_days=2,
         fields=["close"],
     )
 
     assert loaded.audit["warmup_availability"] == {
-        "requested_days": 0,
-        "available_days": 3,
+        "requested_days": 2,
+        "available_days": 1,
         "history_start": "2024-01-01",
     }
 

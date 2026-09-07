@@ -148,6 +148,22 @@ def test_membership_cutoff_excludes_effective_interval_decided_after_cutoff(tmp_
     assert "CUSDT" not in memberships[pd.Timestamp("2024-03-09")]
 
 
+def test_membership_history_rejects_duplicate_daily_universe_keys(tmp_path, monkeypatch):
+    path = _store_fixture(tmp_path)
+    original_read = CryptoQuantStore.read
+
+    def read_with_duplicate(self, name, where=None):
+        frame = original_read(self, name, where=where)
+        if name == "universe_monthly":
+            frame = pd.concat([frame, frame.iloc[[0]]], ignore_index=True)
+        return frame
+
+    monkeypatch.setattr(CryptoQuantStore, "read", read_with_duplicate)
+
+    with pytest.raises(ValueError, match="duplicate universe daily key"):
+        load_membership_history(path, date(2024, 3, 9), date(2024, 3, 10))
+
+
 def test_load_market_history_pushes_date_range_into_hdf_read(tmp_path, monkeypatch):
     path = _store_fixture(tmp_path)
     calls = []

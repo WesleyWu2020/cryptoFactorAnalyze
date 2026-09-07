@@ -93,6 +93,8 @@ def _membership_by_date(
             & (data["_start"] <= day)
             & (data["_end"].isna() | (data["_end"] >= day))
         ]
+        if active["_symbol"].duplicated(keep=False).any():
+            raise ValueError(f"duplicate universe daily key: {day.date()}/binance_symbol")
         result[day] = set(active["_symbol"])
     return result
 

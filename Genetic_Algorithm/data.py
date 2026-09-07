@@ -227,8 +227,12 @@ def load_stage(
 
     active = current_members
     unknown = active & (complete.isna() | placeholder.isna())
-    placeholder_count = int((active & placeholder.fillna(False).astype(bool)).to_numpy().sum())
-    incomplete_count = int((active & ~complete.fillna(False).astype(bool)).to_numpy().sum())
+    known = active & ~unknown
+    placeholder_count = int((known & placeholder.astype(bool)).to_numpy().sum())
+    incomplete_count = int(
+        (known & ~placeholder.astype(bool) & ~complete.astype(bool)).to_numpy().sum()
+    )
+    warmup_dates = history_dates[history_dates < start]
     code_fingerprint = _code_fingerprint()
     audit = {
         "provider_cutoff": end.strftime("%Y-%m-%d"),
@@ -246,7 +250,7 @@ def load_stage(
             "requested_days": warmup_days,
             "available_days": int(
                 pd.concat(
-                    [frame.loc[history_dates].notna().any(axis=1) for frame in features.values()],
+                    [frame.loc[warmup_dates].notna().any(axis=1) for frame in features.values()],
                     axis=1,
                 ).any(axis=1).sum()
             ),
