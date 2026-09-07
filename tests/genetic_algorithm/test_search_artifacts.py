@@ -338,6 +338,22 @@ def test_existing_published_run_survives_failure_between_backup_and_stage_publis
     assert not list(tmp_path.glob(".run.publish.json"))
 
 
+def test_prepare_rejects_dangling_backup_symlink_before_writing_journal(tmp_path):
+    destination = tmp_path / "run"
+    audit_path = destination / "audit_train.json"
+    destination.mkdir()
+    audit_path.write_text("audit", encoding="utf-8")
+    backup = tmp_path / ".run.audit-backup"
+    backup.symlink_to(tmp_path / "missing-backup")
+
+    with pytest.raises(FileExistsError, match="artifact backup path is unsafe"):
+        search_module._prepare_publish_destination(destination, audit_path)
+
+    assert backup.is_symlink()
+    assert not list(tmp_path.glob(".run.publish.json"))
+    assert list(tmp_path.glob(".run.*")) == [backup]
+
+
 def test_publish_recovery_restores_backup_after_crash_before_stage_rename(tmp_path):
     destination = tmp_path / "run"
     backup = tmp_path / ".run.audit-backup"

@@ -383,9 +383,22 @@ def _remove_path(path: Path) -> None:
         path.unlink()
 
 
+def _reject_symlink(path: Path, label: str) -> None:
+    if not os.path.lexists(path):
+        return
+    try:
+        mode = os.lstat(path).st_mode
+    except OSError as exc:
+        raise FileExistsError(f"{label} path is unsafe: {path}") from exc
+    if stat.S_ISLNK(mode):
+        raise FileExistsError(f"{label} path is unsafe: {path}")
+
+
 def _recover_publish_destination(destination: Path) -> None:
     """Resolve an interrupted immutable directory publication deterministically."""
-    destination = Path(destination).resolve()
+    destination = Path(destination)
+    _reject_symlink(destination, "publish destination")
+    destination = destination.resolve()
     journal_path = _publish_journal_path(destination)
     if not os.path.lexists(journal_path):
         return
@@ -510,9 +523,14 @@ def _write_publish_journal(destination: Path, staging: Path, backup: Path | None
 
 def _prepare_publish_destination(destination: Path, audit_path: Path) -> tuple[Path, Path | None]:
     """Create an isolated staging directory without changing the published run."""
+    destination = Path(destination)
+    _reject_symlink(destination, "artifact destination")
+    backup_path = destination.with_name(f".{destination.name}.audit-backup")
+    _reject_symlink(backup_path, "artifact backup")
     destination.parent.mkdir(parents=True, exist_ok=True)
     _recover_publish_destination(destination)
     staging = Path(tempfile.mkdtemp(prefix=f".{destination.name}.", dir=destination.parent))
+    _reject_symlink(staging, "artifact staging")
     backup = None
     if destination.exists():
         if not destination.is_dir():
@@ -532,8 +550,8 @@ def _prepare_publish_destination(destination: Path, audit_path: Path) -> tuple[P
             preserved.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(audit_path, preserved)
         if allowed is not None:
-            backup = destination.with_name(f".{destination.name}.audit-backup")
-            if backup.exists():
+            backup = backup_path
+            if os.path.lexists(backup):
                 staging.rmdir()
                 raise FileExistsError(f"stale artifact backup already exists: {backup}")
         else:
@@ -545,6 +563,10 @@ def _publish_staging_directory(
     staging: Path, destination: Path, backup: Path | None = None
 ) -> None:
     """Publish a complete immutable run directory with recoverable replacement."""
+    _reject_symlink(staging, "artifact staging")
+    _reject_symlink(destination, "artifact destination")
+    if backup is not None:
+        _reject_symlink(backup, "artifact backup")
     journal_path = _write_publish_journal(destination, staging, backup)
     if backup is not None:
         os.replace(destination, backup)
