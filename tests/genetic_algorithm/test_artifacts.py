@@ -12,11 +12,20 @@ from Genetic_Algorithm.artifacts import (
     read_verified_value_artifact,
     write_artifact,
     write_value_artifact,
+    working_tree_patch_hash,
 )
 from Genetic_Algorithm.expression import Node
 
 import numpy as np
 import pandas as pd
+
+
+def test_working_tree_patch_hash_is_deterministic_without_git(tmp_path):
+    first = working_tree_patch_hash(tmp_path)
+    second = working_tree_patch_hash(tmp_path)
+
+    assert first == second
+    assert len(first) == 64
 
 
 def test_manifest_is_immutable_and_verified(tmp_path):

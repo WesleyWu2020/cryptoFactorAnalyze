@@ -294,18 +294,21 @@ def _confined_code_path(repository_root: Path, path: str | Path) -> tuple[str, P
 def working_tree_patch_hash(repository_root: str | Path) -> str:
     """Hash tracked patches and untracked files in the working tree."""
     root = Path(repository_root)
-    staged = subprocess.run(
-        ["git", "diff", "--binary", "--cached"], cwd=root, check=True, capture_output=True
-    ).stdout
-    unstaged = subprocess.run(
-        ["git", "diff", "--binary"], cwd=root, check=True, capture_output=True
-    ).stdout
-    untracked_paths = subprocess.run(
-        ["git", "ls-files", "--others", "--exclude-standard", "-z"],
-        cwd=root,
-        check=True,
-        capture_output=True,
-    ).stdout.split(b"\0")
+    try:
+        staged = subprocess.run(
+            ["git", "diff", "--binary", "--cached"], cwd=root, check=True, capture_output=True
+        ).stdout
+        unstaged = subprocess.run(
+            ["git", "diff", "--binary"], cwd=root, check=True, capture_output=True
+        ).stdout
+        untracked_paths = subprocess.run(
+            ["git", "ls-files", "--others", "--exclude-standard", "-z"],
+            cwd=root,
+            check=True,
+            capture_output=True,
+        ).stdout.split(b"\0")
+    except (OSError, subprocess.CalledProcessError):
+        return hashlib.sha256(b"non-git-repository\0").hexdigest()
     untracked = bytearray()
     for raw_path in sorted(path for path in untracked_paths if path):
         path = root / os.fsdecode(raw_path)

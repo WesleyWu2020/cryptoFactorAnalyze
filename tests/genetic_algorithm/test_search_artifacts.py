@@ -13,6 +13,7 @@ from Genetic_Algorithm.config import STAGES
 from Genetic_Algorithm.evolution import search as evolution_search
 from Genetic_Algorithm import search as search_module
 from Genetic_Algorithm.artifacts import working_tree_patch_hash, write_artifact
+from Genetic_Algorithm.search import _load_archive
 
 
 REPOSITORY_ROOT = __file__.split("/tests/")[0]
@@ -155,6 +156,45 @@ def test_run_search_second_archive_is_cumulative_and_preserves_prior_value_refer
     document = json.loads((second_dir / "training_candidates.json").read_text(encoding="utf-8"))
     assert [entry["expression_id"] for entry in document["candidates"]] == ["first", "second"]
     assert document["candidates"][0]["value_artifact"] == first_entry["value_artifact"]
+
+
+def test_load_archive_rejects_duplicate_expression_ids(tmp_path):
+    archive_path = tmp_path / "archive.json"
+    write_artifact(
+        archive_path,
+        {"training_only": True, "candidates": [
+            {"expression_id": "same"}, {"expression_id": "same"},
+        ]},
+        immutable=True,
+    )
+
+    with pytest.raises(ValueError, match="duplicate expression_id.*same"):
+        _load_archive(archive_path)
+
+
+def test_run_search_does_not_publish_partial_directory_when_commit_fails(tmp_path, monkeypatch):
+    audit_path = tmp_path / "audit_train.json"
+    audit_path.write_text(
+        json.dumps({"training_only": True, "fingerprint": "train-fingerprint", "stage": {"name": "train"}}),
+        encoding="utf-8",
+    )
+    destination = tmp_path / "run"
+    destination.mkdir()
+    monkeypatch.setattr(search_module, "run_training_audit", lambda *args, **kwargs: audit_path)
+
+    def fail_replace(*args, **kwargs):
+        raise OSError("simulated publish failure")
+
+    monkeypatch.setattr(search_module.os, "replace", fail_replace)
+    with pytest.raises(OSError, match="simulated publish failure"):
+        search_module.run_search(
+            "unused.h5", audit_path, stage=STAGES["train"], warmup_days=0,
+            fields=["close"], search_stage=lambda path: SearchResult((), (), 0),
+            artifact_dir=destination, repository_root=REPOSITORY_ROOT,
+        )
+
+    assert not destination.exists()
+    assert not list(tmp_path.glob(".run.*"))
 
 
 def test_run_search_rejects_same_expression_id_with_incompatible_provenance(

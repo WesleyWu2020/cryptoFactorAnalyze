@@ -8,6 +8,7 @@ import inspect
 import os
 import re
 import shutil
+import tempfile
 from dataclasses import asdict, replace
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping, TypeVar
@@ -149,10 +150,14 @@ def _load_archive(path: str | Path | None) -> tuple[list[dict[str, Any]], dict[s
     if not isinstance(entries, list):
         raise ValueError("training archive candidates must be a list")
     values: dict[str, Any] = {}
+    seen_ids: set[str] = set()
     for entry in entries:
         if not isinstance(entry, Mapping):
             raise ValueError("training archive entry is malformed")
         identifier = str(entry.get("expression_id", entry.get("hash", "archive")))
+        if identifier in seen_ids:
+            raise ValueError(f"duplicate expression_id in training archive: {identifier}")
+        seen_ids.add(identifier)
         reference = entry.get("value_artifact")
         if not isinstance(reference, Mapping):
             values[identifier] = {
@@ -266,18 +271,51 @@ def _tree_payload(tree: Node) -> dict[str, Any]:
     }
 
 
-def _ensure_publishable_destination(destination: Path) -> None:
-    """Reject reruns before copying or creating immutable artifacts."""
-    destination.mkdir(parents=True, exist_ok=True)
-    conflicts = (
-        destination / "provenance.json",
-        destination / "training_candidates.json",
-        destination / "training_values.json",
-        destination / "training_values.new.json",
-    )
-    for path in conflicts:
-        if path.exists():
-            raise FileExistsError(f"immutable training artifact already exists: {path}")
+def _prepare_publish_destination(destination: Path, audit_path: Path) -> tuple[Path, Path | None]:
+    """Create an isolated staging directory for an atomic directory publish."""
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    staging = Path(tempfile.mkdtemp(prefix=f".{destination.name}.", dir=destination.parent))
+    backup = None
+    if destination.exists():
+        if not destination.is_dir():
+            staging.rmdir()
+            raise FileExistsError(f"artifact destination is not a directory: {destination}")
+        entries = list(destination.iterdir())
+        audit_path = audit_path.resolve()
+        destination_resolved = destination.resolve()
+        audit_inside = destination_resolved in audit_path.parents
+        allowed = audit_path if audit_inside else None
+        if any(path.resolve() != allowed for path in entries):
+            staging.rmdir()
+            raise FileExistsError(f"immutable training artifact already exists: {destination}")
+        if allowed is not None:
+            relative = audit_path.relative_to(destination_resolved)
+            preserved = staging / relative
+            preserved.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(audit_path, preserved)
+        if allowed is not None:
+            backup = destination.with_name(f".{destination.name}.audit-backup")
+            if backup.exists():
+                staging.rmdir()
+                raise FileExistsError(f"stale artifact backup already exists: {backup}")
+            destination.rename(backup)
+        else:
+            destination.rmdir()
+    return staging, backup
+
+
+def _publish_staging_directory(staging: Path, destination: Path) -> None:
+    """Atomically publish a complete immutable run directory."""
+    os.replace(staging, destination)
+    directory_fd = os.open(destination.parent, os.O_RDONLY)
+    try:
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
+
+
+def _archive_key(entry: Mapping[str, Any]) -> str:
+    return str(entry.get("expression_id", entry.get("hash", "archive")))
 
 
 def _copy_archive_value_artifacts(
@@ -306,10 +344,6 @@ def _copy_archive_value_artifacts(
                 raise ValueError(f"archive value artifact path collision: {target}")
         else:
             shutil.copy2(source, target)
-
-
-def _archive_key(entry: Mapping[str, Any]) -> str:
-    return str(entry.get("expression_id", entry.get("hash", "archive")))
 
 
 def _write_training_artifacts(
@@ -348,7 +382,7 @@ def _write_training_artifacts(
     archive_for_selection = [
         {
             **entry,
-            "values": _frame(archive_values.get(str(entry.get("expression_id", entry.get("hash", "archive"))))),
+            "values": _frame(archive_values.get(_archive_key(entry))),
         }
         for entry in archive_entries
     ]
@@ -369,7 +403,7 @@ def _write_training_artifacts(
     if hasattr(result, "candidates") and tuple(selected) != candidates:
         result = replace(result, candidates=tuple(selected))
     destination = Path(artifact_dir)
-    _ensure_publishable_destination(destination)
+    staging, destination_backup = _prepare_publish_destination(destination, Path(audit_path))
     provenance = build_provenance(
         config=_resolved_config(config),
         stage_content_hashes={"train": training_fingerprint},
@@ -383,54 +417,75 @@ def _write_training_artifacts(
         validation_attempts=validation_attempts,
         validation_experiment_id=validation_experiment_id,
     )
-    _copy_archive_value_artifacts(archive_path, archive_entries, destination)
     value_panels = {
         candidate.expression_id: _frame(current_values.get(candidate.expression_id))
         for candidate in selected
         if _frame(current_values.get(candidate.expression_id)) is not None
     }
-    value_artifact_path = destination / "training_values.json"
-    if value_artifact_path.exists():
-        value_artifact_path = destination / "training_values.new.json"
-    value_artifact = write_value_artifact(value_artifact_path, value_panels)
-    write_artifact(destination / "provenance.json", provenance, immutable=True)
-    new_archive = [
-        training_archive_entry(
-            candidate,
-            training_fingerprint=training_fingerprint,
-            operator_version=operator_version,
-            diagnostics={
-                "score": list(candidate.score),
-                "eligible": candidate.eligible,
-                "reasons": list(candidate.reasons),
-            },
-            value_artifact={"path": value_artifact.path.name, "sha256": value_artifact.sha256},
+    try:
+        _copy_archive_value_artifacts(archive_path, archive_entries, staging)
+        value_artifact_path = staging / "training_values.json"
+        if value_artifact_path.exists():
+            value_artifact_path = staging / "training_values.new.json"
+        value_artifact = write_value_artifact(value_artifact_path, value_panels)
+        write_artifact(staging / "provenance.json", provenance, immutable=True)
+        new_archive = [
+            training_archive_entry(
+                candidate,
+                training_fingerprint=training_fingerprint,
+                operator_version=operator_version,
+                diagnostics={
+                    "score": list(candidate.score),
+                    "eligible": candidate.eligible,
+                    "reasons": list(candidate.reasons),
+                },
+                value_artifact={"path": value_artifact.path.name, "sha256": value_artifact.sha256},
+            )
+            for candidate in selected
+        ]
+        archive = []
+        seen_ids: set[str] = set()
+        for entry in (*archive_entries, *sorted(new_archive, key=_archive_key)):
+            identifier = _archive_key(entry)
+            if identifier in seen_ids:
+                continue
+            seen_ids.add(identifier)
+            published = dict(entry)
+            if identifier in value_panels:
+                published["value_artifact"] = {
+                    "path": value_artifact.path.name,
+                    "sha256": value_artifact.sha256,
+                }
+            archive.append(published)
+        write_artifact(
+            staging / "training_candidates.json",
+            {"training_only": True, "candidates": archive},
+            immutable=True,
         )
-        for candidate in selected
-    ]
-    archive = []
-    seen_ids: set[str] = set()
-    for entry in (*archive_entries, *sorted(new_archive, key=_archive_key)):
-        identifier = _archive_key(entry)
-        if identifier in seen_ids:
-            continue
-        seen_ids.add(identifier)
-        archive.append(dict(entry))
-    write_artifact(
-        destination / "training_candidates.json",
-        {"training_only": True, "candidates": archive},
-        immutable=True,
-    )
-    write_artifact(
-        destination / "deduplication.json",
-        {
-            "accepted": [candidate.expression_id for candidate in selected],
-            "rejected": [candidate.expression_id for candidate in rejected],
-            "rejection_reasons": rejection_reasons,
-            "comparisons": [comparison.__dict__ for comparison in selection.comparisons],
-            "loaded_archive_entries": len(archive_entries),
-        },
-    )
+        write_artifact(
+            staging / "deduplication.json",
+            {
+                "accepted": [candidate.expression_id for candidate in selected],
+                "rejected": [candidate.expression_id for candidate in rejected],
+                "rejection_reasons": rejection_reasons,
+                "comparisons": [comparison.__dict__ for comparison in selection.comparisons],
+                "loaded_archive_entries": len(archive_entries),
+            },
+        )
+        _publish_staging_directory(staging, destination)
+        if destination_backup is not None:
+            shutil.rmtree(destination_backup)
+    except Exception:
+        if destination_backup is not None and destination_backup.exists() and not destination.exists():
+            destination_backup.rename(destination)
+        if staging.exists():
+            for path in sorted(staging.rglob("*"), reverse=True):
+                if path.is_file() or path.is_symlink():
+                    path.unlink()
+                elif path.is_dir():
+                    path.rmdir()
+            staging.rmdir()
+        raise
     return result
 
 
