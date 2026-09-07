@@ -206,7 +206,7 @@ def test_cached_values_are_masked_by_current_point_in_time_universe(
     assert pd.isna(second["factor_value"].loc["2024-01-07", "AUSDT"])
 
 
-def test_cached_context_eligible_values_recompute_quality_diagnostics(
+def test_context_eligible_values_refresh_quality_diagnostics(
     manager, tmp_path, monkeypatch
 ):
     factor_file = _write_factor(tmp_path, name="context_mom", context_eligible=True)
@@ -263,6 +263,73 @@ def test_context_eligible_cache_hit_recomputes_formula_with_current_context(
     assert cache_loads == 0
     assert pd.isna(second["factor_value"].loc["2024-01-07", "AUSDT"])
     assert first["factor_value"].loc["2024-01-07", "BUSDT"] != second["factor_value"].loc["2024-01-07", "BUSDT"]
+
+
+def test_cache_source_stat_is_rechecked_before_accepting_legacy_value(
+    manager, factor_file, monkeypatch
+):
+    manager.evaluate(str(factor_file), params=dict(BASE_PARAMS), plot=False)
+    import factor_common.manager as manager_module
+
+    original_compute = manager_module.compute_factor
+    original_snapshot = manager_module.snapshot_source_stats
+    compute_calls = 0
+    snapshot_calls = 0
+
+    def snapshot_with_source_change(paths):
+        nonlocal snapshot_calls
+        snapshot_calls += 1
+        if snapshot_calls == 2:
+            os.utime(manager.h5_path, ns=(1_600_000_000_000_000_001,) * 2)
+        return original_snapshot(paths)
+
+    def count_compute(*args, **kwargs):
+        nonlocal compute_calls
+        compute_calls += 1
+        return original_compute(*args, **kwargs)
+
+    monkeypatch.setattr("factor_common.manager.snapshot_source_stats", snapshot_with_source_change)
+    monkeypatch.setattr("factor_common.manager.compute_factor", count_compute)
+
+    manager.evaluate(str(factor_file), params=dict(BASE_PARAMS), plot=False)
+
+    assert snapshot_calls == 2
+    assert compute_calls > 0
+
+
+@pytest.mark.parametrize("changed_input", ["market", "membership"])
+def test_changed_input_content_with_stable_source_stat_recomputes_cache(
+    manager, factor_file, changed_input, monkeypatch
+):
+    first = manager.evaluate(str(factor_file), params=dict(BASE_PARAMS), plot=False)
+    source_stat = manager.h5_path.stat()
+    original_market = manager.dp.get_single_data
+    original_membership = manager.dp.get_universe
+    changed = False
+
+    def get_market(field, *, start, end):
+        market = original_market(field=field, start=start, end=end).copy()
+        if changed and field == "close":
+            market.loc[pd.Timestamp("2024-01-08"), "AUSDT"] *= 2
+        return market
+
+    def get_membership(*, start, end):
+        membership = original_membership(start=start, end=end).copy()
+        if changed:
+            membership.iloc[0, 0] = ~membership.iloc[0, 0]
+        return membership
+
+    if changed_input == "market":
+        monkeypatch.setattr(manager.dp, "get_single_data", get_market)
+    else:
+        monkeypatch.setattr(manager.dp, "get_universe", get_membership)
+    changed = True
+
+    second = manager.evaluate(str(factor_file), params=dict(BASE_PARAMS), plot=False)
+
+    assert manager.h5_path.stat().st_mtime_ns == source_stat.st_mtime_ns
+    assert manager.h5_path.stat().st_size == source_stat.st_size
+    assert second["run_id"] != first["run_id"]
 
 
 def test_evaluate_dataframe_long_table(manager):
@@ -401,9 +468,12 @@ def test_snapshot_precedes_value_phase_reads(manager, factor_file, monkeypatch):
 
     original = DataProvider.get_single_data
     bumped = []
+    reads = 0
 
     def wrapped(self, field, *, start, end):
-        if not bumped:
+        nonlocal reads
+        reads += 1
+        if reads == 2:
             bumped.append(True)
             os.utime(manager.h5_path, ns=(1_600_000_000_000_000_000,) * 2)
         return original(self, field, start=start, end=end)
