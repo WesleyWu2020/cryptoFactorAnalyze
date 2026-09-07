@@ -260,6 +260,88 @@ def test_publish_recovery_restores_backup_after_crash_before_stage_rename(tmp_pa
     assert not journal.exists()
 
 
+def test_publish_recovery_accepts_relative_destination(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    destination = Path("run")
+    backup = tmp_path / ".run.audit-backup"
+    staging = tmp_path / ".run.staging"
+    backup.mkdir()
+    (backup / "old").write_text("old", encoding="utf-8")
+    staging.mkdir()
+    journal = tmp_path / ".run.publish.json"
+    journal.write_text(
+        json.dumps({
+            "version": 1,
+            "destination": destination.name,
+            "backup": backup.name,
+            "staging": staging.name,
+        }),
+        encoding="utf-8",
+    )
+
+    search_module._recover_publish_destination(destination)
+
+    assert (destination / "old").read_text(encoding="utf-8") == "old"
+    assert not backup.exists()
+    assert not staging.exists()
+    assert not journal.exists()
+
+
+def test_publish_recovery_normalizes_destination_alias(tmp_path):
+    real_parent = tmp_path / "real"
+    real_parent.mkdir()
+    alias_parent = tmp_path / "alias"
+    alias_parent.symlink_to(real_parent, target_is_directory=True)
+    destination = alias_parent / "run"
+    backup = real_parent / ".run.audit-backup"
+    staging = real_parent / ".run.staging"
+    backup.mkdir()
+    (backup / "old").write_text("old", encoding="utf-8")
+    staging.mkdir()
+    journal = real_parent / ".run.publish.json"
+    journal.write_text(
+        json.dumps({
+            "version": 1,
+            "destination": destination.name,
+            "backup": backup.name,
+            "staging": staging.name,
+        }),
+        encoding="utf-8",
+    )
+
+    search_module._recover_publish_destination(destination)
+
+    assert (destination / "old").read_text(encoding="utf-8") == "old"
+    assert not backup.exists()
+    assert not staging.exists()
+    assert not journal.exists()
+
+
+@pytest.mark.parametrize(
+    ("backup", "staging"),
+    [
+        ("run", ".run.staging"),
+        (".run.audit-backup", ".run.audit-backup"),
+        (".run.audit-backup", "../outside"),
+    ],
+)
+def test_publish_recovery_rejects_invalid_journal_paths(tmp_path, backup, staging):
+    destination = tmp_path / "run"
+    journal = tmp_path / ".run.publish.json"
+    journal.write_text(
+        json.dumps({
+            "version": 1,
+            "destination": destination.name,
+            "backup": backup,
+            "staging": staging,
+        }),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="publish journal"):
+        search_module._recover_publish_destination(destination)
+
+
 def test_run_search_rejects_same_expression_id_with_incompatible_provenance(
     tmp_path, monkeypatch
 ):

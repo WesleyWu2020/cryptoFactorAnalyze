@@ -284,6 +284,7 @@ def _remove_path(path: Path) -> None:
 
 def _recover_publish_destination(destination: Path) -> None:
     """Resolve an interrupted immutable directory publication deterministically."""
+    destination = Path(destination).resolve()
     journal_path = _publish_journal_path(destination)
     if not journal_path.exists():
         return
@@ -300,7 +301,14 @@ def _recover_publish_destination(destination: Path) -> None:
         path = Path(value)
         if path.is_absolute() or path.parent != Path("."):
             raise ValueError(f"publish journal path must be a sibling name: {key}")
-        paths[key] = parent / path
+        resolved = (parent / path).resolve()
+        try:
+            resolved.relative_to(parent)
+        except ValueError as exc:
+            raise ValueError(f"publish journal path escapes parent: {key}") from exc
+        if resolved == parent:
+            raise ValueError(f"publish journal path must be a sibling name: {key}")
+        paths[key] = resolved
     backup_name = journal.get("backup")
     if backup_name is not None:
         if not isinstance(backup_name, str):
@@ -308,9 +316,22 @@ def _recover_publish_destination(destination: Path) -> None:
         backup_path = Path(backup_name)
         if backup_path.is_absolute() or backup_path.parent != Path("."):
             raise ValueError("publish journal path must be a sibling name: backup")
-        paths["backup"] = parent / backup_path
+        resolved = (parent / backup_path).resolve()
+        try:
+            resolved.relative_to(parent)
+        except ValueError as exc:
+            raise ValueError("publish journal path escapes parent: backup") from exc
+        if resolved == parent:
+            raise ValueError("publish journal path must be a sibling name: backup")
+        paths["backup"] = resolved
     if paths["destination"] != destination:
         raise ValueError(f"publish journal destination mismatch: {journal_path}")
+    if paths["staging"] == paths["destination"]:
+        raise ValueError(f"publish journal staging collides with destination: {journal_path}")
+    if "backup" in paths and paths["backup"] in {
+        paths["destination"], paths["staging"]
+    }:
+        raise ValueError(f"publish journal backup collides with another path: {journal_path}")
 
     if destination.exists():
         # The staged directory is already visible. The publication committed;
