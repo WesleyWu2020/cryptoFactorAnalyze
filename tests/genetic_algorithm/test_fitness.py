@@ -48,7 +48,7 @@ def test_training_score_uses_four_quarters_and_accepts_ordered_signal():
 
     assert score.direction == 1
     assert score.valid_days == 364
-    assert score.day_coverage == pytest.approx(1.0)
+    assert score.day_coverage == pytest.approx(364 / 366)
     assert score.cell_coverage == pytest.approx(1.0)
     assert len(score.quarter_means) == 4
     assert score.eligible
@@ -100,10 +100,45 @@ def test_cell_coverage_denominator_keeps_quality_eligible_cells():
     values, labels, quality = _panel(remove_days=["2024-02-01", "2024-05-01"])
     score = score_training(values, labels, quality, _config())
 
-    expected = (len(values) - 2) * len(values.columns)
-    observed = (values.notna() & labels.notna() & quality).to_numpy().sum()
+    expected = len(values) * len(values.columns)
+    observed = (values.notna() & quality).to_numpy().sum()
     assert score.cell_coverage == pytest.approx(observed / expected)
     assert score.cell_coverage < 1.0
+
+
+def test_invalid_labels_do_not_shrink_cell_coverage_denominator():
+    from Genetic_Algorithm.fitness import score_training
+
+    values, labels, quality = _panel()
+    labels.loc[pd.Timestamp("2024-06-01"), "S00"] = np.nan
+
+    score = score_training(values, labels, quality, _config())
+
+    assert score.cell_coverage == pytest.approx(1.0)
+    assert score.day_coverage == pytest.approx(364 / 366)
+
+
+def test_infinite_factor_values_are_excluded_from_daily_ic_pairs():
+    from Genetic_Algorithm.fitness import score_training
+
+    values, labels, quality = _panel()
+    values.loc[pd.Timestamp("2024-06-01"), values.columns[:1]] = np.inf
+
+    score = score_training(values, labels, quality, _config())
+
+    assert score.valid_days == 364
+    assert score.cell_coverage == pytest.approx(1 - 1 / (366 * 30))
+
+
+def test_daily_ic_with_fewer_than_twenty_finite_pairs_is_invalid():
+    from Genetic_Algorithm.fitness import score_training
+
+    values, labels, quality = _panel()
+    values.loc[pd.Timestamp("2024-06-01"), values.columns[:11]] = np.inf
+
+    score = score_training(values, labels, quality, _config())
+
+    assert score.valid_days == 363
 
 
 def test_purged_tail_rows_cannot_change_training_score():

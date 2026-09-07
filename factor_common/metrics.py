@@ -216,7 +216,7 @@ def _daily_ic(values: pd.DataFrame, labels: pd.DataFrame) -> pd.DataFrame:
     for date in values.index:
         pairs = pd.concat(
             [values.loc[date], labels.loc[date]], axis=1, keys=["value", "label"]
-        ).dropna()
+        ).replace([np.inf, -np.inf], np.nan).dropna()
         if len(pairs) < MIN_CROSS_SECTION:
             continue
         if pairs["value"].nunique() < 2 or pairs["label"].nunique() < 2:

@@ -93,13 +93,12 @@ def score_training(
         raise ValueError("signal outside training range")
 
     quality = quality_eligible.fillna(False).astype(bool)
+    finite_values = values.replace([np.inf, -np.inf], np.nan)
     finite_labels = labels.replace([np.inf, -np.inf], np.nan)
-    signal_days = quality.any(axis=1) & finite_labels.notna().any(axis=1)
-    if not signal_days.any():
-        signal_days = quality.any(axis=1)
-    signal_values = values.where(quality)
+    signal_days = quality.any(axis=1)
+    signal_values = finite_values.where(quality)
     daily = _daily_ic(signal_values.loc[signal_days], finite_labels.loc[signal_days])
-    min_pairs = int(_config_value(config, "min_pairs", 20))
+    min_pairs = max(20, int(_config_value(config, "min_pairs", 20)))
     daily = daily.loc[
         (daily["n_pairs"] >= min_pairs)
         & pd.to_numeric(daily["rank_ic"], errors="coerce").notna()
@@ -109,11 +108,7 @@ def score_training(
     total_days = int(signal_days.sum())
     day_coverage = valid_days / total_days if total_days else 0.0
     denominator = int(quality.loc[signal_days].to_numpy(dtype=bool).sum())
-    observed = int(
-        (signal_values.loc[signal_days].notna()
-         & finite_labels.loc[signal_days].notna()
-         & quality.loc[signal_days]).to_numpy().sum()
-    )
+    observed = int(signal_values.loc[signal_days].notna().to_numpy().sum())
     cell_coverage = observed / denominator if denominator else 0.0
 
     raw_mean = _finite(daily["rank_ic"].mean()) if valid_days else None
