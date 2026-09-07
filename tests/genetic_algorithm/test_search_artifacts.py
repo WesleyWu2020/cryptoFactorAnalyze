@@ -14,7 +14,7 @@ from Genetic_Algorithm.expression import Node
 from Genetic_Algorithm.config import STAGES
 from Genetic_Algorithm.evolution import search as evolution_search
 from Genetic_Algorithm import search as search_module
-from Genetic_Algorithm.artifacts import working_tree_patch_hash, write_artifact
+from Genetic_Algorithm.artifacts import working_tree_patch_hash, write_artifact, write_value_artifact
 from Genetic_Algorithm.search import _load_archive
 
 
@@ -247,6 +247,28 @@ def test_load_archive_rejects_unmarked_value_artifact(tmp_path):
     )
 
     with pytest.raises(ValueError, match="training_only"):
+        _load_archive(archive_path)
+
+
+def test_load_archive_rejects_value_artifact_missing_candidate_panel(tmp_path):
+    values_path = tmp_path / "values.json"
+    value_artifact = write_value_artifact(
+        values_path,
+        {"other-candidate": pd.DataFrame(
+            [[1.0]], index=pd.date_range("2024-01-01", periods=1), columns=["S0"]
+        )},
+    )
+    archive_path = tmp_path / "archive.json"
+    write_artifact(
+        archive_path,
+        {"training_only": True, "candidates": [{
+            **_valid_archive_entry("candidate"),
+            "value_artifact": {"path": values_path.name, "sha256": value_artifact.sha256},
+        }]},
+        immutable=True,
+    )
+
+    with pytest.raises(ValueError, match="missing panel.*candidate"):
         _load_archive(archive_path)
 
 @pytest.mark.parametrize(

@@ -373,18 +373,27 @@ def working_tree_patch_hash(repository_root: str | Path) -> str:
         ).stdout.split(b"\0")
     except (OSError, subprocess.CalledProcessError):
         return _non_git_working_tree_hash(root)
-    untracked = bytearray()
+    digest = hashlib.sha256()
+    digest.update(staged)
+    digest.update(b"\0")
+    digest.update(unstaged)
+    digest.update(b"\0")
     for raw_path in sorted(path for path in untracked_paths if path):
         path = root / os.fsdecode(raw_path)
-        untracked.extend(raw_path)
-        untracked.extend(b"\0")
+        digest.update(raw_path)
+        digest.update(b"\0")
         if path.is_symlink():
-            untracked.extend(b"symlink\0")
-            untracked.extend(os.fsencode(os.readlink(path)))
+            digest.update(b"symlink\0")
+            digest.update(os.fsencode(os.readlink(path)))
         else:
-            untracked.extend(path.read_bytes())
-        untracked.extend(b"\0")
-    return hashlib.sha256(staged + b"\0" + unstaged + b"\0" + bytes(untracked)).hexdigest()
+            with path.open("rb") as handle:
+                while True:
+                    content = handle.read(_NON_GIT_READ_CHUNK)
+                    if not content:
+                        break
+                    digest.update(content)
+        digest.update(b"\0")
+    return digest.hexdigest()
 
 
 def _non_git_working_tree_hash(root: Path) -> str:

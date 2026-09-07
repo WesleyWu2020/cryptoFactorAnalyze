@@ -281,8 +281,12 @@ def _load_archive(path: str | Path | None) -> tuple[list[dict[str, Any]], dict[s
             archive_path.parent, relative, label="archive value artifact"
         )
         panels = read_verified_value_artifact(artifact_path, expected_sha256=digest)
+        if identifier not in panels:
+            raise ValueError(
+                f"archive value artifact is missing panel for candidate {identifier}"
+            )
         values[identifier] = {
-            "values": panels.get(identifier),
+            "values": panels[identifier],
             "training_fingerprint": entry.get("training_fingerprint"),
             "operator_version": entry.get("operator_version"),
         }

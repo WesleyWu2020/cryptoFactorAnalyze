@@ -84,6 +84,23 @@ def test_git_hash_does_not_read_untracked_symlink_target_outside_repository(tmp_
     assert working_tree_patch_hash(tmp_path) == first
 
 
+def test_git_hash_streams_large_untracked_files_without_read_bytes(tmp_path, monkeypatch):
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    subprocess.run(["git", "-C", str(tmp_path), "commit", "--allow-empty", "-qm", "fixture"], check=True)
+    payload = bytes(range(256)) * 8192
+    (tmp_path / "large.bin").write_bytes(payload)
+
+    def fail_read_bytes(self):
+        raise AssertionError("working-tree hashing must stream file contents")
+
+    monkeypatch.setattr(type(tmp_path), "read_bytes", fail_read_bytes)
+
+    first = working_tree_patch_hash(tmp_path)
+    (tmp_path / "large.bin").write_bytes(payload + b"changed")
+
+    assert working_tree_patch_hash(tmp_path) != first
+
+
 def test_non_git_hash_ignores_timestamp_only_changes(tmp_path):
     source = tmp_path / "source.txt"
     source.write_text("content", encoding="utf-8")
