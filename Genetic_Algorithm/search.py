@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+import shutil
 from dataclasses import asdict, replace
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping, TypeVar
@@ -18,7 +19,7 @@ from .artifacts import (
     write_artifact,
     write_value_artifact,
 )
-from .config import Stage
+from .config import SearchConfig, Stage, load_config
 from .data import run_training_audit
 from .selection import deduplicate_training
 from factor_common.profiles import resolve_profile
@@ -84,7 +85,9 @@ def run_search(
         artifact_dir=destination,
         config=config or {},
         repository_root=repository_root,
-        selected_code_paths=tuple(selected_code_paths) or _default_code_paths(repository_root),
+        selected_code_paths=tuple(
+            dict.fromkeys((*tuple(selected_code_paths), *_default_code_paths(repository_root)))
+        ),
         package_names=tuple(package_names) or ("numpy", "pandas", "tables"),
         seed=(seed if seed is not None else int((config or {}).get("seed", 42))),
         operator_version=operator_version,
@@ -156,17 +159,65 @@ def _default_code_paths(repository_root: str | Path) -> tuple[str, ...]:
         "Genetic_Algorithm/expression.py", "Genetic_Algorithm/evaluator.py",
         "Genetic_Algorithm/fitness.py", "Genetic_Algorithm/operators.py",
         "Genetic_Algorithm/features.py", "factor_common/labels.py",
+        "Genetic_Algorithm/config.py", "Genetic_Algorithm/configs/default.json",
+        "Genetic_Algorithm/configs/smoke.json",
     )
     root = Path(repository_root)
     return tuple(path for path in candidates if (root / path).is_file())
 
 
 def _resolved_config(config: Any) -> Mapping[str, Any]:
-    if isinstance(config, Mapping):
-        return dict(config)
+    overrides = dict(config) if isinstance(config, Mapping) else {}
     if hasattr(config, "__dataclass_fields__"):
-        return {name: getattr(config, name) for name in config.__dataclass_fields__}
-    return {}
+        overrides = {
+            name: getattr(config, name)
+            for name in config.__dataclass_fields__
+            if name not in {"initial_trees", "evaluate_candidate"}
+        }
+    runtime_fields = {"initial_trees", "evaluate_candidate"}
+    default_config = load_config(Path(__file__).with_name("configs") / "default.json")
+    defaults = {
+        name: getattr(default_config, name)
+        for name in default_config.__dataclass_fields__
+        if name not in runtime_fields
+    }
+    defaults.update({key: value for key, value in overrides.items() if key not in runtime_fields})
+    effective = SearchConfig(**defaults)
+    return {
+        name: getattr(effective, name)
+        for name in effective.__dataclass_fields__
+        if name not in runtime_fields
+    }
+
+
+def _copy_archive_value_artifacts(
+    archive_path: Path | None,
+    archive_entries: Iterable[Mapping[str, Any]],
+    destination: Path,
+) -> None:
+    if archive_path is None:
+        return
+    for entry in archive_entries:
+        reference = entry.get("value_artifact")
+        if not isinstance(reference, Mapping):
+            continue
+        relative = reference.get("path")
+        if not isinstance(relative, str):
+            raise ValueError("archive value artifact reference is malformed")
+        source = archive_path.parent / relative
+        target = destination / relative
+        if not source.is_file():
+            raise ValueError(f"archive value artifact is missing: {source}")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if target.exists():
+            if target.read_bytes() != source.read_bytes():
+                raise ValueError(f"archive value artifact path collision: {target}")
+        else:
+            shutil.copy2(source, target)
+
+
+def _archive_key(entry: Mapping[str, Any]) -> str:
+    return str(entry.get("expression_id", entry.get("hash", "archive")))
 
 
 def _write_training_artifacts(
@@ -210,9 +261,23 @@ def _write_training_artifacts(
         for entry in archive_entries
     ]
     selection = deduplicate_training(candidates, current_values, archive_for_selection, config or {})
-    selected = selection.accepted
+    selected = []
+    rejected = list(selection.rejected)
+    rejection_reasons = dict(selection.rejection_reasons)
+    for candidate in selection.accepted:
+        if _frame(current_values.get(candidate.expression_id)) is None:
+            rejected.append(candidate)
+            rejection_reasons[candidate.expression_id] = (
+                *rejection_reasons.get(candidate.expression_id, ()),
+                "missing value panel: selected candidates must have a training value panel",
+            )
+        else:
+            selected.append(candidate)
+    selected = tuple(selected)
     if hasattr(result, "candidates") and tuple(selected) != candidates:
         result = replace(result, candidates=tuple(selected))
+    destination = Path(artifact_dir)
+    _copy_archive_value_artifacts(archive_path, archive_entries, destination)
     provenance = build_provenance(
         config=_resolved_config(config),
         stage_content_hashes={"train": training_fingerprint},
@@ -226,15 +291,17 @@ def _write_training_artifacts(
         validation_attempts=validation_attempts,
         validation_experiment_id=validation_experiment_id,
     )
-    destination = Path(artifact_dir)
     value_panels = {
         candidate.expression_id: _frame(current_values.get(candidate.expression_id))
         for candidate in selected
         if _frame(current_values.get(candidate.expression_id)) is not None
     }
-    value_artifact = write_value_artifact(destination / "training_values.json", value_panels)
+    value_artifact_path = destination / "training_values.json"
+    if value_artifact_path.exists():
+        value_artifact_path = destination / "training_values.new.json"
+    value_artifact = write_value_artifact(value_artifact_path, value_panels)
     write_artifact(destination / "provenance.json", provenance, immutable=True)
-    archive = [
+    new_archive = [
         training_archive_entry(
             candidate,
             training_fingerprint=training_fingerprint,
@@ -248,6 +315,14 @@ def _write_training_artifacts(
         )
         for candidate in selected
     ]
+    archive = []
+    seen_ids: set[str] = set()
+    for entry in (*archive_entries, *sorted(new_archive, key=_archive_key)):
+        identifier = _archive_key(entry)
+        if identifier in seen_ids:
+            continue
+        seen_ids.add(identifier)
+        archive.append(dict(entry))
     write_artifact(
         destination / "training_candidates.json",
         {"training_only": True, "candidates": archive},
@@ -256,9 +331,9 @@ def _write_training_artifacts(
     write_artifact(
         destination / "deduplication.json",
         {
-            "accepted": [candidate.expression_id for candidate in selection.accepted],
-            "rejected": [candidate.expression_id for candidate in selection.rejected],
-            "rejection_reasons": selection.rejection_reasons,
+            "accepted": [candidate.expression_id for candidate in selected],
+            "rejected": [candidate.expression_id for candidate in rejected],
+            "rejection_reasons": rejection_reasons,
             "comparisons": [comparison.__dict__ for comparison in selection.comparisons],
             "loaded_archive_entries": len(archive_entries),
         },

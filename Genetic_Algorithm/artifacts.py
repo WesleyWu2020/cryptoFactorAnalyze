@@ -235,7 +235,7 @@ def _file_hash(path: Path) -> str:
 
 
 def working_tree_patch_hash(repository_root: str | Path) -> str:
-    """Hash the working-tree patch, including staged and unstaged changes."""
+    """Hash tracked patches and untracked files in the working tree."""
     root = Path(repository_root)
     staged = subprocess.run(
         ["git", "diff", "--binary", "--cached"], cwd=root, check=True, capture_output=True
@@ -243,7 +243,20 @@ def working_tree_patch_hash(repository_root: str | Path) -> str:
     unstaged = subprocess.run(
         ["git", "diff", "--binary"], cwd=root, check=True, capture_output=True
     ).stdout
-    return hashlib.sha256(staged + b"\0" + unstaged).hexdigest()
+    untracked_paths = subprocess.run(
+        ["git", "ls-files", "--others", "--exclude-standard", "-z"],
+        cwd=root,
+        check=True,
+        capture_output=True,
+    ).stdout.split(b"\0")
+    untracked = bytearray()
+    for raw_path in sorted(path for path in untracked_paths if path):
+        path = root / os.fsdecode(raw_path)
+        untracked.extend(raw_path)
+        untracked.extend(b"\0")
+        untracked.extend(path.read_bytes())
+        untracked.extend(b"\0")
+    return hashlib.sha256(staged + b"\0" + unstaged + b"\0" + bytes(untracked)).hexdigest()
 
 
 def build_provenance(

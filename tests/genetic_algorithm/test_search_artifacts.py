@@ -10,7 +10,7 @@ from Genetic_Algorithm.expression import Node
 from Genetic_Algorithm.config import STAGES
 from Genetic_Algorithm.evolution import search as evolution_search
 from Genetic_Algorithm import search as search_module
-from Genetic_Algorithm.artifacts import write_artifact
+from Genetic_Algorithm.artifacts import working_tree_patch_hash, write_artifact
 
 
 REPOSITORY_ROOT = __file__.split("/tests/")[0]
@@ -43,14 +43,14 @@ def test_run_search_writes_training_artifacts_without_validation(tmp_path, monke
         experiment_id="train-exp",
     )
 
-    assert returned is result
+    assert returned.candidates == ()
     provenance = json.loads((tmp_path / "run" / "provenance.json").read_text(encoding="utf-8"))
     archive = json.loads((tmp_path / "run" / "training_candidates.json").read_text(encoding="utf-8"))
     assert provenance["training_experiment_id"] == "train-exp"
     assert provenance["validation"]["attempts"] == 0
     assert provenance["selected_code_content_hashes"]
     assert provenance["package_versions"]
-    assert archive["candidates"][0]["expression_id"] == "candidate-id"
+    assert archive["candidates"] == []
 
 
 def test_run_search_persists_real_search_panels_and_compares_on_second_run(tmp_path, monkeypatch):
@@ -101,6 +101,81 @@ def test_run_search_persists_real_search_panels_and_compares_on_second_run(tmp_p
         for reasons in dedup["rejection_reasons"].values()
         for reason in reasons
     )
+
+
+def test_run_search_second_archive_is_cumulative_and_preserves_prior_value_reference(tmp_path, monkeypatch):
+    audit_path = tmp_path / "audit_train.json"
+    audit_path.write_text(
+        json.dumps({"training_only": True, "fingerprint": "train-fingerprint", "stage": {"name": "train"}}),
+        encoding="utf-8",
+    )
+    dates = pd.date_range("2024-01-01", periods=120, freq="D")
+    values = pd.DataFrame(
+        np.arange(120 * 24, dtype="float64").reshape(120, 24),
+        index=dates,
+        columns=[f"S{i:02d}" for i in range(24)],
+    )
+    first = Candidate(Node("close"), "first", (1.0, 1.0, -1))
+    second = Candidate(Node("open"), "second", (1.0, 1.0, -1))
+    results = iter(
+        (
+            SearchResult((first,), (), 1, values_by_id={"first": {"values": values}}),
+            SearchResult(
+                (second,), (), 1,
+                values_by_id={
+                    "second": {
+                        "values": pd.DataFrame(
+                            np.random.default_rng(7).normal(size=(120, 24)),
+                            index=dates,
+                            columns=values.columns,
+                        )
+                    }
+                },
+            ),
+        )
+    )
+    monkeypatch.setattr(search_module, "run_training_audit", lambda *args, **kwargs: audit_path)
+
+    def run(destination, archive_path=None):
+        return search_module.run_search(
+            "unused.h5", audit_path, stage=STAGES["train"], warmup_days=0, fields=["close"],
+            search_stage=lambda path: next(results), artifact_dir=destination,
+            archive_path=archive_path, repository_root=REPOSITORY_ROOT, operator_version="ops-v1",
+        )
+
+    run_dir = tmp_path / "first"
+    run(run_dir)
+    first_document = json.loads((run_dir / "training_candidates.json").read_text(encoding="utf-8"))
+    first_entry = first_document["candidates"][0]
+    second_dir = tmp_path / "second"
+    run(second_dir, run_dir / "training_candidates.json")
+
+    document = json.loads((second_dir / "training_candidates.json").read_text(encoding="utf-8"))
+    assert [entry["expression_id"] for entry in document["candidates"]] == ["first", "second"]
+    assert document["candidates"][0]["value_artifact"] == first_entry["value_artifact"]
+
+
+def test_run_search_rejects_selected_candidate_without_value_panel(tmp_path, monkeypatch):
+    audit_path = tmp_path / "audit_train.json"
+    audit_path.write_text(
+        json.dumps({"training_only": True, "fingerprint": "train-fingerprint", "stage": {"name": "train"}}),
+        encoding="utf-8",
+    )
+    candidate = Candidate(Node("close"), "missing-panel", (1.0, 1.0, -1))
+    monkeypatch.setattr(search_module, "run_training_audit", lambda *args, **kwargs: audit_path)
+
+    search_module.run_search(
+        "unused.h5", audit_path, stage=STAGES["train"], warmup_days=0, fields=["close"],
+        search_stage=lambda path: SearchResult((candidate,), (), 1), artifact_dir=tmp_path / "run",
+        repository_root=REPOSITORY_ROOT, operator_version="ops-v1",
+    )
+
+    document = json.loads((tmp_path / "run" / "training_candidates.json").read_text(encoding="utf-8"))
+    dedup = json.loads((tmp_path / "run" / "deduplication.json").read_text(encoding="utf-8"))
+    assert document["candidates"] == []
+    assert dedup["accepted"] == []
+    assert dedup["rejected"] == ["missing-panel"]
+    assert "missing value panel" in dedup["rejection_reasons"]["missing-panel"][0]
 
 
 def test_run_search_uses_deterministic_default_artifact_dir(tmp_path, monkeypatch):
@@ -191,6 +266,44 @@ def test_run_search_resolves_default_backtest_profile_and_merges_overrides(tmp_p
     assert profile["fee_rate"] == 0.001
     assert profile["slippage"] == 0.001
     assert profile["include_funding"] is True
+
+
+def test_run_search_provenance_records_effective_config_and_complete_code_paths(tmp_path, monkeypatch):
+    audit_path = tmp_path / "audit_train.json"
+    audit_path.write_text(
+        json.dumps({"training_only": True, "fingerprint": "train-fingerprint", "stage": {"name": "train"}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(search_module, "run_training_audit", lambda *args, **kwargs: audit_path)
+
+    search_module.run_search(
+        "unused.h5", audit_path, stage=STAGES["train"], warmup_days=0, fields=["close"],
+        search_stage=lambda path: SearchResult((), (), 0), artifact_dir=tmp_path / "run",
+        config={"population": 7}, repository_root=REPOSITORY_ROOT,
+    )
+
+    provenance = json.loads((tmp_path / "run" / "provenance.json").read_text(encoding="utf-8"))
+    assert provenance["config"]["population"] == 7
+    assert provenance["config"]["generations"] == 20
+    code_paths = provenance["selected_code_content_hashes"]
+    assert "Genetic_Algorithm/config.py" in code_paths
+    assert "Genetic_Algorithm/configs/default.json" in code_paths
+    assert "Genetic_Algorithm/configs/smoke.json" in code_paths
+
+
+def test_working_tree_patch_hash_changes_for_untracked_file(tmp_path):
+    marker = tmp_path / "untracked-marker.txt"
+    marker.write_text("new relevant source\n", encoding="utf-8")
+    # The repository root is fixed; use a temporary untracked file there only
+    # through the test's own isolated git worktree copy.
+    import subprocess
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    subprocess.run(["git", "-C", str(tmp_path), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(tmp_path), "commit", "-qm", "fixture"], check=True)
+    after = working_tree_patch_hash(tmp_path)
+    marker.write_text("changed relevant source\n", encoding="utf-8")
+    changed = working_tree_patch_hash(tmp_path)
+    assert after != changed
 
 
 def test_run_search_loads_existing_archive_for_novelty(tmp_path, monkeypatch):
