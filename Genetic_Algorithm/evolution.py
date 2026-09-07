@@ -295,7 +295,7 @@ def search(stage_data: Any, config: Any) -> SearchResult:
     rng = np.random.default_rng(int(_value(config, "seed", 42)))
     population_size = int(_value(config, "population", 200))
     generations = int(_value(config, "generations", 20))
-    max_attempts = config.max_attempts
+    max_attempts = min(config.max_attempts, population_size * 50)
     cache: dict[str, tuple[tuple[Any, ...], bool, tuple[str, ...], Node]] = {}
     evaluations = 0
     objective_width: int | None = None

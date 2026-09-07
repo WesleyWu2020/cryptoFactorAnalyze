@@ -244,6 +244,32 @@ def test_evaluator_exception_is_logged_and_resampled_within_max_attempts():
     assert len(result.candidates) == 1
 
 
+def test_population_scaled_attempt_cap_limits_evaluator_calls():
+    calls = 0
+
+    def evaluate(*args):
+        nonlocal calls
+        calls += 1
+        raise RuntimeError("always fails")
+
+    with pytest.raises(SearchFormationError, match="after 50/50 attempts"):
+        search(
+            {"marker": "synthetic"},
+            {
+                "seed": 10,
+                "population": 1,
+                "generations": 1,
+                "max_depth": 0,
+                "max_nodes": 1,
+                "max_attempts": 100,
+                "initial_trees": [Node("close")],
+                "evaluate_candidate": evaluate,
+            },
+        )
+
+    assert calls == 50
+
+
 def test_copy_probability_selects_copy_branch():
     from Genetic_Algorithm import evolution
 
