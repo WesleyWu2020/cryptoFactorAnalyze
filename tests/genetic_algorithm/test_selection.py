@@ -94,7 +94,7 @@ def test_selection_order_and_limit_are_deterministic():
     assert [candidate.expression_id for candidate in result] == sorted(str(i) for i in range(25))[:20]
 
 
-def test_incompatible_archive_reference_is_skipped_with_reason_before_correlation():
+def test_incompatible_archive_reference_rejects_candidate_before_correlation():
     values = _values()
     result = deduplicate_training(
         [_candidate("candidate")],
@@ -112,10 +112,10 @@ def test_incompatible_archive_reference_is_skipped_with_reason_before_correlatio
         {"min_overlap_days": 120, "correlation_limit": 0.90, "validation_limit": 20},
     )
 
-    assert [candidate.expression_id for candidate in result] == ["candidate"]
+    assert [candidate.expression_id for candidate in result] == []
     assert result.comparisons[0].compatible is False
     assert "incompatible" in (result.comparisons[0].reason or "")
-    assert result.rejection_reasons == {}
+    assert "incompatible archive reference old" in result.rejection_reasons["candidate"][0]
 
 
 def test_archive_reference_without_values_is_explicitly_unverifiable():
@@ -133,7 +133,7 @@ def test_archive_reference_without_values_is_explicitly_unverifiable():
     assert "old" in result.comparisons[0].reason
 
 
-def test_incompatible_accepted_reference_is_skipped_with_reason():
+def test_incompatible_accepted_reference_rejects_candidate_with_reason():
     values = _values()
     result = deduplicate_training(
         [_candidate("first"), _candidate("second", mean=0.4)],
@@ -145,9 +145,10 @@ def test_incompatible_accepted_reference_is_skipped_with_reason():
         {"min_overlap_days": 120, "correlation_limit": 0.90, "validation_limit": 20},
     )
 
-    assert [candidate.expression_id for candidate in result] == ["first", "second"]
+    assert [candidate.expression_id for candidate in result] == ["first"]
     assert result.comparisons[-1].compatible is False
     assert "incompatible accepted reference first" in (result.comparisons[-1].reason or "")
+    assert "incompatible accepted reference first" in result.rejection_reasons["second"][0]
 
 
 def test_missing_archive_metadata_is_unverifiable_and_never_duplicate():

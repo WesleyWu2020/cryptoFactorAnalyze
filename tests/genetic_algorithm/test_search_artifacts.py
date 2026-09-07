@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import json
+import subprocess
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from Genetic_Algorithm.evolution import Candidate, SearchResult
 from Genetic_Algorithm.expression import Node
@@ -155,6 +157,77 @@ def test_run_search_second_archive_is_cumulative_and_preserves_prior_value_refer
     assert document["candidates"][0]["value_artifact"] == first_entry["value_artifact"]
 
 
+def test_run_search_rejects_same_expression_id_with_incompatible_provenance(
+    tmp_path, monkeypatch
+):
+    audit_path = tmp_path / "audit_train.json"
+    audit_path.write_text(
+        json.dumps({"training_only": True, "fingerprint": "train-fingerprint", "stage": {"name": "train"}}),
+        encoding="utf-8",
+    )
+    dates = pd.date_range("2024-01-01", periods=120, freq="D")
+    columns = [f"S{i:02d}" for i in range(24)]
+    results = iter(
+        (
+            SearchResult(
+                (Candidate(Node("close"), "same-id", (1.0, 1.0, -1)),), (), 1,
+                values_by_id={"same-id": {"values": pd.DataFrame(np.arange(120 * 24, dtype="float64").reshape(120, 24), index=dates, columns=columns)}},
+            ),
+            SearchResult(
+                (Candidate(Node("open"), "same-id", (1.0, 1.0, -1)),), (), 1,
+                values_by_id={"same-id": {"values": pd.DataFrame(np.random.default_rng(9).normal(size=(120, 24)), index=dates, columns=columns)}},
+            ),
+        )
+    )
+    monkeypatch.setattr(search_module, "run_training_audit", lambda *args, **kwargs: audit_path)
+
+    def run(destination, archive_path=None, operator_version="ops-v1"):
+        return search_module.run_search(
+            "unused.h5", audit_path, stage=STAGES["train"], warmup_days=0, fields=["close"],
+            search_stage=lambda path: next(results), artifact_dir=destination,
+            archive_path=archive_path, repository_root=REPOSITORY_ROOT,
+            operator_version=operator_version,
+        )
+
+    first_dir = tmp_path / "first"
+    run(first_dir)
+    second_dir = tmp_path / "second"
+    second = run(second_dir, first_dir / "training_candidates.json", operator_version="ops-v2")
+
+    assert second.candidates == ()
+    dedup = json.loads((second_dir / "deduplication.json").read_text(encoding="utf-8"))
+    reason = dedup["rejection_reasons"]["same-id"][0]
+    assert "incompatible archive reference same-id" in reason
+    archive = json.loads((second_dir / "training_candidates.json").read_text(encoding="utf-8"))
+    assert [entry["expression_id"] for entry in archive["candidates"]] == ["same-id"]
+
+
+@pytest.mark.parametrize("reference", ["../outside.json", "/tmp/outside.json"])
+def test_run_search_rejects_archive_artifact_path_outside_archive_directory(tmp_path, reference, monkeypatch):
+    audit_path = tmp_path / "audit_train.json"
+    audit_path.write_text(
+        json.dumps({"training_only": True, "fingerprint": "train-fingerprint", "stage": {"name": "train"}}),
+        encoding="utf-8",
+    )
+    archive_path = tmp_path / "archive" / "training_candidates.json"
+    archive_path.parent.mkdir()
+    write_artifact(
+        archive_path,
+        {"training_only": True, "candidates": [{
+            "expression_id": "old", "value_artifact": {"path": reference, "sha256": "0" * 64},
+        }]},
+        immutable=True,
+    )
+    monkeypatch.setattr(search_module, "run_training_audit", lambda *args, **kwargs: audit_path)
+
+    with pytest.raises(ValueError, match="path"):
+        search_module.run_search(
+            "unused.h5", audit_path, stage=STAGES["train"], warmup_days=0, fields=["close"],
+            search_stage=lambda path: SearchResult((), (), 0), artifact_dir=tmp_path / "run",
+            archive_path=archive_path, repository_root=REPOSITORY_ROOT,
+        )
+
+
 def test_run_search_rejects_selected_candidate_without_value_panel(tmp_path, monkeypatch):
     audit_path = tmp_path / "audit_train.json"
     audit_path.write_text(
@@ -292,18 +365,19 @@ def test_run_search_provenance_records_effective_config_and_complete_code_paths(
 
 
 def test_working_tree_patch_hash_changes_for_untracked_file(tmp_path):
-    marker = tmp_path / "untracked-marker.txt"
-    marker.write_text("new relevant source\n", encoding="utf-8")
-    # The repository root is fixed; use a temporary untracked file there only
-    # through the test's own isolated git worktree copy.
-    import subprocess
+    tracked = tmp_path / "tracked.txt"
+    tracked.write_text("baseline\n", encoding="utf-8")
     subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
     subprocess.run(["git", "-C", str(tmp_path), "add", "."], check=True)
     subprocess.run(["git", "-C", str(tmp_path), "commit", "-qm", "fixture"], check=True)
     after = working_tree_patch_hash(tmp_path)
+    marker = tmp_path / "untracked-marker.txt"
+    marker.write_text("new relevant source\n", encoding="utf-8")
+    added = working_tree_patch_hash(tmp_path)
     marker.write_text("changed relevant source\n", encoding="utf-8")
     changed = working_tree_patch_hash(tmp_path)
-    assert after != changed
+    assert after != added
+    assert added != changed
 
 
 def test_run_search_loads_existing_archive_for_novelty(tmp_path, monkeypatch):

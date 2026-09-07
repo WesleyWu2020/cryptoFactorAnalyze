@@ -178,8 +178,7 @@ def deduplicate_training(
             )
             if reason is not None:
                 comparisons.append(Comparison(candidate_id, reference_id, 0, None, False, reason))
-                if "unverifiable" in reason:
-                    candidate_reasons.append(reason)
+                candidate_reasons.append(reason)
                 continue
             references.append((reference_id, right, item, values_by_id.get(reference_id)))
         references.extend(
@@ -207,8 +206,7 @@ def deduplicate_training(
             )
             if reason is not None:
                 comparisons.append(Comparison(candidate_id, reference_id, 0, None, False, reason))
-                if "unverifiable" in reason:
-                    candidate_reasons.append(reason)
+                candidate_reasons.append(reason)
                 continue
             if left is None or right is None:
                 reason = f"insufficient overlap with {reference_id}: missing value panel"

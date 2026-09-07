@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 from dataclasses import asdict, replace
@@ -120,6 +121,22 @@ def _result_values(result: Any) -> dict[str, Any]:
     return {}
 
 
+def _confined_reference(root: Path, reference: str, *, label: str) -> Path:
+    """Resolve a manifest reference while keeping it inside its owning directory."""
+    relative = Path(reference)
+    if relative.is_absolute() or ".." in relative.parts:
+        raise ValueError(f"{label} path must be relative and cannot traverse: {reference!r}")
+    root = root.resolve()
+    resolved = (root / relative).resolve()
+    try:
+        common = Path(os.path.commonpath((str(root), str(resolved))))
+    except ValueError as exc:
+        raise ValueError(f"{label} path is outside its owning directory: {reference!r}") from exc
+    if common != root:
+        raise ValueError(f"{label} path is outside its owning directory: {reference!r}")
+    return resolved
+
+
 def _load_archive(path: str | Path | None) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     if path is None:
         return [], {}
@@ -143,7 +160,10 @@ def _load_archive(path: str | Path | None) -> tuple[list[dict[str, Any]], dict[s
         relative, digest = reference.get("path"), reference.get("sha256")
         if not isinstance(relative, str) or not isinstance(digest, str):
             raise ValueError(f"archive value artifact reference is malformed for {identifier}")
-        panels = read_verified_value_artifact(archive_path.parent / relative, expected_sha256=digest)
+        artifact_path = _confined_reference(
+            archive_path.parent, relative, label="archive value artifact"
+        )
+        panels = read_verified_value_artifact(artifact_path, expected_sha256=digest)
         values[identifier] = {
             "values": panels.get(identifier),
             "training_fingerprint": entry.get("training_fingerprint"),
@@ -204,8 +224,10 @@ def _copy_archive_value_artifacts(
         relative = reference.get("path")
         if not isinstance(relative, str):
             raise ValueError("archive value artifact reference is malformed")
-        source = archive_path.parent / relative
-        target = destination / relative
+        source = _confined_reference(
+            archive_path.parent, relative, label="archive value artifact"
+        )
+        target = _confined_reference(destination, relative, label="destination value artifact")
         if not source.is_file():
             raise ValueError(f"archive value artifact is missing: {source}")
         target.parent.mkdir(parents=True, exist_ok=True)
