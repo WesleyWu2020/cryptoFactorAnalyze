@@ -48,6 +48,23 @@ def _score(candidate: Candidate | Sequence[Any]) -> tuple[Any, ...]:
     return tuple(values)
 
 
+def _validate_objective_vectors(candidates: Sequence[Candidate], context: str) -> int:
+    """Require a nonempty, shared objective width at algorithm boundaries."""
+    if not candidates:
+        return 0
+    width = len(_score(candidates[0]))
+    if width == 0:
+        raise ValueError(f"{context} objective vector length must be positive")
+    for candidate in candidates[1:]:
+        candidate_width = len(_score(candidate))
+        if candidate_width != width:
+            raise ValueError(
+                f"{context} objective vector length mismatch: expected {width}, "
+                f"got {candidate_width} for {candidate.expression_id}"
+            )
+    return width
+
+
 def _objective_value(value: Any) -> float:
     """Map an objective to a comparison value without mutating the score."""
     if value is None:
@@ -68,6 +85,7 @@ def _dominates(left: Sequence[float], right: Sequence[float]) -> bool:
 def nondominated_sort(candidates: Iterable[Candidate]) -> tuple[tuple[Candidate, ...], ...]:
     """Return Pareto fronts for maximization objectives in deterministic order."""
     items = sorted(tuple(candidates), key=lambda item: (item.expression_id, _tree_size(item.tree)))
+    _validate_objective_vectors(items, "nondominated sort")
     dominates: dict[int, list[int]] = {i: [] for i in range(len(items))}
     dominated_by = [0] * len(items)
     for i, left in enumerate(items):
@@ -98,6 +116,7 @@ def nondominated_sort(candidates: Iterable[Candidate]) -> tuple[tuple[Candidate,
 
 def crowding_distance(front: Sequence[Candidate]) -> dict[str, float]:
     """Calculate NSGA-II crowding distance for one front."""
+    _validate_objective_vectors(tuple(front), "crowding distance")
     result = {candidate.expression_id: 0.0 for candidate in front}
     if len(front) <= 2:
         return {candidate.expression_id: float("inf") for candidate in front}
@@ -115,7 +134,11 @@ def crowding_distance(front: Sequence[Candidate]) -> dict[str, float]:
                 continue
             previous = _objective_value(_score(ordered[index - 1])[objective])
             following = _objective_value(_score(ordered[index + 1])[objective])
-            result[ordered[index].expression_id] += (following - previous) / (high - low)
+            if not all(np.isfinite(value) for value in (previous, following, low, high)):
+                continue
+            contribution = (following - previous) / (high - low)
+            if np.isfinite(contribution):
+                result[ordered[index].expression_id] += contribution
     return result
 
 
@@ -266,11 +289,12 @@ def search(stage_data: Any, config: Any) -> SearchResult:
     max_attempts = int(_value(config, "max_attempts", population_size * 50))
     cache: dict[str, tuple[tuple[Any, ...], bool, tuple[str, ...], Node]] = {}
     evaluations = 0
+    objective_width: int | None = None
     logs: list[dict[str, Any]] = []
     supplied = list(_value(config, "initial_trees", ()))
 
     def evaluate_pool(trees: Iterable[Node], generation: int) -> tuple[list[Candidate], list[Candidate], dict[str, Any]]:
-        nonlocal evaluations
+        nonlocal evaluations, objective_width
         attempted = 0
         unique = 0
         hits = 0
@@ -300,6 +324,16 @@ def search(stage_data: Any, config: Any) -> SearchResult:
                 except Exception as exc:
                     score, eligible, failure_reasons = (), False, (type(exc).__name__ + ": " + str(exc),)
                 cache[identifier] = (score, eligible, tuple(failure_reasons), canonical)
+            score = tuple(score)
+            if not score:
+                raise ValueError("evaluator objective vector length must be positive")
+            if objective_width is None:
+                objective_width = len(score)
+            elif len(score) != objective_width:
+                raise ValueError(
+                    "evaluator objective vector length mismatch: "
+                    f"expected {objective_width}, got {len(score)} for {identifier}"
+                )
             for reason in failure_reasons:
                 reasons[str(reason)] += 1
             if score:

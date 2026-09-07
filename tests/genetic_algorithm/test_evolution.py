@@ -5,6 +5,7 @@ import pytest
 from Genetic_Algorithm.evolution import (
     Candidate,
     SearchFormationError,
+    crowding_distance,
     nondominated_sort,
     search,
 )
@@ -34,6 +35,53 @@ def test_equal_scores_use_deterministic_expression_id_ties():
     candidates = [_candidate("z", (1.0, 1.0)), _candidate("a", (1.0, 1.0))]
 
     assert [item.expression_id for item in nondominated_sort(candidates)[0]] == ["a", "z"]
+
+
+def test_objective_vectors_must_have_equal_lengths():
+    candidates = [_candidate("a", (1.0, 2.0)), _candidate("b", (1.0,))]
+
+    with pytest.raises(ValueError, match="objective vector length"):
+        nondominated_sort(candidates)
+
+    with pytest.raises(ValueError, match="objective vector length"):
+        crowding_distance(candidates)
+
+
+def test_crowding_distance_handles_incomplete_objectives_without_nan():
+    candidates = [
+        _candidate("missing", (None,)),
+        _candidate("nan", (float("nan"),)),
+        _candidate("negative_infinity", (float("-inf"),)),
+        _candidate("valid", (1.0,)),
+    ]
+
+    distances = crowding_distance(candidates)
+
+    assert all(not (value != value) for value in distances.values())
+    assert distances["valid"] == float("inf")
+    assert distances["missing"] == float("inf")
+    assert distances["nan"] == 0.0
+    assert distances["negative_infinity"] == 0.0
+
+
+def test_malformed_evaluator_objective_vector_is_rejected():
+    with pytest.raises(ValueError, match="objective vector length"):
+        search(
+            {"marker": "synthetic"},
+            {
+                "seed": 5,
+                "population": 2,
+                "generations": 1,
+                "max_depth": 0,
+                "max_nodes": 1,
+                "initial_trees": [Node("close"), Node("open")],
+                "evaluate_candidate": lambda tree, stage_data, labels, config: {
+                    "score": (1.0,) if tree.op == "close" else (1.0, 2.0),
+                    "eligible": True,
+                    "reasons": (),
+                },
+            },
+        )
 
 
 def test_empty_eligible_result_stays_empty():
@@ -165,7 +213,7 @@ def test_invalid_offspring_is_resampled_and_reasons_are_logged():
 
 
 def test_duplicate_canonical_trees_do_not_form_population():
-    with pytest.raises(SearchFormationError, match="unique exploratory candidates 1/2"):
+    with pytest.raises(SearchFormationError, match="unique exploratory candidates 1/2.*after 2/2 attempts"):
         search(
             {"marker": "synthetic"},
             {
