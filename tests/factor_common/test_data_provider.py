@@ -67,6 +67,59 @@ def test_provider_returns_raw_funding_events_with_positive_and_negative_rates(h5
     assert events.mark_price_valid.all()
 
 
+def test_provider_legacy_reads_fixed_format_funding_and_quality_without_queryables(
+    h5_fixture,
+):
+    from data.crypto_quant.store import CryptoQuantStore
+    from factor_common.data_provider import DataProvider
+
+    store = CryptoQuantStore(h5_fixture)
+    fixed_tables = {
+        "funding_events": store.read("funding_events"),
+        "research_panel_daily": store.read("research_panel_daily"),
+    }
+    with pd.HDFStore(h5_fixture, mode="a") as hdf:
+        for name, frame in fixed_tables.items():
+            hdf.put(name, frame, format="fixed")
+
+    provider = DataProvider(h5_fixture)
+    funding = provider.get_funding(
+        start="2024-01-03", end="2024-01-03", symbols=["AUSDT"]
+    )
+    quality = provider.get_quality(
+        start="2024-01-03", end="2024-01-03", symbols=["AUSDT"]
+    )
+
+    assert len(funding) == 2
+    assert quality.loc[(pd.Timestamp("2024-01-03"), "AUSDT"), "has_complete_kline"]
+
+
+def test_provider_cutoff_reads_still_require_queryable_funding_and_quality(
+    h5_fixture,
+):
+    from data.crypto_quant.store import CryptoQuantStore
+    from factor_common.data_provider import DataProvider
+
+    store = CryptoQuantStore(h5_fixture)
+    fixed_tables = {
+        "funding_events": store.read("funding_events"),
+        "research_panel_daily": store.read("research_panel_daily"),
+    }
+    with pd.HDFStore(h5_fixture, mode="a") as hdf:
+        for name, frame in fixed_tables.items():
+            hdf.put(name, frame, format="fixed")
+
+    provider = DataProvider(h5_fixture, as_of="2024-01-05")
+    with pytest.raises(ValueError, match="funding_events.*queryable"):
+        provider.get_funding(
+            start="2024-01-03", end="2024-01-03", symbols=["AUSDT"]
+        )
+    with pytest.raises(ValueError, match="research_panel_daily.*queryable"):
+        provider.get_quality(
+            start="2024-01-03", end="2024-01-03", symbols=["AUSDT"]
+        )
+
+
 def test_provider_returns_panel_quality_without_inference(h5_fixture):
     from factor_common.data_provider import DataProvider
 

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import hashlib
-import inspect
 import json
 import os
 import platform
@@ -21,8 +20,17 @@ from factor_common.data_provider import DataProvider
 from .config import STAGES, Stage
 
 
-_FINGERPRINT_VERSION = 2
+_FINGERPRINT_VERSION = 3
 _OPERATOR_VERSION = "task2-stage-data-v1"
+_CODE_FINGERPRINT_SOURCES = (
+    "Genetic_Algorithm/data.py",
+    "Genetic_Algorithm/config.py",
+    "factor_common/data_provider.py",
+    "data/crypto_quant/reader.py",
+    "data/crypto_quant/store.py",
+    "data/crypto_quant/panel.py",
+    "data/crypto_quant/schemas.py",
+)
 
 
 @dataclass(frozen=True)
@@ -124,10 +132,22 @@ def _fingerprint(
 
 def _code_fingerprint() -> str:
     digest = hashlib.sha256()
-    provider_path = Path(inspect.getsourcefile(DataProvider) or "")
-    for path in (Path(__file__), provider_path):
-        if path.exists():
-            digest.update(path.read_bytes())
+    metadata = {
+        "fingerprint_version": _FINGERPRINT_VERSION,
+        "operator_version": _OPERATOR_VERSION,
+        "source_files": list(_CODE_FINGERPRINT_SOURCES),
+    }
+    digest.update(json.dumps(metadata, sort_keys=True).encode())
+    repository_root = Path(__file__).resolve().parents[1]
+    for relative_path in _CODE_FINGERPRINT_SOURCES:
+        path = repository_root / relative_path
+        if not path.is_file():
+            raise FileNotFoundError(
+                f"stage fingerprint source is missing: {relative_path}"
+            )
+        digest.update(relative_path.encode())
+        digest.update(b"\0")
+        digest.update(path.read_bytes())
     return digest.hexdigest()
 
 
@@ -241,6 +261,9 @@ def load_stage(
         },
         "provenance": {
             "code_fingerprint": code_fingerprint,
+            "fingerprint_version": _FINGERPRINT_VERSION,
+            "operator_version": _OPERATOR_VERSION,
+            "source_files": list(_CODE_FINGERPRINT_SOURCES),
             "environment": {
                 "python": sys.version,
                 "platform": platform.platform(),

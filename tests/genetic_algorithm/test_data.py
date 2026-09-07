@@ -291,3 +291,20 @@ def test_stage_fingerprint_changes_when_code_identity_changes(stage_fixture, mon
     )
 
     assert changed.fingerprint != loaded.fingerprint
+
+
+def test_stage_fingerprint_declares_all_stage_loading_sources():
+    from Genetic_Algorithm import data as data_module
+
+    expected = {
+        "Genetic_Algorithm/data.py",
+        "factor_common/data_provider.py",
+        "data/crypto_quant/reader.py",
+        "data/crypto_quant/store.py",
+        "data/crypto_quant/panel.py",
+        "data/crypto_quant/schemas.py",
+    }
+
+    assert expected.issubset(set(data_module._CODE_FINGERPRINT_SOURCES))
+    assert data_module._FINGERPRINT_VERSION >= 3
+    assert data_module._OPERATOR_VERSION

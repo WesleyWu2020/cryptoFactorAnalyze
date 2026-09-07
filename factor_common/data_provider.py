@@ -188,12 +188,15 @@ class DataProvider:
         start_day, end_day = _requested_range(start, end, self._as_of)
         if end_day < start_day or not requested:
             return pd.DataFrame(columns=FUNDING_FIELDS)
-        _require_hdf_query_columns(
-            self.path, "funding_events", {"funding_time"}, {"funding_time"}
-        )
-        events = self._store.read(
-            "funding_events", where=_event_where(start_day, end_day)
-        )
+        if self._as_of is None:
+            events = self._store.read("funding_events")
+        else:
+            _require_hdf_query_columns(
+                self.path, "funding_events", {"funding_time"}, {"funding_time"}
+            )
+            events = self._store.read(
+                "funding_events", where=_event_where(start_day, end_day)
+            )
         if events.empty:
             return pd.DataFrame(columns=FUNDING_FIELDS)
         required = {"funding_time", "symbol", "funding_rate", "mark_price", "rate_type"}
@@ -222,13 +225,16 @@ class DataProvider:
         result["funding_coverage_status"] = "unknown"
         if len(calendar) == 0:
             return result
-        _require_hdf_query_columns(
-            self.path, "research_panel_daily", {"date"}, {"date"}
-        )
-        panel = self._store.read(
-            "research_panel_daily",
-            where=_daily_where("date", start=calendar[0] if len(calendar) else None, end=calendar[-1] if len(calendar) else None),
-        )
+        if self._as_of is None:
+            panel = self._store.read("research_panel_daily")
+        else:
+            _require_hdf_query_columns(
+                self.path, "research_panel_daily", {"date"}, {"date"}
+            )
+            panel = self._store.read(
+                "research_panel_daily",
+                where=_daily_where("date", start=calendar[0], end=calendar[-1]),
+            )
         if panel.empty or not {"date", "binance_symbol"}.issubset(panel.columns):
             return result
         panel = panel.copy()

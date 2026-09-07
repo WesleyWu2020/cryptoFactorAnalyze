@@ -54,7 +54,11 @@ def _require_hdf_query_columns(
         else:
             storer = hdf.get_storer(table)
             available = set(hdf.select(table, start=0, stop=0).columns)
-            queryable = set(storer.queryables().keys())
+            queryable = (
+                set(storer.queryables().keys())
+                if hasattr(storer, "queryables")
+                else set()
+            )
     missing = columns - available
     if missing:
         raise ValueError(f"{table} missing columns: {sorted(missing)}")
