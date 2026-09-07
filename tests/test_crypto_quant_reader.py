@@ -174,7 +174,13 @@ def test_load_market_history_pushes_date_range_into_hdf_read(tmp_path, monkeypat
         return original_read(self, name, where=where)
 
     monkeypatch.setattr(CryptoQuantStore, "read", read_with_spy)
-    load_market_history(path, date(2024, 3, 10), date(2024, 3, 12), lookback_days=5)
+    load_market_history(
+        path,
+        date(2024, 3, 10),
+        date(2024, 3, 12),
+        lookback_days=5,
+        as_of=date(2024, 3, 12),
+    )
 
     kline_where = next(where for name, where in calls if name == "klines_daily")
     assert kline_where is not None

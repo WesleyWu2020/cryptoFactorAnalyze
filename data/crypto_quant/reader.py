@@ -172,19 +172,23 @@ def load_market_history(
         return pd.DataFrame(columns=_MARKET_OUTPUT_COLUMNS)
 
     kline_start = start_ts - pd.Timedelta(days=lookback_days)
-    _require_hdf_query_columns(
-        Path(path),
-        "klines_daily",
-        set(TABLE_SPECS["klines_daily"].columns),
-        {"date"},
-    )
-    market = store.read(
-        "klines_daily",
-        where=f"date >= '{kline_start}' & date <= '{end_ts}'",
-    )
+    if as_of is None:
+        market = store.read("klines_daily")
+    else:
+        _require_hdf_query_columns(
+            Path(path),
+            "klines_daily",
+            set(TABLE_SPECS["klines_daily"].columns),
+            {"date"},
+        )
+        market = store.read(
+            "klines_daily",
+            where=f"date >= '{kline_start}' & date <= '{end_ts}'",
+        )
     _require_columns(market, set(TABLE_SPECS["klines_daily"].columns), "klines_daily")
     market["date"] = _normalized_dates(market["date"])
     market = market[market["symbol"].astype(str).isin(selected_symbols)]
+    market = market[market["date"].between(kline_start, end_ts)]
     market = market.rename(columns={"symbol": "instrument"})
     return market.loc[:, _MARKET_OUTPUT_COLUMNS].sort_values(["date", "instrument"], kind="mergesort").reset_index(drop=True)
 
@@ -209,11 +213,14 @@ def load_daily_universe(
         end_ts,
         as_of=_normalized_bound(as_of) if as_of is not None else None,
     )
-    _require_hdf_query_columns(Path(path), "research_panel_daily", {"date"}, {"date"})
-    panel = store.read(
-        "research_panel_daily",
-        where=f"date >= '{start_ts}' & date <= '{end_ts}'",
-    )
+    if as_of is None:
+        panel = store.read("research_panel_daily")
+    else:
+        _require_hdf_query_columns(Path(path), "research_panel_daily", {"date"}, {"date"})
+        panel = store.read(
+            "research_panel_daily",
+            where=f"date >= '{start_ts}' & date <= '{end_ts}'",
+        )
     _require_columns(panel, {"date", "binance_symbol", "has_complete_kline", "has_complete_funding"}, "research_panel_daily")
     if panel.empty:
         return {}

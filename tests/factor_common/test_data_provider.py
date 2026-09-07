@@ -94,6 +94,40 @@ def test_provider_legacy_reads_fixed_format_funding_and_quality_without_queryabl
     assert quality.loc[(pd.Timestamp("2024-01-03"), "AUSDT"), "has_complete_kline"]
 
 
+def test_provider_and_readers_use_unbounded_reads_for_fixed_daily_tables_without_cutoff(
+    h5_fixture,
+):
+    from data.crypto_quant.reader import load_daily_universe, load_market_history
+    from data.crypto_quant.store import CryptoQuantStore
+    from factor_common.data_provider import DataProvider
+
+    store = CryptoQuantStore(h5_fixture)
+    fixed_tables = {
+        name: store.read(name)
+        for name in ("klines_daily", "universe_monthly", "research_panel_daily")
+    }
+    with pd.HDFStore(h5_fixture, mode="a") as hdf:
+        for name, frame in fixed_tables.items():
+            hdf.put(name, frame, format="fixed")
+
+    provider = DataProvider(h5_fixture)
+    close = provider.get_single_data(
+        "close", start="2024-01-03", end="2024-01-03"
+    )
+    market = load_market_history(
+        h5_fixture, "2024-01-03", "2024-01-03", lookback_days=0
+    )
+    universe = load_daily_universe(
+        h5_fixture, "2024-01-03", "2024-01-03", require_complete=False
+    )
+
+    assert close.loc[pd.Timestamp("2024-01-03"), "AUSDT"] == pytest.approx(103.0)
+    assert set(market["instrument"]) == {f"{letter}USDT" for letter in "ABCDEF"}
+    assert universe == {
+        pd.Timestamp("2024-01-03"): {f"{letter}USDT" for letter in "ABCDEF"}
+    }
+
+
 def test_provider_cutoff_reads_still_require_queryable_funding_and_quality(
     h5_fixture,
 ):
