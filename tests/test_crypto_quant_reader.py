@@ -251,6 +251,58 @@ def test_load_daily_universe_reports_missing_date_before_hdf_where(tmp_path):
         load_daily_universe(path, date(2024, 3, 9), date(2024, 3, 11))
 
 
+def test_load_daily_universe_pushes_membership_cutoff_before_read(tmp_path, monkeypatch):
+    path = _store_fixture(tmp_path)
+    calls = []
+    original_read = CryptoQuantStore.read
+
+    def read_with_spy(self, name, where=None):
+        calls.append((name, where))
+        return original_read(self, name, where=where)
+
+    monkeypatch.setattr(CryptoQuantStore, "read", read_with_spy)
+    load_daily_universe(path, date(2024, 3, 9), date(2024, 3, 11), as_of=date(2024, 3, 10))
+
+    universe_where = next(where for name, where in calls if name == "universe_monthly")
+    assert universe_where == "decision_date <= '2024-03-10'"
+
+
+def test_load_daily_universe_requires_queryable_decision_date(tmp_path):
+    path = _store_fixture(tmp_path)
+    with pd.HDFStore(path, mode="a") as hdf:
+        universe = hdf.select("universe_monthly")
+        hdf.put(
+            "universe_monthly",
+            universe,
+            format="table",
+            data_columns=["effective_date", "binance_symbol"],
+            index=False,
+        )
+
+    with pytest.raises(ValueError, match="universe_monthly missing queryable columns required for query:.*decision_date"):
+        load_daily_universe(path, date(2024, 3, 9), date(2024, 3, 11), as_of=date(2024, 3, 10))
+
+
+def test_load_daily_universe_without_as_of_supports_legacy_store_without_decision_date(tmp_path):
+    path = _store_fixture(tmp_path)
+    with pd.HDFStore(path, mode="a") as hdf:
+        universe = hdf.select("universe_monthly").drop(columns=["decision_date"])
+        hdf.put(
+            "universe_monthly",
+            universe,
+            format="table",
+            data_columns=["effective_date", "binance_symbol"],
+            index=False,
+        )
+
+    out = load_daily_universe(path, date(2024, 3, 9), date(2024, 3, 11))
+
+    assert out == {
+        pd.Timestamp("2024-03-09"): {"AUSDT", "BUSDT"},
+        pd.Timestamp("2024-03-11"): {"CUSDT"},
+    }
+
+
 def test_filter_factor_output_requires_same_day_membership_and_exact_schema():
     factors = pd.DataFrame({
         "date": ["2024-03-09 12:00", "2024-03-09", "2024-03-10", "2024-03-11"],

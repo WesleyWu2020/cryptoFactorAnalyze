@@ -93,6 +93,21 @@ def _membership_by_date(
     return result
 
 
+def _read_universe(
+    store: CryptoQuantStore,
+    path: Path,
+    end: pd.Timestamp,
+    as_of: date | None,
+) -> pd.DataFrame:
+    if as_of is None:
+        return store.read("universe_monthly")
+    _require_hdf_query_columns(path, "universe_monthly", {"decision_date"}, {"decision_date"})
+    return store.read(
+        "universe_monthly",
+        where=f"decision_date <= '{end.strftime('%Y-%m-%d')}'",
+    )
+
+
 def _knowledge_end(end: pd.Timestamp, as_of: date | None) -> pd.Timestamp:
     if as_of is None:
         return end
@@ -113,7 +128,7 @@ def load_membership_history(
         return {}
     store = CryptoQuantStore(Path(path))
     return _membership_by_date(
-        store.read("universe_monthly"),
+        _read_universe(store, Path(path), end_ts, as_of),
         start_ts,
         end_ts,
         as_of=_normalized_bound(as_of) if as_of is not None else None,
@@ -141,7 +156,7 @@ def load_market_history(
         {str(symbol) for symbol in symbols}
         if symbols is not None
         else set().union(*_membership_by_date(
-            store.read("universe_monthly"),
+            _read_universe(store, Path(path), end_ts, as_of),
             start_ts,
             end_ts,
             as_of=_normalized_bound(as_of) if as_of is not None else None,
@@ -183,7 +198,7 @@ def load_daily_universe(
         return {}
     store = CryptoQuantStore(Path(path))
     expected = _membership_by_date(
-        store.read("universe_monthly"),
+        _read_universe(store, Path(path), end_ts, as_of),
         start_ts,
         end_ts,
         as_of=_normalized_bound(as_of) if as_of is not None else None,

@@ -8,7 +8,11 @@ from typing import Iterable
 import pandas as pd
 
 from data.crypto_quant.panel import annotate_funding_prices
-from data.crypto_quant.reader import load_market_history, load_membership_history
+from data.crypto_quant.reader import (
+    _require_hdf_query_columns,
+    load_market_history,
+    load_membership_history,
+)
 from data.crypto_quant.schemas import TABLE_SPECS
 from data.crypto_quant.store import CryptoQuantStore
 
@@ -61,6 +65,24 @@ def _symbol_list(symbols: Iterable[str] | str) -> list[str]:
     return list(dict.fromkeys(str(symbol) for symbol in symbols))
 
 
+def _daily_where(column: str, *, start: pd.Timestamp | None = None, end: pd.Timestamp | None = None) -> str:
+    clauses = []
+    if start is not None:
+        clauses.append(f"{column} >= '{start.strftime('%Y-%m-%d')}'")
+    if end is not None:
+        clauses.append(f"{column} <= '{end.strftime('%Y-%m-%d')}'")
+    return " & ".join(clauses)
+
+
+def _event_where(start: pd.Timestamp, end: pd.Timestamp) -> str:
+    next_midnight = end + pd.Timedelta(days=1)
+    return (
+        "funding_time >= "
+        f"'{start.strftime('%Y-%m-%d %H:%M:%S+00:00')}' & funding_time < "
+        f"'{next_midnight.strftime('%Y-%m-%d %H:%M:%S+00:00')}'"
+    )
+
+
 class DataProvider:
     """Expose raw market/events and point-in-time quality on daily axes.
 
@@ -74,18 +96,23 @@ class DataProvider:
         self.path = Path(path)
         self._as_of = _normalized_day(as_of) if as_of is not None else None
         self._store = CryptoQuantStore(self.path)
-        market = self._store.read("klines_daily")
-        if "date" in market.columns and self._as_of is not None:
-            dates = pd.to_datetime(market["date"], errors="coerce", utc=True).dt.tz_localize(None).dt.normalize()
-            market = market[dates <= self._as_of]
+        if self._as_of is not None:
+            _require_hdf_query_columns(self.path, "klines_daily", {"date"}, {"date"})
+            market = self._store.read("klines_daily", where=_daily_where("date", end=self._as_of))
+        else:
+            market = self._store.read("klines_daily")
         market_symbols = set(market["symbol"].astype(str)) if "symbol" in market else set()
-        universe = self._store.read("universe_monthly")
+        if self._as_of is not None:
+            _require_hdf_query_columns(
+                self.path, "universe_monthly", {"decision_date"}, {"decision_date"}
+            )
+            universe = self._store.read(
+                "universe_monthly",
+                where=_daily_where("decision_date", end=self._as_of),
+            )
+        else:
+            universe = self._store.read("universe_monthly")
         if "binance_symbol" in universe.columns:
-            if self._as_of is not None and "decision_date" in universe.columns:
-                decision_dates = pd.to_datetime(
-                    universe["decision_date"], errors="coerce", utc=True
-                ).dt.tz_localize(None).dt.normalize()
-                universe = universe[decision_dates <= self._as_of]
             universe_symbols = set(universe["binance_symbol"].astype(str))
         else:
             universe_symbols = set()
@@ -96,12 +123,14 @@ class DataProvider:
         return list(MARKET_FIELDS)
 
     def get_time_range(self) -> tuple[pd.Timestamp | None, pd.Timestamp | None]:
-        market = self._store.read("klines_daily")
+        if self._as_of is not None:
+            _require_hdf_query_columns(self.path, "klines_daily", {"date"}, {"date"})
+            market = self._store.read("klines_daily", where=_daily_where("date", end=self._as_of))
+        else:
+            market = self._store.read("klines_daily")
         if market.empty or "date" not in market:
             return None, None
         dates = pd.to_datetime(market["date"], errors="raise", utc=True).dt.tz_localize(None).dt.normalize()
-        if self._as_of is not None:
-            dates = dates[dates <= self._as_of]
         if dates.empty:
             return None, None
         return dates.min(), dates.max()
@@ -159,7 +188,12 @@ class DataProvider:
         start_day, end_day = _requested_range(start, end, self._as_of)
         if end_day < start_day or not requested:
             return pd.DataFrame(columns=FUNDING_FIELDS)
-        events = self._store.read("funding_events")
+        _require_hdf_query_columns(
+            self.path, "funding_events", {"funding_time"}, {"funding_time"}
+        )
+        events = self._store.read(
+            "funding_events", where=_event_where(start_day, end_day)
+        )
         if events.empty:
             return pd.DataFrame(columns=FUNDING_FIELDS)
         required = {"funding_time", "symbol", "funding_rate", "mark_price", "rate_type"}
@@ -186,7 +220,15 @@ class DataProvider:
         )
         result = pd.DataFrame(index=index, columns=QUALITY_FIELDS)
         result["funding_coverage_status"] = "unknown"
-        panel = self._store.read("research_panel_daily")
+        if len(calendar) == 0:
+            return result
+        _require_hdf_query_columns(
+            self.path, "research_panel_daily", {"date"}, {"date"}
+        )
+        panel = self._store.read(
+            "research_panel_daily",
+            where=_daily_where("date", start=calendar[0] if len(calendar) else None, end=calendar[-1] if len(calendar) else None),
+        )
         if panel.empty or not {"date", "binance_symbol"}.issubset(panel.columns):
             return result
         panel = panel.copy()

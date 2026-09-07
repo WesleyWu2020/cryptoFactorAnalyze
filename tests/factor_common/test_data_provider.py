@@ -193,3 +193,98 @@ def test_provider_cutoff_truncates_market_and_membership_knowledge_together(h5_f
     assert close.index.equals(pd.date_range("2024-01-03", "2024-01-05", freq="D"))
     assert mask.index.equals(close.index)
     assert not mask.loc["2024-01-03", "GUSDT"]
+
+
+def test_provider_quality_empty_cutoff_calendar_does_not_read_panel_unbounded(
+    h5_fixture, monkeypatch
+):
+    from factor_common import data_provider as module
+    from data.crypto_quant.store import CryptoQuantStore
+
+    calls = []
+    original = CryptoQuantStore
+
+    class RecordingStore(original):
+        def read(self, name, where=None):
+            calls.append((name, where))
+            if name == "research_panel_daily" and not where:
+                raise AssertionError("unbounded read for research_panel_daily")
+            return super().read(name, where=where)
+
+    monkeypatch.setattr(module, "CryptoQuantStore", RecordingStore)
+    provider = module.DataProvider(h5_fixture, as_of="2024-01-05")
+
+    quality = provider.get_quality(
+        start="2024-01-06", end="2024-01-08", symbols=["AUSDT", "BUSDT"]
+    )
+
+    assert quality.empty
+    assert quality.index.names == ["date", "instrument"]
+    assert list(quality.columns) == list(module.QUALITY_FIELDS)
+    assert not any(name == "research_panel_daily" for name, _ in calls)
+
+
+def test_provider_cutoff_pushes_bounded_reads_and_excludes_next_midnight_event(
+    h5_fixture, monkeypatch
+):
+    from factor_common import data_provider as module
+    from data.crypto_quant import reader as reader_module
+    from data.crypto_quant.store import CryptoQuantStore
+
+    calls = []
+    original = CryptoQuantStore
+
+    class RecordingStore(original):
+        def read(self, name, where=None):
+            calls.append((name, where))
+            if self.path == h5_fixture:
+                if where is None:
+                    raise AssertionError(f"unbounded read for {name}")
+                upper_bounds = {
+                    "klines_daily": ("date", "<= '2024-01-05"),
+                    "universe_monthly": ("decision_date", "<= '2024-01-05"),
+                    "funding_events": ("funding_time", "< '2024-01-06 00:00:00+00:00'"),
+                    "research_panel_daily": ("date", "<= '2024-01-05"),
+                }
+                column, bound = upper_bounds.get(name, (None, None))
+                if column is not None:
+                    assert column in where and bound in where, (name, where)
+            return super().read(name, where=where)
+
+    monkeypatch.setattr(module, "CryptoQuantStore", RecordingStore)
+    monkeypatch.setattr(reader_module, "CryptoQuantStore", RecordingStore)
+    store = original(h5_fixture)
+    future_kline = store.read("klines_daily").iloc[[0]].copy()
+    future_kline["date"] = pd.Timestamp("2024-01-06")
+    future_kline["symbol"] = "ZUSDT"
+    store.replace(
+        "klines_daily",
+        pd.concat([store.read("klines_daily"), future_kline], ignore_index=True),
+    )
+    events = store.read("funding_events")
+    events = pd.concat([
+        events,
+        pd.DataFrame([{
+            "funding_time": pd.Timestamp("2024-01-06", tz="UTC"),
+            "symbol": "AUSDT",
+            "funding_rate": 0.004,
+            "mark_price": 106.0,
+            "rate_type": "Regular",
+        }]),
+    ], ignore_index=True)
+    store.replace("funding_events", events)
+
+    provider = module.DataProvider(h5_fixture, as_of="2024-01-05")
+    assert "ZUSDT" not in provider.symbols
+    provider.get_single_data("close", start="2024-01-03", end="2024-01-05")
+    provider.get_universe(start="2024-01-03", end="2024-01-05")
+    funding = provider.get_funding(start="2024-01-05", end="2024-01-05", symbols=["AUSDT"])
+    provider.get_quality(start="2024-01-03", end="2024-01-05", symbols=["AUSDT"])
+
+    assert not (funding["funding_time"] == pd.Timestamp("2024-01-06", tz="UTC")).any()
+    by_name = {}
+    for name, where in calls:
+        by_name.setdefault(name, []).append(where)
+    assert any("date <= '2024-01-05'" in where for where in by_name["klines_daily"])
+    assert any("decision_date <= '2024-01-05'" in where for where in by_name["universe_monthly"])
+    assert any("funding_time < '2024-01-06 00:00:00+00:00'" in where for where in by_name["funding_events"])
