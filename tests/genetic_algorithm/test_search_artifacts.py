@@ -357,7 +357,7 @@ def test_prepare_rejects_dangling_backup_symlink_before_writing_journal(tmp_path
 def test_publish_recovery_restores_backup_after_crash_before_stage_rename(tmp_path):
     destination = tmp_path / "run"
     backup = tmp_path / ".run.audit-backup"
-    staging = tmp_path / ".run.staging"
+    staging = tmp_path / ".run.abcdef12"
     backup.mkdir()
     (backup / "old").write_text("old", encoding="utf-8")
     staging.mkdir()
@@ -385,7 +385,7 @@ def test_publish_recovery_accepts_relative_destination(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     destination = Path("run")
     backup = tmp_path / ".run.audit-backup"
-    staging = tmp_path / ".run.staging"
+    staging = tmp_path / ".run.abcdef12"
     backup.mkdir()
     (backup / "old").write_text("old", encoding="utf-8")
     staging.mkdir()
@@ -415,7 +415,7 @@ def test_publish_recovery_normalizes_destination_alias(tmp_path):
     alias_parent.symlink_to(real_parent, target_is_directory=True)
     destination = alias_parent / "run"
     backup = real_parent / ".run.audit-backup"
-    staging = real_parent / ".run.staging"
+    staging = real_parent / ".run.abcdef12"
     backup.mkdir()
     (backup / "old").write_text("old", encoding="utf-8")
     staging.mkdir()
@@ -464,6 +464,32 @@ def test_publish_recovery_rejects_invalid_journal_paths(tmp_path, backup, stagin
     with pytest.raises(ValueError, match="publish journal"):
         search_module._recover_publish_destination(destination)
 
+    assert journal.exists()
+
+
+def test_publish_recovery_rejects_forged_regular_file_backup_without_touching_it(tmp_path):
+    destination = tmp_path / "run"
+    sensitive = tmp_path / "sensitive"
+    sensitive.write_text("keep", encoding="utf-8")
+    staging = tmp_path / ".run.abcdef12"
+    staging.mkdir()
+    journal = tmp_path / ".run.publish.json"
+    journal.write_text(
+        json.dumps({
+            "version": 1,
+            "destination": destination.name,
+            "backup": sensitive.name,
+            "staging": staging.name,
+        }),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="publish journal"):
+        search_module._recover_publish_destination(destination)
+
+    assert sensitive.is_file()
+    assert sensitive.read_text(encoding="utf-8") == "keep"
+    assert staging.is_dir()
     assert journal.exists()
 
 

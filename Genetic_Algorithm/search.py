@@ -402,6 +402,39 @@ def _reject_symlink(path: Path, label: str) -> None:
         raise FileExistsError(f"{label} path is unsafe: {path}")
 
 
+def _validate_publish_recovery_name(
+    destination: Path, value: str, *, key: str
+) -> None:
+    path = Path(value)
+    if path.is_absolute() or path.parent != Path("."):
+        raise ValueError(f"publish journal path must be a sibling name: {key}")
+    if key == "destination":
+        valid = value == destination.name
+    elif key == "backup":
+        valid = value == f".{destination.name}.audit-backup"
+    else:
+        prefix = f".{destination.name}."
+        token = value[len(prefix):] if value.startswith(prefix) else ""
+        valid = (
+            bool(token)
+            and len(token) == 8
+            and all(character in "abcdefghijklmnopqrstuvwxyz0123456789_" for character in token)
+        )
+    if not valid:
+        raise ValueError(f"publish journal path has an invalid {key} name: {value!r}")
+
+
+def _validate_publish_recovery_artifact(path: Path, *, key: str) -> None:
+    if not os.path.lexists(path):
+        return
+    try:
+        mode = os.lstat(path).st_mode
+    except OSError as exc:
+        raise ValueError(f"publish journal path is unsafe: {path}") from exc
+    if stat.S_ISLNK(mode) or not stat.S_ISDIR(mode):
+        raise ValueError(f"publish journal {key} path is unsafe: {path}")
+
+
 def _recover_publish_destination(destination: Path) -> None:
     """Resolve an interrupted immutable directory publication deterministically."""
     destination = Path(destination)
@@ -425,22 +458,17 @@ def _recover_publish_destination(destination: Path) -> None:
     if journal.get("version") != 1:
         raise ValueError(f"unsupported publish journal: {journal_path}")
     parent = destination.parent.resolve()
+    _validate_publish_recovery_artifact(destination, key="destination")
     paths = {}
     for key in ("destination", "staging"):
         value = journal.get(key)
         if not isinstance(value, str):
             raise ValueError(f"invalid publish journal field: {key}")
+        _validate_publish_recovery_name(destination, value, key=key)
         path = Path(value)
-        if path.is_absolute() or path.parent != Path("."):
-            raise ValueError(f"publish journal path must be a sibling name: {key}")
         original = parent / path
-        if key in {"staging", "backup"} and os.path.lexists(original):
-            try:
-                original_mode = os.lstat(original).st_mode
-            except OSError as exc:
-                raise ValueError(f"publish journal path is unsafe: {original}") from exc
-            if stat.S_ISLNK(original_mode):
-                raise ValueError(f"publish journal path is unsafe: {original}")
+        if key == "staging":
+            _validate_publish_recovery_artifact(original, key=key)
         resolved = original.resolve()
         try:
             resolved.relative_to(parent)
@@ -453,17 +481,10 @@ def _recover_publish_destination(destination: Path) -> None:
     if backup_name is not None:
         if not isinstance(backup_name, str):
             raise ValueError("invalid publish journal field: backup")
+        _validate_publish_recovery_name(destination, backup_name, key="backup")
         backup_path = Path(backup_name)
-        if backup_path.is_absolute() or backup_path.parent != Path("."):
-            raise ValueError("publish journal path must be a sibling name: backup")
         original = parent / backup_path
-        if os.path.lexists(original):
-            try:
-                original_mode = os.lstat(original).st_mode
-            except OSError as exc:
-                raise ValueError(f"publish journal path is unsafe: {original}") from exc
-            if stat.S_ISLNK(original_mode):
-                raise ValueError(f"publish journal path is unsafe: {original}")
+        _validate_publish_recovery_artifact(original, key="backup")
         resolved = original.resolve()
         try:
             resolved.relative_to(parent)
