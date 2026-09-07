@@ -178,6 +178,34 @@ def test_evaluate_does_not_persist_evaluation_by_default(tmp_path, h5_fixture, f
     assert list((tmp_path / "factor_results").glob("mom1.evaluation*")) == []
 
 
+def test_cached_values_are_masked_by_current_point_in_time_universe(
+    manager, factor_file
+):
+    first = manager.evaluate(str(factor_file), params=dict(BASE_PARAMS), plot=False)
+    factor_path = Path(first["paths"]["factor_path"])
+    cached = pd.read_parquet(factor_path)
+    stale_row = pd.DataFrame(
+        {
+            "date": [pd.Timestamp("2024-01-07")],
+            "instrument": ["AUSDT"],
+            "factor": [123.0],
+        }
+    )
+    cached = cached[
+        ~(
+            (pd.to_datetime(cached["date"]) == pd.Timestamp("2024-01-07"))
+            & (cached["instrument"] == "AUSDT")
+        )
+    ]
+    pd.concat([cached, stale_row], ignore_index=True).to_parquet(
+        factor_path, index=False
+    )
+
+    second = manager.evaluate(str(factor_file), params=dict(BASE_PARAMS), plot=False)
+
+    assert pd.isna(second["factor_value"].loc["2024-01-07", "AUSDT"])
+
+
 def test_cached_context_eligible_values_recompute_quality_diagnostics(
     manager, tmp_path, monkeypatch
 ):
@@ -199,6 +227,42 @@ def test_cached_context_eligible_values_recompute_quality_diagnostics(
     assert first["run_id"] == second["run_id"]
     assert first["diagnostics"]["value"]["ineligible_count"] >= 2
     assert second["diagnostics"]["value"] == first["diagnostics"]["value"]
+
+
+def test_context_eligible_cache_hit_recomputes_formula_with_current_context(
+    manager, tmp_path, monkeypatch
+):
+    factor_file = _write_factor(
+        tmp_path,
+        name="context_rank",
+        formula="return close.where(data_ctx['__eligible__']).rank(axis=1, pct=True)",
+        context_eligible=True,
+    )
+    original_get_quality = manager.dp.get_quality
+    changed = False
+    original_load_cached_value = manager.storage.load_cached_value
+    cache_loads = 0
+
+    def get_quality_with_changed_eligibility(*, start, end, symbols):
+        quality = original_get_quality(start=start, end=end, symbols=symbols).copy()
+        if changed:
+            quality.loc[(pd.Timestamp("2024-01-07"), "AUSDT"), "has_complete_kline"] = False
+        return quality
+
+    def load_cached_value(*args, **kwargs):
+        nonlocal cache_loads
+        cache_loads += 1
+        return original_load_cached_value(*args, **kwargs)
+
+    monkeypatch.setattr(manager.dp, "get_quality", get_quality_with_changed_eligibility)
+    monkeypatch.setattr(manager.storage, "load_cached_value", load_cached_value)
+    first = manager.evaluate(str(factor_file), params=dict(BASE_PARAMS), plot=False)
+    changed = True
+    second = manager.evaluate(str(factor_file), params=dict(BASE_PARAMS), plot=False)
+
+    assert cache_loads == 0
+    assert pd.isna(second["factor_value"].loc["2024-01-07", "AUSDT"])
+    assert first["factor_value"].loc["2024-01-07", "BUSDT"] != second["factor_value"].loc["2024-01-07", "BUSDT"]
 
 
 def test_evaluate_dataframe_long_table(manager):

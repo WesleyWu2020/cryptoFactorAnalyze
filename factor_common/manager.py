@@ -403,15 +403,17 @@ class FactorManager:
                 "input_hashes": input_hashes,
                 "pipeline_fingerprint": value_pipeline_fingerprint(),
             }
-            cached = self.storage.load_cached_value(
-                factor_id,
-                source_sha256=spec.source_sha256,
-                settings=spec.setting,
-                requested_start=_iso(start),
-                requested_end=_iso(end),
-                source_stat=stat_before,
-                pipeline_fingerprint=value_metadata["pipeline_fingerprint"],
-            )
+            if not spec.setting.get("context_eligible", False):
+                cached = self.storage.load_cached_value(
+                    factor_id,
+                    source_sha256=spec.source_sha256,
+                    settings=spec.setting,
+                    requested_start=_iso(start),
+                    requested_end=_iso(end),
+                    source_stat=stat_before,
+                    pipeline_fingerprint=value_metadata["pipeline_fingerprint"],
+                    input_hashes=input_hashes,
+                )
             if cached is not None:
                 values, cached_payload = cached
                 eligible = self.dp.get_universe(start=start, end=end)

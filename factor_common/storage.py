@@ -396,12 +396,15 @@ class FactorStorage:
         requested_end: str,
         source_stat: Mapping | None = None,
         pipeline_fingerprint: str | None = None,
+        input_hashes: Mapping | None = None,
     ) -> tuple[pd.DataFrame, dict[str, Any]] | None:
-        """Load a flat factor only when source/settings/date metadata still fit.
+        """Load a flat factor only when all value-input metadata still fits.
 
         ``pipeline_fingerprint`` identifies the value-pipeline code that
         produced the matrix; caches written before the fingerprint existed
         (or by older code) are rejected rather than silently reused.
+        ``input_hashes`` performs the same check for the actual market and
+        membership inputs used by the requested window.
         """
         if not self.flat:
             return None
@@ -425,6 +428,10 @@ class FactorStorage:
             if pipeline_fingerprint is not None and metadata.get(
                 "pipeline_fingerprint"
             ) != pipeline_fingerprint:
+                return None
+            if input_hashes is not None and _canonical_json(
+                metadata.get("input_hashes")
+            ) != _canonical_json(input_hashes):
                 return None
             table = pd.read_parquet(factor_path)
             if table.duplicated(["date", "instrument"]).any():

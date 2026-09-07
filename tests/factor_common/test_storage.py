@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import replace
 
 import numpy as np
@@ -115,6 +116,37 @@ def test_flat_factor_cache_pipeline_fingerprint_mismatch_is_a_miss(tmp_path):
     ) is None
     assert store.load_cached_value(
         "momentum", pipeline_fingerprint=None, **query
+    ) is not None
+
+
+def test_flat_factor_cache_input_hash_mismatch_is_a_miss(tmp_path):
+    store = FactorStorage(tmp_path, flat=True)
+    source = tmp_path / "source.bin"
+    source.write_bytes(b"abc")
+    source_stat = snapshot_source_stats([source])
+    store.save_value(
+        "momentum", _matrix(), _metadata(source_stat_before=source_stat)
+    )
+    query = {
+        "source_sha256": "abc",
+        "settings": {"window": 5},
+        "requested_start": "2024-01-01",
+        "requested_end": "2024-01-02",
+        "source_stat": source_stat,
+    }
+    original_mtime_ns = source.stat().st_mtime_ns
+    source.write_bytes(b"xyz")
+    os.utime(source, ns=(original_mtime_ns, original_mtime_ns))
+    assert snapshot_source_stats([source]) == source_stat
+    assert store.load_cached_value(
+        "momentum",
+        input_hashes={"close": "h-close", "membership": "changed"},
+        **query,
+    ) is None
+    assert store.load_cached_value(
+        "momentum",
+        input_hashes={"close": "h-close", "membership": "h-member"},
+        **query,
     ) is not None
 
 
