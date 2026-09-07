@@ -89,7 +89,7 @@ def run_search(
         selected_code_paths=tuple(
             dict.fromkeys((*tuple(selected_code_paths), *_default_code_paths(repository_root)))
         ),
-        package_names=tuple(package_names) or ("numpy", "pandas", "tables"),
+        package_names=tuple(package_names),
         seed=(seed if seed is not None else int((config or {}).get("seed", 42))),
         operator_version=operator_version,
         backtest_profile=_resolve_backtest_profile(backtest_profile),
@@ -174,11 +174,16 @@ def _load_archive(path: str | Path | None) -> tuple[list[dict[str, Any]], dict[s
 
 def _default_code_paths(repository_root: str | Path) -> tuple[str, ...]:
     candidates = (
+        "Genetic_Algorithm/data.py",
         "Genetic_Algorithm/artifacts.py", "Genetic_Algorithm/search.py",
         "Genetic_Algorithm/selection.py", "Genetic_Algorithm/evolution.py",
         "Genetic_Algorithm/expression.py", "Genetic_Algorithm/evaluator.py",
         "Genetic_Algorithm/fitness.py", "Genetic_Algorithm/operators.py",
         "Genetic_Algorithm/features.py", "factor_common/labels.py",
+        "factor_common/data_provider.py",
+        "data/crypto_quant/reader.py", "data/crypto_quant/store.py",
+        "data/crypto_quant/panel.py", "data/crypto_quant/schemas.py",
+        "data/crypto_quant/config.py",
         "Genetic_Algorithm/config.py", "Genetic_Algorithm/configs/default.json",
         "Genetic_Algorithm/configs/smoke.json",
     )

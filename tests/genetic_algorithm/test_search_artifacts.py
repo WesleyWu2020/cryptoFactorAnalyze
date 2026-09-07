@@ -364,6 +364,47 @@ def test_run_search_provenance_records_effective_config_and_complete_code_paths(
     assert "Genetic_Algorithm/configs/smoke.json" in code_paths
 
 
+def test_run_search_provenance_fingerprints_stage_read_sources_and_merges_package_defaults(
+    tmp_path, monkeypatch
+):
+    audit_path = tmp_path / "audit_train.json"
+    audit_path.write_text(
+        json.dumps({"training_only": True, "fingerprint": "train-fingerprint", "stage": {"name": "train"}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(search_module, "run_training_audit", lambda *args, **kwargs: audit_path)
+
+    search_module.run_search(
+        "unused.h5", audit_path, stage=STAGES["train"], warmup_days=0, fields=["close"],
+        search_stage=lambda path: SearchResult((), (), 0), artifact_dir=tmp_path / "run",
+        repository_root=REPOSITORY_ROOT, package_names=("custom-provenance-package",),
+    )
+
+    provenance = json.loads((tmp_path / "run" / "provenance.json").read_text(encoding="utf-8"))
+    code_paths = provenance["selected_code_content_hashes"]
+    for path in (
+        "Genetic_Algorithm/data.py",
+        "factor_common/data_provider.py",
+        "data/crypto_quant/reader.py",
+        "data/crypto_quant/store.py",
+        "data/crypto_quant/panel.py",
+        "data/crypto_quant/schemas.py",
+        "data/crypto_quant/config.py",
+        "Genetic_Algorithm/config.py",
+        "Genetic_Algorithm/configs/default.json",
+        "Genetic_Algorithm/configs/smoke.json",
+    ):
+        assert path in code_paths
+
+    package_versions = provenance["package_versions"]
+    for package in (
+        "pandas", "numpy", "scipy", "pyecharts", "matplotlib", "python-binance",
+        "tqdm", "flask", "requests", "tables", "pyarrow", "pytest",
+        "nbformat", "nbclient", "ipykernel", "custom-provenance-package",
+    ):
+        assert package in package_versions
+
+
 def test_working_tree_patch_hash_changes_for_untracked_file(tmp_path):
     tracked = tmp_path / "tracked.txt"
     tracked.write_text("baseline\n", encoding="utf-8")

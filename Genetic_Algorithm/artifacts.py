@@ -7,6 +7,7 @@ import importlib.metadata
 import json
 import math
 import os
+import re
 import subprocess
 import tempfile
 from dataclasses import dataclass
@@ -19,6 +20,35 @@ import pandas as pd
 
 _DIGEST_FIELD = "sha256"
 _VALUE_ARTIFACT_VERSION = 1
+
+
+def _requirement_names(repository_root: Path) -> tuple[str, ...]:
+    """Return direct distribution names declared by the project requirements."""
+    names: dict[str, str] = {}
+    visited: set[Path] = set()
+
+    def read(path: Path) -> None:
+        path = path.resolve()
+        if path in visited or not path.is_file():
+            return
+        visited.add(path)
+        for raw_line in path.read_text(encoding="utf-8").splitlines():
+            line = raw_line.split("#", 1)[0].strip()
+            if not line:
+                continue
+            if line.startswith(('-r ', '--requirement ')):
+                read(path.parent / line.split(maxsplit=1)[1].strip())
+                continue
+            if line.startswith(('-', '--')):
+                continue
+            match = re.match(r"([A-Za-z0-9][A-Za-z0-9._-]*)", line)
+            if match:
+                name = match.group(1)
+                names.setdefault(name.lower(), name)
+
+    read(repository_root / "requirements.txt")
+    read(repository_root / "requirements-dev.txt")
+    return tuple(names[key] for key in sorted(names))
 
 
 @dataclass(frozen=True)
@@ -279,6 +309,9 @@ def build_provenance(
         str(Path(path)): _file_hash(root / path) for path in sorted(map(str, selected_code_paths))
     }
     versions = {}
+    package_names = tuple(
+        dict.fromkeys((*_requirement_names(root), *(str(name) for name in package_names)))
+    )
     for name in sorted(package_names):
         try:
             versions[name] = importlib.metadata.version(name)
