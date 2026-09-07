@@ -80,4 +80,5 @@ reports/*
 
 # Portfolio layer outputs
 portfolio/output/
+Genetic_Algorithm/runs/
 .worktrees/
