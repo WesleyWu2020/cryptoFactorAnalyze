@@ -303,6 +303,29 @@ def test_run_search_does_not_publish_partial_directory_when_commit_fails(tmp_pat
     assert not list(tmp_path.glob(".run.*"))
 
 
+def test_run_search_cleans_staging_when_provenance_fails(tmp_path, monkeypatch):
+    audit_path = tmp_path / "audit_train.json"
+    audit_path.write_text(
+        json.dumps({"training_only": True, "fingerprint": "train-fingerprint", "stage": {"name": "train"}}),
+        encoding="utf-8",
+    )
+    destination = tmp_path / "run"
+    invalid_code_path = tmp_path / "outside.py"
+    invalid_code_path.write_text("VALUE = 1\n", encoding="utf-8")
+    monkeypatch.setattr(search_module, "run_training_audit", lambda *args, **kwargs: audit_path)
+
+    with pytest.raises(ValueError, match="repository"):
+        search_module.run_search(
+            "unused.h5", audit_path, stage=STAGES["train"], warmup_days=0,
+            fields=["close"], search_stage=lambda path: SearchResult((), (), 0),
+            artifact_dir=destination, repository_root=REPOSITORY_ROOT,
+            selected_code_paths=[invalid_code_path],
+        )
+
+    assert not destination.exists()
+    assert not list(tmp_path.glob(".run.*"))
+
+
 def test_existing_published_run_survives_failure_between_backup_and_stage_publish(
     tmp_path, monkeypatch
 ):

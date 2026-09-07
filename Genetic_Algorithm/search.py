@@ -729,26 +729,27 @@ def _write_training_artifacts(
     if hasattr(result, "candidates") and tuple(selected) != candidates:
         result = replace(result, candidates=tuple(selected))
     destination = Path(artifact_dir)
-    staging, destination_backup = _prepare_publish_destination(destination, Path(audit_path))
-    provenance = build_provenance(
-        config=_resolved_config(config),
-        stage_content_hashes={"train": training_fingerprint},
-        selected_code_paths=selected_code_paths,
-        repository_root=repository_root,
-        package_names=package_names,
-        seed=seed,
-        operator_version=operator_version,
-        backtest_profile=backtest_profile,
-        experiment_id=experiment_id,
-        validation_attempts=validation_attempts,
-        validation_experiment_id=validation_experiment_id,
-    )
-    value_panels = {
-        candidate.expression_id: _frame(current_values.get(candidate.expression_id))
-        for candidate in selected
-        if _frame(current_values.get(candidate.expression_id)) is not None
-    }
+    staging: Path | None = None
     try:
+        staging, destination_backup = _prepare_publish_destination(destination, Path(audit_path))
+        provenance = build_provenance(
+            config=_resolved_config(config),
+            stage_content_hashes={"train": training_fingerprint},
+            selected_code_paths=selected_code_paths,
+            repository_root=repository_root,
+            package_names=package_names,
+            seed=seed,
+            operator_version=operator_version,
+            backtest_profile=backtest_profile,
+            experiment_id=experiment_id,
+            validation_attempts=validation_attempts,
+            validation_experiment_id=validation_experiment_id,
+        )
+        value_panels = {
+            candidate.expression_id: _frame(current_values.get(candidate.expression_id))
+            for candidate in selected
+            if _frame(current_values.get(candidate.expression_id)) is not None
+        }
         _copy_archive_value_artifacts(archive_path, archive_entries, staging)
         value_artifact_path = staging / "training_values_archive.json"
         if value_artifact_path.exists():
@@ -801,7 +802,7 @@ def _write_training_artifacts(
         _publish_staging_directory(staging, destination, destination_backup)
     except Exception:
         _recover_publish_destination(destination)
-        if staging.exists():
+        if staging is not None and staging.exists():
             _remove_path(staging)
         raise
     return result
