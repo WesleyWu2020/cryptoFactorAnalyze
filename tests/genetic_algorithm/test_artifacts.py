@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import math
 import os
 
@@ -96,6 +97,18 @@ def test_manifest_is_immutable_and_verified(tmp_path):
     with pytest.raises(ValueError, match="hash"):
         read_verified_manifest(path)
 
+
+def test_manifest_verification_rejects_nonfinite_json_token_even_with_normalized_digest(tmp_path):
+    path = tmp_path / "manifest.json"
+    unsigned = {"metrics": {"ic": None}, "seed": 7}
+    digest = hashlib.sha256(
+        json.dumps(unsigned, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
+    ).hexdigest()
+    path.write_text('{"metrics":{"ic":NaN},"seed":7,"sha256":"' + digest + '"}', encoding="utf-8")
+
+    with pytest.raises(ValueError, match="nonfinite"):
+        read_verified_manifest(path)
+
 def test_nonfinite_values_are_serialized_as_null_and_progress_is_replaceable(tmp_path):
     path = tmp_path / "progress.json"
     write_artifact(path, {"nan": math.nan, "positive": math.inf, "negative": -math.inf})
@@ -140,6 +153,26 @@ def test_value_artifact_is_canonical_hashed_and_immutable(tmp_path):
     path.write_text(json.dumps(raw), encoding="utf-8")
     with pytest.raises(ValueError, match="hash"):
         read_verified_value_artifact(path)
+
+
+def test_value_artifact_verification_rejects_nonfinite_json_token_even_with_normalized_digest(tmp_path):
+    path = tmp_path / "training_values.json"
+    artifact = write_value_artifact(
+        path,
+        {"candidate": pd.DataFrame([[1.0]], index=pd.date_range("2024-01-01", periods=1), columns=["A"])},
+    )
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    raw["panels"]["candidate"]["values"][0][0] = None
+    unsigned = json.loads(json.dumps(raw))
+    unsigned.pop("sha256")
+    raw["panels"]["candidate"]["values"][0][0] = float("nan")
+    raw["sha256"] = hashlib.sha256(
+        json.dumps(unsigned, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
+    ).hexdigest()
+    path.write_text(json.dumps(raw, allow_nan=True), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="nonfinite"):
+        read_verified_value_artifact(path, expected_sha256=raw["sha256"])
 
 
 def test_value_artifact_rejects_serialized_column_label_collisions(tmp_path):

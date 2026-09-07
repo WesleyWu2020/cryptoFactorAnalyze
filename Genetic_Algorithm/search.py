@@ -25,7 +25,7 @@ from .artifacts import (
 )
 from .config import SearchConfig, Stage, load_config
 from .data import run_training_audit
-from .expression import Node, canonical_tree
+from .expression import Node, canonical_tree, validate_node_attributes
 from .selection import deduplicate_training
 from factor_common.profiles import resolve_profile
 
@@ -141,11 +141,102 @@ def _confined_reference(root: Path, reference: str, *, label: str) -> Path:
     return resolved
 
 
+_ARCHIVE_REQUIRED_ENTRY_KEYS = {
+    "expression_id", "training_only", "ast", "training_fingerprint",
+    "operator_version", "training_diagnostics",
+}
+_ARCHIVE_OPTIONAL_ENTRY_KEYS = {"value_artifact"}
+_ARCHIVE_AST_KEYS = {"op", "field", "window", "children"}
+_ARCHIVE_FORBIDDEN_KEY_MARKERS = (
+    "validation", "test", "future", "holdout", "out_of_sample", "oos",
+)
+
+
+def _reject_archive_future_key(value: Any) -> None:
+    if isinstance(value, Mapping):
+        for key, item in value.items():
+            normalized = str(key).lower()
+            if any(marker in normalized for marker in _ARCHIVE_FORBIDDEN_KEY_MARKERS):
+                raise ValueError(f"training archive contains non-training field: {key}")
+            _reject_archive_future_key(item)
+    elif isinstance(value, (list, tuple)):
+        for item in value:
+            _reject_archive_future_key(item)
+
+
+def _load_archive_ast(value: Any, *, identifier: str) -> Node:
+    if not isinstance(value, Mapping) or set(value) != _ARCHIVE_AST_KEYS:
+        raise ValueError(f"training archive AST is malformed for {identifier}")
+    op, field, window, children = (
+        value["op"], value["field"], value["window"], value["children"]
+    )
+    if not isinstance(op, str) or (field is not None and not isinstance(field, str)):
+        raise ValueError(f"training archive AST is malformed for {identifier}")
+    if window is not None and type(window) is not int:
+        raise ValueError(f"training archive AST is malformed for {identifier}")
+    if not isinstance(children, list):
+        raise ValueError(f"training archive AST is malformed for {identifier}")
+    node = Node(
+        op,
+        tuple(_load_archive_ast(child, identifier=identifier) for child in children),
+        field,
+        window,
+    )
+    try:
+        validate_node_attributes(node)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"training archive AST is malformed for {identifier}") from exc
+    return node
+
+
+def _validate_archive_entry(entry: Mapping[str, Any]) -> str:
+    _reject_archive_future_key(entry)
+    missing = _ARCHIVE_REQUIRED_ENTRY_KEYS - set(entry)
+    if missing:
+        raise ValueError(
+            "training archive candidate is missing required fields: "
+            + ", ".join(sorted(missing))
+        )
+    unexpected = set(entry) - (_ARCHIVE_REQUIRED_ENTRY_KEYS | _ARCHIVE_OPTIONAL_ENTRY_KEYS)
+    if unexpected:
+        raise ValueError(
+            "training archive candidate contains non-training fields: "
+            + ", ".join(sorted(unexpected))
+        )
+    identifier = entry["expression_id"]
+    if not isinstance(identifier, str) or not identifier:
+        raise ValueError("training archive candidate expression_id is malformed")
+    if entry["training_only"] is not True:
+        raise ValueError("training archive candidate must be marked training_only")
+    for field in ("training_fingerprint", "operator_version"):
+        if not isinstance(entry[field], str) or not entry[field]:
+            raise ValueError(f"training archive candidate {field} is malformed")
+    _load_archive_ast(entry["ast"], identifier=identifier)
+    diagnostics = entry["training_diagnostics"]
+    if not isinstance(diagnostics, Mapping) or set(diagnostics) != {"score", "eligible", "reasons"}:
+        raise ValueError("training archive diagnostics contain non-training fields")
+    if not isinstance(diagnostics["score"], list):
+        raise ValueError("training archive diagnostic score is malformed")
+    if not isinstance(diagnostics["eligible"], bool):
+        raise ValueError("training archive diagnostic eligibility is malformed")
+    if not isinstance(diagnostics["reasons"], list) or not all(
+        isinstance(reason, str) for reason in diagnostics["reasons"]
+    ):
+        raise ValueError("training archive diagnostic reasons are malformed")
+    reference = entry.get("value_artifact")
+    if reference is not None and (
+        not isinstance(reference, Mapping) or set(reference) != {"path", "sha256"}
+    ):
+        raise ValueError(f"archive value artifact reference is malformed for {identifier}")
+    return identifier
+
+
 def _load_archive(path: str | Path | None) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     if path is None:
         return [], {}
     archive_path = Path(path)
     document = read_verified_manifest(archive_path)
+    _reject_archive_future_key(document)
     if document.get("training_only") is not True:
         raise ValueError("training archive must be marked training_only")
     allowed_document_keys = {"sha256", "training_only", "candidates"}
@@ -160,32 +251,10 @@ def _load_archive(path: str | Path | None) -> tuple[list[dict[str, Any]], dict[s
         raise ValueError("training archive candidates must be a list")
     values: dict[str, Any] = {}
     seen_ids: set[str] = set()
-    allowed_entry_keys = {
-        "expression_id", "hash", "training_only", "ast", "training_fingerprint",
-        "operator_version", "training_diagnostics", "value_artifact",
-    }
     for entry in entries:
         if not isinstance(entry, Mapping):
             raise ValueError("training archive entry is malformed")
-        if entry.get("training_only") is not True:
-            raise ValueError("training archive candidate must be marked training_only")
-        unexpected_entry_keys = set(entry) - allowed_entry_keys
-        if unexpected_entry_keys:
-            raise ValueError(
-                "training archive candidate contains non-training fields: "
-                + ", ".join(sorted(unexpected_entry_keys))
-            )
-        diagnostics = entry.get("training_diagnostics")
-        if diagnostics is not None:
-            if not isinstance(diagnostics, Mapping):
-                raise ValueError("training archive diagnostics are malformed")
-            unexpected_diagnostic_keys = set(diagnostics) - {"score", "eligible", "reasons"}
-            if unexpected_diagnostic_keys:
-                raise ValueError(
-                    "training archive diagnostics contain non-training fields: "
-                    + ", ".join(sorted(unexpected_diagnostic_keys))
-                )
-        identifier = str(entry.get("expression_id", entry.get("hash", "archive")))
+        identifier = _validate_archive_entry(entry)
         if identifier in seen_ids:
             raise ValueError(f"duplicate expression_id in training archive: {identifier}")
         seen_ids.add(identifier)
@@ -197,8 +266,6 @@ def _load_archive(path: str | Path | None) -> tuple[list[dict[str, Any]], dict[s
             }
             continue
         relative, digest = reference.get("path"), reference.get("sha256")
-        if set(reference) != {"path", "sha256"}:
-            raise ValueError(f"archive value artifact reference contains non-training fields for {identifier}")
         if not isinstance(relative, str) or not isinstance(digest, str):
             raise ValueError(f"archive value artifact reference is malformed for {identifier}")
         artifact_path = _confined_reference(
@@ -488,6 +555,7 @@ def _copy_archive_value_artifacts(
         return
     reserved_names = {
         "deduplication.json", "training_candidates.json", "training_values.json",
+        "training_values_archive.json",
         "provenance.json", "config.json", "audit_train.json", "validation.json",
         "frozen.json", "generations.jsonl", "progress.json",
         _publish_journal_path(destination).name,

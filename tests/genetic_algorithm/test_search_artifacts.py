@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -18,6 +19,29 @@ from Genetic_Algorithm.search import _load_archive
 
 
 REPOSITORY_ROOT = __file__.split("/tests/")[0]
+
+
+def _valid_archive_entry(identifier="candidate", **overrides):
+    entry = {
+        "expression_id": identifier,
+        "training_only": True,
+        "ast": {"op": "close", "field": None, "window": None, "children": []},
+        "training_fingerprint": "train-fingerprint",
+        "operator_version": "ops-v1",
+        "training_diagnostics": {"score": [1.0], "eligible": True, "reasons": []},
+    }
+    entry.update(overrides)
+    return entry
+
+
+def _repack_archive_with_safe_value_name(source, destination):
+    document = json.loads(source.read_text(encoding="utf-8"))
+    for entry in document["candidates"]:
+        reference = entry.get("value_artifact")
+        if reference:
+            shutil.copy2(source.parent / reference["path"], destination.parent / "prior-values.json")
+            entry["value_artifact"] = {"path": "prior-values.json", "sha256": reference["sha256"]}
+    write_artifact(destination, document, immutable=True)
 
 
 def test_run_search_writes_training_artifacts_without_validation(tmp_path, monkeypatch):
@@ -92,9 +116,11 @@ def test_run_search_persists_real_search_panels_and_compares_on_second_run(tmp_p
     )
     assert first.values_by_id
     first_archive = tmp_path / "first" / "training_candidates.json"
+    safe_archive = tmp_path / "safe-archive.json"
+    _repack_archive_with_safe_value_name(first_archive, safe_archive)
     second = search_module.run_search(
         "unused.h5", audit_path, stage=STAGES["train"], warmup_days=0, fields=["close"],
-        search_stage=search_stage, artifact_dir=tmp_path / "second", archive_path=first_archive,
+        search_stage=search_stage, artifact_dir=tmp_path / "second", archive_path=safe_archive,
         repository_root=REPOSITORY_ROOT, operator_version="ops-v1",
     )
 
@@ -152,11 +178,15 @@ def test_run_search_second_archive_is_cumulative_and_preserves_prior_value_refer
     first_document = json.loads((run_dir / "training_candidates.json").read_text(encoding="utf-8"))
     first_entry = first_document["candidates"][0]
     second_dir = tmp_path / "second"
-    run(second_dir, run_dir / "training_candidates.json")
+    safe_archive = tmp_path / "safe-archive.json"
+    _repack_archive_with_safe_value_name(run_dir / "training_candidates.json", safe_archive)
+    run(second_dir, safe_archive)
 
     document = json.loads((second_dir / "training_candidates.json").read_text(encoding="utf-8"))
     assert [entry["expression_id"] for entry in document["candidates"]] == ["first", "second"]
-    assert document["candidates"][0]["value_artifact"] == first_entry["value_artifact"]
+    assert document["candidates"][0]["value_artifact"] == {
+        "path": "prior-values.json", "sha256": first_entry["value_artifact"]["sha256"]
+    }
 
 
 def test_load_archive_rejects_duplicate_expression_ids(tmp_path):
@@ -164,8 +194,7 @@ def test_load_archive_rejects_duplicate_expression_ids(tmp_path):
     write_artifact(
         archive_path,
         {"training_only": True, "candidates": [
-            {"expression_id": "same", "training_only": True},
-            {"expression_id": "same", "training_only": True},
+            _valid_archive_entry("same"), _valid_archive_entry("same"),
         ]},
         immutable=True,
     )
@@ -211,14 +240,41 @@ def test_load_archive_rejects_unmarked_value_artifact(tmp_path):
     write_artifact(
         archive_path,
         {"training_only": True, "candidates": [{
-            "expression_id": "candidate",
-            "training_only": True,
+            **_valid_archive_entry("candidate"),
             "value_artifact": {"path": values_path.name, "sha256": value_artifact.sha256},
         }]},
         immutable=True,
     )
 
     with pytest.raises(ValueError, match="training_only"):
+        _load_archive(archive_path)
+
+@pytest.mark.parametrize(
+    "missing",
+    ["expression_id", "training_only", "ast", "training_fingerprint", "operator_version", "training_diagnostics"],
+)
+def test_load_archive_rejects_missing_required_candidate_fields(tmp_path, missing):
+    entry = _valid_archive_entry()
+    entry.pop(missing)
+    archive_path = tmp_path / "archive.json"
+    write_artifact(archive_path, {"training_only": True, "candidates": [entry]}, immutable=True)
+
+    with pytest.raises(ValueError, match="required"):
+        _load_archive(archive_path)
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [
+        _valid_archive_entry(ast={"op": "close", "field": None, "window": None, "children": [], "validation_metrics": {}}),
+        _valid_archive_entry(training_diagnostics={"score": [1.0], "eligible": True, "reasons": [], "nested": {"test_metrics": {}}}),
+    ],
+)
+def test_load_archive_rejects_nested_validation_or_test_data(tmp_path, entry):
+    archive_path = tmp_path / "archive.json"
+    write_artifact(archive_path, {"training_only": True, "candidates": [entry]}, immutable=True)
+
+    with pytest.raises(ValueError, match="non-training"):
         _load_archive(archive_path)
 
 
@@ -494,7 +550,9 @@ def test_run_search_rejects_same_expression_id_with_incompatible_provenance(
     first_dir = tmp_path / "first"
     run(first_dir)
     second_dir = tmp_path / "second"
-    second = run(second_dir, first_dir / "training_candidates.json", operator_version="ops-v2")
+    safe_archive = tmp_path / "safe-archive.json"
+    _repack_archive_with_safe_value_name(first_dir / "training_candidates.json", safe_archive)
+    second = run(second_dir, safe_archive, operator_version="ops-v2")
 
     assert second.candidates == ()
     dedup = json.loads((second_dir / "deduplication.json").read_text(encoding="utf-8"))
@@ -516,7 +574,7 @@ def test_run_search_rejects_archive_artifact_path_outside_archive_directory(tmp_
     write_artifact(
         archive_path,
         {"training_only": True, "candidates": [{
-            "expression_id": "old", "training_only": True, "value_artifact": {"path": reference, "sha256": "0" * 64},
+            **_valid_archive_entry("old", value_artifact={"path": reference, "sha256": "0" * 64}),
         }]},
         immutable=True,
     )
@@ -534,6 +592,7 @@ def test_run_search_rejects_archive_artifact_path_outside_archive_directory(tmp_
     "deduplication.json",
     "training_candidates.json",
     "training_values.json",
+    "training_values_archive.json",
     "provenance.json",
     ".run.publish.json",
 ])
@@ -558,10 +617,7 @@ def test_run_search_rejects_archive_artifact_path_reserved_by_publication(
     write_artifact(
         archive_path,
         {"training_only": True, "candidates": [{
-            "expression_id": "old",
-            "training_only": True,
-            "training_fingerprint": "train-fingerprint",
-            "operator_version": "ops-v1",
+            **_valid_archive_entry("old"),
             "value_artifact": {"path": reserved_name, "sha256": value_artifact.sha256},
         }]},
         immutable=True,
@@ -599,8 +655,8 @@ def test_run_search_rejects_archive_artifact_path_shared_by_candidates(tmp_path,
     write_artifact(
         archive_path,
         {"training_only": True, "candidates": [
-            {"expression_id": "first", "training_only": True, "value_artifact": {"path": values_path.name, "sha256": value_artifact.sha256}},
-            {"expression_id": "second", "training_only": True, "value_artifact": {"path": values_path.name, "sha256": value_artifact.sha256}},
+            _valid_archive_entry("first", value_artifact={"path": values_path.name, "sha256": value_artifact.sha256}),
+            _valid_archive_entry("second", value_artifact={"path": values_path.name, "sha256": value_artifact.sha256}),
         ]},
         immutable=True,
     )
@@ -848,10 +904,7 @@ def test_run_search_loads_existing_archive_for_novelty(tmp_path, monkeypatch):
     write_artifact(
         archive_path,
         {"training_only": True, "candidates": [{
-            "expression_id": "old",
-            "training_only": True,
-            "training_fingerprint": "train-fingerprint",
-            "operator_version": "ops-v1",
+            **_valid_archive_entry("old"),
             "value_artifact": {"path": values_path.name, "sha256": value_artifact.sha256},
         }]},
         immutable=True,

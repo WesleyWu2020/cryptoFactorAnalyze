@@ -25,6 +25,10 @@ _NON_GIT_MAX_SYMLINK_TARGET_BYTES = 4096
 _NON_GIT_READ_CHUNK = 1024 * 1024
 
 
+def _reject_nonfinite_json_constant(value: str) -> None:
+    raise ValueError(f"nonfinite JSON value is not allowed: {value}")
+
+
 def _requirement_names(repository_root: Path) -> tuple[str, ...]:
     """Return direct distribution names declared by the project requirements."""
     names: dict[str, str] = {}
@@ -126,7 +130,7 @@ def read_verified_value_artifact(
     """Verify and decode a canonical training value panel artifact."""
     target = Path(path)
     with target.open(encoding="utf-8") as handle:
-        document = json.load(handle)
+        document = json.load(handle, parse_constant=_reject_nonfinite_json_constant)
     if not isinstance(document, dict) or document.get("artifact_version") != _VALUE_ARTIFACT_VERSION:
         raise ValueError("unsupported value artifact")
     if document.get("training_only") is not True:
@@ -261,7 +265,7 @@ def read_verified_manifest(path: str | Path) -> dict[str, Any]:
     """Read a manifest only when its SHA-256 matches its canonical payload."""
     target = Path(path)
     with target.open(encoding="utf-8") as handle:
-        payload = json.load(handle)
+        payload = json.load(handle, parse_constant=_reject_nonfinite_json_constant)
     if not isinstance(payload, dict) or not isinstance(payload.get(_DIGEST_FIELD), str):
         raise ValueError("manifest hash is missing")
     supplied = payload[_DIGEST_FIELD]
