@@ -365,7 +365,10 @@ def search(stage_data: Any, config: Any) -> SearchResult:
         all_exploratory: dict[str, Candidate] = {}
         aggregate = {"generation": generation, "attempted_trees": 0, "unique_evaluations": 0, "cache_hits": 0, "invalid_reasons": Counter(), "eligible_population": 0}
         pending = list(trees)
-        while attempts < max_attempts and len(all_exploratory) < population_size:
+        while attempts < max_attempts and (
+            len(all_valid) < population_size
+            and (all_valid or len(all_exploratory) < population_size)
+        ):
             if not pending:
                 pending.append(_random_tree(rng, config))
             valid, exploratory, log = evaluate_pool(pending[:1], generation)
@@ -381,11 +384,12 @@ def search(stage_data: Any, config: Any) -> SearchResult:
             aggregate["invalid_reasons"].update(log["invalid_reasons"])
         aggregate["eligible_population"] = len(all_valid)
         aggregate["invalid_reasons"] = dict(sorted(aggregate["invalid_reasons"].items()))
-        if len(all_exploratory) < population_size:
+        if len(all_valid) < population_size and (all_valid or len(all_exploratory) < population_size):
             raise SearchFormationError(
                 f"could not form population: unique exploratory candidates "
                 f"{len(all_exploratory)}/{population_size} after {attempts}/{max_attempts} attempts; "
-                f"eligible candidates {len(all_valid)}"
+                f"eligible candidates {len(all_valid)}/{population_size}; "
+                f"reasons={aggregate['invalid_reasons']}"
             )
         return list(all_valid.values()), list(all_exploratory.values()), aggregate
 

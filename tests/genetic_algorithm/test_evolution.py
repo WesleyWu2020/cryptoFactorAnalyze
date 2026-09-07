@@ -312,6 +312,27 @@ def test_duplicate_canonical_trees_do_not_form_population():
         )
 
 
+def test_partial_eligible_population_does_not_use_exploratory_fallback():
+    with pytest.raises(SearchFormationError, match="eligible candidates 1/2.*ineligible"):
+        search(
+            {"marker": "synthetic"},
+            {
+                "seed": 8,
+                "population": 2,
+                "generations": 1,
+                "max_depth": 0,
+                "max_nodes": 1,
+                "max_attempts": 2,
+                "initial_trees": [Node("close"), Node("open")],
+                "evaluate_candidate": lambda tree, *args: {
+                    "score": (1.0, 1.0),
+                    "eligible": tree.op == "close",
+                    "reasons": () if tree.op == "close" else ("ineligible",),
+                },
+            },
+        )
+
+
 def test_none_objectives_preserve_ineligible_reasons_and_allow_exploration():
     result = search(
         {"marker": "synthetic"},
