@@ -175,6 +175,34 @@ def test_value_artifact_verification_rejects_nonfinite_json_token_even_with_norm
         read_verified_value_artifact(path, expected_sha256=raw["sha256"])
 
 
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("validation_metrics", {"ic": 0.9}),
+        ("metadata", {"test_metrics": {"ic": 0.8}, "labels": [0.1]}),
+    ],
+)
+def test_value_artifact_rejects_non_training_panel_fields_even_with_recomputed_digest(
+    tmp_path, field, value
+):
+    path = tmp_path / "training_values.json"
+    write_value_artifact(
+        path,
+        {"candidate": pd.DataFrame([[1.0]], index=pd.date_range("2024-01-01", periods=1), columns=["A"])},
+    )
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    raw["panels"]["candidate"][field] = value
+    unsigned = dict(raw)
+    unsigned.pop("sha256")
+    raw["sha256"] = hashlib.sha256(
+        json.dumps(unsigned, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
+    ).hexdigest()
+    path.write_text(json.dumps(raw), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="panel contains non-training fields"):
+        read_verified_value_artifact(path)
+
+
 def test_value_artifact_rejects_serialized_column_label_collisions(tmp_path):
     values = pd.DataFrame(
         [[1.0, 2.0]],

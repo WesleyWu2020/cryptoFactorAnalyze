@@ -20,6 +20,9 @@ import pandas as pd
 
 _DIGEST_FIELD = "sha256"
 _VALUE_ARTIFACT_VERSION = 1
+_VALUE_PANEL_FIELDS = frozenset(
+    {"index", "index_name", "index_freq", "columns", "columns_name", "values", "nan_mask"}
+)
 _NON_GIT_MAX_PATH_BYTES = 4096
 _NON_GIT_MAX_SYMLINK_TARGET_BYTES = 4096
 _NON_GIT_READ_CHUNK = 1024 * 1024
@@ -158,10 +161,53 @@ def read_verified_value_artifact(
     for identifier, payload in panels.items():
         if not isinstance(payload, dict):
             raise ValueError("value artifact panel is malformed")
-        index = pd.DatetimeIndex(pd.to_datetime(payload["index"]), name=payload.get("index_name"))
-        if payload.get("index_freq"):
-            index.freq = pd.tseries.frequencies.to_offset(payload["index_freq"])
-        columns = pd.Index(payload["columns"], name=payload.get("columns_name"))
+        unexpected_panel_fields = set(payload) - _VALUE_PANEL_FIELDS
+        missing_panel_fields = _VALUE_PANEL_FIELDS - set(payload)
+        if unexpected_panel_fields or missing_panel_fields:
+            details = []
+            if unexpected_panel_fields:
+                details.append("unexpected=" + ",".join(sorted(unexpected_panel_fields)))
+            if missing_panel_fields:
+                details.append("missing=" + ",".join(sorted(missing_panel_fields)))
+            raise ValueError(
+                "value artifact panel contains non-training fields or is incomplete: "
+                + "; ".join(details)
+            )
+        if not isinstance(payload["index"], list) or not all(
+            isinstance(value, str) for value in payload["index"]
+        ):
+            raise ValueError("value artifact panel index is invalid")
+        if not isinstance(payload["columns"], list) or not all(
+            isinstance(value, str) for value in payload["columns"]
+        ):
+            raise ValueError("value artifact panel columns are invalid")
+        for name in ("index_name", "index_freq", "columns_name"):
+            if payload[name] is not None and not isinstance(payload[name], str):
+                raise ValueError(f"value artifact panel {name} is invalid")
+        if not isinstance(payload["values"], list) or not all(
+            isinstance(row, list) for row in payload["values"]
+        ) or not all(
+            isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+            for row in payload["values"]
+            for value in row
+        ):
+            raise ValueError("value artifact panel values are invalid")
+        if not isinstance(payload["nan_mask"], list) or not all(
+            isinstance(row, list) for row in payload["nan_mask"]
+        ) or not all(
+            isinstance(value, bool) for row in payload["nan_mask"] for value in row
+        ):
+            raise ValueError("value artifact panel nan_mask is invalid")
+        try:
+            index = pd.DatetimeIndex(pd.to_datetime(payload["index"]), name=payload["index_name"])
+        except (TypeError, ValueError) as exc:
+            raise ValueError("value artifact panel index is invalid") from exc
+        if payload["index_freq"]:
+            try:
+                index.freq = pd.tseries.frequencies.to_offset(payload["index_freq"])
+            except (TypeError, ValueError) as exc:
+                raise ValueError("value artifact panel index_freq is invalid") from exc
+        columns = pd.Index(payload["columns"], name=payload["columns_name"])
         values = np.asarray(payload["values"], dtype="float64")
         missing = np.asarray(payload["nan_mask"], dtype=bool)
         if values.shape != missing.shape or values.shape != (len(index), len(columns)):
