@@ -147,6 +147,18 @@ def test_evaluate_tree_cache_fingerprint_includes_feature_and_evaluator_sources(
     assert len(cache) == 2
 
 
+def test_evaluate_tree_cache_fingerprint_includes_expression_source(monkeypatch):
+    ctx, dates, symbols = _ctx()
+    eligible = pd.DataFrame(True, index=dates, columns=symbols)
+    cache = {}
+
+    evaluate_tree(Node("close"), ctx, eligible, cache=cache)
+    monkeypatch.setattr(evaluator_module, "_expression_source_hash", lambda: "changed-expression")
+    evaluate_tree(Node("close"), ctx, eligible, cache=cache)
+
+    assert len(cache) == 2
+
+
 def test_evaluator_cache_content_hash_rejects_stale_reused_supplied_fingerprint():
     ctx, dates, symbols = _ctx()
     eligible = pd.DataFrame(True, index=dates, columns=symbols)
@@ -285,3 +297,15 @@ def test_terminal_formulas_are_causal_and_use_safe_division():
     quote_trade = evaluate_tree(Node("quote_per_trade"), ctx, eligible)
     assert quote_trade.loc[dates[0], "A"] == 100.0
     assert pd.isna(evaluate_tree(Node("return_1d"), ctx, eligible).loc[dates[0], "A"])
+
+
+def test_evaluate_tree_safe_division_handles_zero_denominator_through_ast():
+    ctx, dates, symbols = _ctx()
+    ctx["close"].iloc[0, 0] = 4.0
+    ctx["open"].iloc[0, 0] = 0.0
+    eligible = pd.DataFrame(True, index=dates, columns=symbols)
+
+    result = evaluate_tree(Node("safe_div", (Node("close"), Node("open"))), ctx, eligible)
+
+    assert pd.isna(result.loc[dates[0], "A"])
+    assert result.loc[dates[0], "B"] == 1.0

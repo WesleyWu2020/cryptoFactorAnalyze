@@ -11,6 +11,7 @@ from Genetic_Algorithm.operators import (
     rolling_correlation,
     rolling_std,
 )
+from Genetic_Algorithm.operators import OPERATOR_ARITY, OPERATOR_REGISTRY
 from Genetic_Algorithm.operators import delta, lag
 
 
@@ -20,6 +21,11 @@ def test_safe_div_preserves_missing():
     result = safe_div(a, b)
     assert result.iloc[0, 0] == 1.0
     assert result.iloc[0, 1:].isna().all()
+
+
+def test_safe_div_is_registered_as_a_binary_operator():
+    assert OPERATOR_REGISTRY["safe_div"] is safe_div
+    assert OPERATOR_ARITY["safe_div"] == 2
 
 
 def test_rolling_operators_require_complete_trailing_windows():

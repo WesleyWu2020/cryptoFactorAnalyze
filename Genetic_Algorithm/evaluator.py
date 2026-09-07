@@ -12,7 +12,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from . import operators
+from . import expression, operators
 from . import features
 from .expression import Node, expression_hash, required_fields, validate_tree
 
@@ -119,6 +119,10 @@ def _evaluator_source_hash() -> str:
     return hashlib.sha256(inspect.getsource(sys.modules[__name__]).encode()).hexdigest()
 
 
+def _expression_source_hash() -> str:
+    return hashlib.sha256(inspect.getsource(expression).encode()).hexdigest()
+
+
 def _eligible_fingerprint(eligible: pd.DataFrame) -> str:
     digest = hashlib.sha256()
     digest.update(json.dumps(list(eligible.shape)).encode())
@@ -191,7 +195,7 @@ def evaluate_tree(
         _trim_cache(cache, cache_bytes)
     key = (
         expression_hash(node), _ctx_fingerprint(data_ctx), _operator_source_hash(),
-        _features_source_hash(), _evaluator_source_hash(),
+        _features_source_hash(), _evaluator_source_hash(), _expression_source_hash(),
         _eligible_fingerprint(eligible),
     )
     if cache is not None and key in cache:
