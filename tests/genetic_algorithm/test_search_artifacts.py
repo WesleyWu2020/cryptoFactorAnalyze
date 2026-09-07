@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -195,6 +196,68 @@ def test_run_search_does_not_publish_partial_directory_when_commit_fails(tmp_pat
 
     assert not destination.exists()
     assert not list(tmp_path.glob(".run.*"))
+
+
+def test_existing_published_run_survives_failure_between_backup_and_stage_publish(
+    tmp_path, monkeypatch
+):
+    audit_path = tmp_path / "run" / "audit_train.json"
+    audit_path.parent.mkdir()
+    audit_path.write_text(
+        json.dumps({"training_only": True, "fingerprint": "old-fingerprint", "stage": {"name": "train"}}),
+        encoding="utf-8",
+    )
+    destination = audit_path.parent
+    monkeypatch.setattr(search_module, "run_training_audit", lambda *args, **kwargs: audit_path)
+    real_replace = search_module.os.replace
+    failed = False
+
+    def fail_after_backup(source, target):
+        nonlocal failed
+        if Path(source).is_dir() and Path(target) == destination:
+            if not failed:
+                failed = True
+                raise OSError("simulated crash between backup and stage publish")
+        return real_replace(source, target)
+
+    monkeypatch.setattr(search_module.os, "replace", fail_after_backup)
+    with pytest.raises(OSError, match="simulated crash"):
+        search_module.run_search(
+            "unused.h5", audit_path, stage=STAGES["train"], warmup_days=0,
+            fields=["close"], search_stage=lambda path: SearchResult((), (), 0),
+            artifact_dir=destination, repository_root=REPOSITORY_ROOT,
+        )
+
+    assert "old-fingerprint" in (destination / "audit_train.json").read_text(encoding="utf-8")
+    assert not list(tmp_path.glob(".run.audit-backup"))
+    assert not list(tmp_path.glob(".run.publish.json"))
+
+
+def test_publish_recovery_restores_backup_after_crash_before_stage_rename(tmp_path):
+    destination = tmp_path / "run"
+    backup = tmp_path / ".run.audit-backup"
+    staging = tmp_path / ".run.staging"
+    backup.mkdir()
+    (backup / "old").write_text("old", encoding="utf-8")
+    staging.mkdir()
+    (staging / "partial").write_text("partial", encoding="utf-8")
+    journal = tmp_path / ".run.publish.json"
+    journal.write_text(
+        json.dumps({
+            "version": 1,
+            "destination": destination.name,
+            "backup": backup.name,
+            "staging": staging.name,
+        }),
+        encoding="utf-8",
+    )
+
+    search_module._recover_publish_destination(destination)
+
+    assert (destination / "old").read_text(encoding="utf-8") == "old"
+    assert not backup.exists()
+    assert not staging.exists()
+    assert not journal.exists()
 
 
 def test_run_search_rejects_same_expression_id_with_incompatible_provenance(

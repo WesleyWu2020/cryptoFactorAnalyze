@@ -271,9 +271,97 @@ def _tree_payload(tree: Node) -> dict[str, Any]:
     }
 
 
+def _publish_journal_path(destination: Path) -> Path:
+    return destination.with_name(f".{destination.name}.publish.json")
+
+
+def _remove_path(path: Path) -> None:
+    if path.is_dir() and not path.is_symlink():
+        shutil.rmtree(path)
+    elif path.exists() or path.is_symlink():
+        path.unlink()
+
+
+def _recover_publish_destination(destination: Path) -> None:
+    """Resolve an interrupted immutable directory publication deterministically."""
+    journal_path = _publish_journal_path(destination)
+    if not journal_path.exists():
+        return
+    with journal_path.open(encoding="utf-8") as handle:
+        journal = json.load(handle)
+    if journal.get("version") != 1:
+        raise ValueError(f"unsupported publish journal: {journal_path}")
+    parent = destination.parent.resolve()
+    paths = {}
+    for key in ("destination", "staging"):
+        value = journal.get(key)
+        if not isinstance(value, str):
+            raise ValueError(f"invalid publish journal field: {key}")
+        path = Path(value)
+        if path.is_absolute() or path.parent != Path("."):
+            raise ValueError(f"publish journal path must be a sibling name: {key}")
+        paths[key] = parent / path
+    backup_name = journal.get("backup")
+    if backup_name is not None:
+        if not isinstance(backup_name, str):
+            raise ValueError("invalid publish journal field: backup")
+        backup_path = Path(backup_name)
+        if backup_path.is_absolute() or backup_path.parent != Path("."):
+            raise ValueError("publish journal path must be a sibling name: backup")
+        paths["backup"] = parent / backup_path
+    if paths["destination"] != destination:
+        raise ValueError(f"publish journal destination mismatch: {journal_path}")
+
+    if destination.exists():
+        # The staged directory is already visible. The publication committed;
+        # only cleanup may have been interrupted.
+        if "backup" in paths:
+            _remove_path(paths["backup"])
+        _remove_path(paths["staging"])
+    elif "backup" in paths and paths["backup"].exists():
+        # The old run is the only published value until the staged rename wins.
+        os.replace(paths["backup"], destination)
+        _remove_path(paths["staging"])
+    else:
+        # No old run was moved, so discard an unpublished staging directory.
+        _remove_path(paths["staging"])
+    journal_path.unlink()
+
+
+def _write_publish_journal(destination: Path, staging: Path, backup: Path | None) -> Path:
+    journal_path = _publish_journal_path(destination)
+    payload = {
+        "version": 1,
+        "destination": destination.name,
+        "backup": backup.name if backup is not None else None,
+        "staging": staging.name,
+    }
+    temporary_fd, temporary_name = tempfile.mkstemp(
+        prefix=f".{destination.name}.publish.", dir=destination.parent
+    )
+    os.close(temporary_fd)
+    temporary = Path(temporary_name)
+    try:
+        temporary.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+        with temporary.open("r+", encoding="utf-8") as handle:
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, journal_path)
+        directory_fd = os.open(destination.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    except Exception:
+        _remove_path(temporary)
+        raise
+    return journal_path
+
+
 def _prepare_publish_destination(destination: Path, audit_path: Path) -> tuple[Path, Path | None]:
-    """Create an isolated staging directory for an atomic directory publish."""
+    """Create an isolated staging directory without changing the published run."""
     destination.parent.mkdir(parents=True, exist_ok=True)
+    _recover_publish_destination(destination)
     staging = Path(tempfile.mkdtemp(prefix=f".{destination.name}.", dir=destination.parent))
     backup = None
     if destination.exists():
@@ -298,20 +386,27 @@ def _prepare_publish_destination(destination: Path, audit_path: Path) -> tuple[P
             if backup.exists():
                 staging.rmdir()
                 raise FileExistsError(f"stale artifact backup already exists: {backup}")
-            destination.rename(backup)
         else:
             destination.rmdir()
     return staging, backup
 
 
-def _publish_staging_directory(staging: Path, destination: Path) -> None:
-    """Atomically publish a complete immutable run directory."""
+def _publish_staging_directory(
+    staging: Path, destination: Path, backup: Path | None = None
+) -> None:
+    """Publish a complete immutable run directory with recoverable replacement."""
+    journal_path = _write_publish_journal(destination, staging, backup)
+    if backup is not None:
+        os.replace(destination, backup)
     os.replace(staging, destination)
     directory_fd = os.open(destination.parent, os.O_RDONLY)
     try:
         os.fsync(directory_fd)
     finally:
         os.close(directory_fd)
+    if backup is not None:
+        _remove_path(backup)
+    journal_path.unlink()
 
 
 def _archive_key(entry: Mapping[str, Any]) -> str:
@@ -472,19 +567,11 @@ def _write_training_artifacts(
                 "loaded_archive_entries": len(archive_entries),
             },
         )
-        _publish_staging_directory(staging, destination)
-        if destination_backup is not None:
-            shutil.rmtree(destination_backup)
+        _publish_staging_directory(staging, destination, destination_backup)
     except Exception:
-        if destination_backup is not None and destination_backup.exists() and not destination.exists():
-            destination_backup.rename(destination)
+        _recover_publish_destination(destination)
         if staging.exists():
-            for path in sorted(staging.rglob("*"), reverse=True):
-                if path.is_file() or path.is_symlink():
-                    path.unlink()
-                elif path.is_dir():
-                    path.rmdir()
-            staging.rmdir()
+            _remove_path(staging)
         raise
     return result
 
