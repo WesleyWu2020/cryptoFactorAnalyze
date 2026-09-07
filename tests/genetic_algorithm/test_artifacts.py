@@ -68,6 +68,19 @@ def test_non_git_hash_includes_symlink_target_and_does_not_follow_symlink_direct
     assert working_tree_patch_hash(tmp_path) != first
 
 
+def test_non_git_hash_ignores_timestamp_only_changes(tmp_path):
+    source = tmp_path / "source.txt"
+    source.write_text("content", encoding="utf-8")
+    link = tmp_path / "link.txt"
+    link.symlink_to(source)
+
+    before = working_tree_patch_hash(tmp_path)
+    os.utime(source, ns=(1_000_000_000, 1_000_000_000))
+    os.utime(link, ns=(2_000_000_000, 2_000_000_000), follow_symlinks=False)
+
+    assert working_tree_patch_hash(tmp_path) == before
+
+
 def test_manifest_is_immutable_and_verified(tmp_path):
     path = tmp_path / "run.manifest.json"
     write_artifact(path, {"metrics": {"ic": float("nan")}, "seed": 7})

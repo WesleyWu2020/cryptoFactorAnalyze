@@ -347,12 +347,7 @@ def _non_git_working_tree_hash(root: Path) -> str:
             relative = path.relative_to(root).as_posix().encode("utf-8", "surrogateescape")
             if len(relative) > _NON_GIT_MAX_PATH_BYTES:
                 raise ValueError(f"working-tree path is too long: {relative!r}")
-            try:
-                stat = entry.stat(follow_symlinks=False)
-            except OSError as exc:
-                raise ValueError(f"cannot snapshot working-tree entry: {path}") from exc
             digest.update(b"path\0" + relative + b"\0")
-            digest.update(f"mode:{stat.st_mode:o};size:{stat.st_size};mtime:{stat.st_mtime_ns}\0".encode())
             if entry.is_symlink():
                 target = os.readlink(path)
                 target_bytes = os.fsencode(target)

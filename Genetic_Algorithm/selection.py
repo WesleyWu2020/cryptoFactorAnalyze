@@ -148,11 +148,32 @@ def deduplicate_training(
     minimum_days = int(_value(config, "min_overlap_days", 120))
     limit = min(20, int(_value(config, "validation_limit", 20)))
     correlation_limit = float(_value(config, "correlation_limit", 0.90))
-    ordered = sorted(tuple(candidates), key=_candidate_score)
+    candidate_items = tuple(candidates)
+    candidate_ids = tuple(_candidate_id(candidate) for candidate in candidate_items)
+    duplicate_ids = {
+        candidate_id
+        for candidate_id in candidate_ids
+        if candidate_ids.count(candidate_id) > 1
+    }
+    ordered = sorted(
+        (
+            candidate
+            for candidate, candidate_id in zip(candidate_items, candidate_ids)
+            if candidate_id not in duplicate_ids
+        ),
+        key=_candidate_score,
+    )
     archive_items = tuple(archive)
     accepted: list[Any] = []
-    rejected: list[Any] = []
-    reasons: dict[str, tuple[str, ...]] = {}
+    rejected: list[Any] = [
+        candidate
+        for candidate, candidate_id in zip(candidate_items, candidate_ids)
+        if candidate_id in duplicate_ids
+    ]
+    reasons: dict[str, tuple[str, ...]] = {
+        candidate_id: (f"duplicate expression_id candidate: {candidate_id}",)
+        for candidate_id in duplicate_ids
+    }
     comparisons: list[Comparison] = []
     archive_entries: list[dict[str, Any]] = []
 

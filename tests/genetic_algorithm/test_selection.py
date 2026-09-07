@@ -104,6 +104,23 @@ def test_selection_never_exceeds_absolute_validation_candidate_cap():
     assert len(result.rejected) == 5
 
 
+def test_duplicate_expression_ids_are_rejected_before_selection():
+    result = deduplicate_training(
+        [_candidate("same-id", mean=1.0), _candidate("same-id", mean=0.1)],
+        {"same-id": _metadata(_values())},
+        [],
+        {"min_overlap_days": 120, "correlation_limit": 0.90, "validation_limit": 20},
+    )
+
+    assert result.accepted == ()
+    assert [candidate.expression_id for candidate in result.rejected] == ["same-id", "same-id"]
+    assert result.rejection_reasons["same-id"] == (
+        "duplicate expression_id candidate: same-id",
+    )
+    assert result.comparisons == ()
+    assert result.archive_entries == ()
+
+
 def test_incompatible_archive_reference_rejects_candidate_before_correlation():
     values = _values()
     result = deduplicate_training(
