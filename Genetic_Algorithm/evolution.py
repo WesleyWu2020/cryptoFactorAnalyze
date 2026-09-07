@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Iterable, Sequence
 
 import numpy as np
@@ -31,6 +31,7 @@ class SearchResult:
     candidates: tuple[Candidate, ...]
     generation_log: tuple[dict[str, Any], ...]
     evaluations: int
+    values_by_id: dict[str, Any] = field(default_factory=dict)
 
 
 class SearchFormationError(RuntimeError):

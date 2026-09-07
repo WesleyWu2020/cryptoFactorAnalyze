@@ -9,11 +9,127 @@ import math
 import os
 import subprocess
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
+import numpy as np
+import pandas as pd
+
 
 _DIGEST_FIELD = "sha256"
+_VALUE_ARTIFACT_VERSION = 1
+
+
+@dataclass(frozen=True)
+class ValueArtifact:
+    path: Path
+    sha256: str
+
+
+def _value_frame(value: Any) -> pd.DataFrame:
+    if isinstance(value, pd.DataFrame):
+        return value
+    if isinstance(value, Mapping):
+        for key in ("values", "factor_values", "training_values"):
+            if isinstance(value.get(key), pd.DataFrame):
+                return value[key]
+    raise TypeError("training value artifacts require pandas DataFrame panels")
+
+
+def _value_payload(frame: pd.DataFrame) -> dict[str, Any]:
+    if not isinstance(frame.index, pd.DatetimeIndex) or frame.index.has_duplicates:
+        raise ValueError("training value panels require a unique DatetimeIndex")
+    if frame.columns.has_duplicates:
+        raise ValueError("training value panels require unique instrument columns")
+    frame = frame.sort_index().sort_index(axis=1)
+    numeric = frame.astype("float64")
+    array = numeric.to_numpy(copy=True)
+    if np.isinf(array).any():
+        raise ValueError("training value panels cannot contain infinity")
+    missing = np.isnan(array)
+    array[missing] = 0.0
+    return {
+        "index": [pd.Timestamp(value).isoformat() for value in frame.index],
+        "index_name": frame.index.name,
+        "index_freq": frame.index.freqstr,
+        "columns": [str(value) for value in frame.columns],
+        "columns_name": frame.columns.name,
+        "values": array.tolist(),
+        "nan_mask": missing.astype(bool).tolist(),
+    }
+
+
+def _value_document(panels: Mapping[str, Any]) -> dict[str, Any]:
+    payload = {
+        "artifact_version": _VALUE_ARTIFACT_VERSION,
+        "panels": {
+            str(identifier): _value_payload(_value_frame(panels[identifier]))
+            for identifier in sorted(panels, key=str)
+        },
+    }
+    return _manifest_payload(payload)
+
+
+def write_value_artifact(path: str | Path, panels: Mapping[str, Any]) -> ValueArtifact:
+    """Write a canonical, immutable training value panel artifact."""
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    document = _value_document(panels)
+    encoded = json.dumps(
+        document, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False
+    ).encode("utf-8")
+    descriptor = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            descriptor = -1
+            handle.write(encoded)
+            handle.write(b"\n")
+    finally:
+        if descriptor != -1:
+            os.close(descriptor)
+    return ValueArtifact(target, str(document[_DIGEST_FIELD]))
+
+
+def read_verified_value_artifact(
+    path: str | Path, *, expected_sha256: str | None = None
+) -> dict[str, pd.DataFrame]:
+    """Verify and decode a canonical training value panel artifact."""
+    target = Path(path)
+    with target.open(encoding="utf-8") as handle:
+        document = json.load(handle)
+    if not isinstance(document, dict) or document.get("artifact_version") != _VALUE_ARTIFACT_VERSION:
+        raise ValueError("unsupported value artifact")
+    supplied = document.get(_DIGEST_FIELD)
+    if not isinstance(supplied, str):
+        raise ValueError("value artifact hash is missing")
+    if expected_sha256 is not None and supplied != expected_sha256:
+        raise ValueError("value artifact hash does not match archive reference")
+    unsigned = dict(document)
+    unsigned.pop(_DIGEST_FIELD, None)
+    expected = hashlib.sha256(_canonical_json(unsigned)).hexdigest()
+    if supplied != expected:
+        raise ValueError("value artifact hash verification failed")
+    panels = document.get("panels")
+    if not isinstance(panels, dict):
+        raise ValueError("value artifact panels are missing")
+    decoded: dict[str, pd.DataFrame] = {}
+    for identifier, payload in panels.items():
+        if not isinstance(payload, dict):
+            raise ValueError("value artifact panel is malformed")
+        index = pd.DatetimeIndex(pd.to_datetime(payload["index"]), name=payload.get("index_name"))
+        if payload.get("index_freq"):
+            index.freq = pd.tseries.frequencies.to_offset(payload["index_freq"])
+        columns = pd.Index(payload["columns"], name=payload.get("columns_name"))
+        values = np.asarray(payload["values"], dtype="float64")
+        missing = np.asarray(payload["nan_mask"], dtype=bool)
+        if values.shape != missing.shape or values.shape != (len(index), len(columns)):
+            raise ValueError("value artifact panel shape is invalid")
+        if index.has_duplicates or columns.has_duplicates:
+            raise ValueError("value artifact panel axes are duplicated")
+        values[missing] = np.nan
+        decoded[str(identifier)] = pd.DataFrame(values, index=index, columns=columns)
+    return decoded
 
 
 def _json_safe(value: Any) -> Any:
@@ -178,21 +294,28 @@ def training_archive_entry(
     training_fingerprint: str,
     operator_version: str,
     diagnostics: Mapping[str, Any],
+    value_artifact: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Return an archive-safe record containing only the AST and train diagnostics."""
-    return {
+    entry = {
         "expression_id": str(candidate.expression_id),
         "ast": _tree_payload(candidate.tree),
         "training_fingerprint": training_fingerprint,
         "operator_version": operator_version,
         "training_diagnostics": _json_safe(diagnostics),
     }
+    if value_artifact is not None:
+        entry["value_artifact"] = _json_safe(value_artifact)
+    return entry
 
 
 __all__ = [
     "build_provenance",
     "read_verified_manifest",
+    "read_verified_value_artifact",
     "training_archive_entry",
+    "ValueArtifact",
     "working_tree_patch_hash",
     "write_artifact",
+    "write_value_artifact",
 ]
