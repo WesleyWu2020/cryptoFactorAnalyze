@@ -101,6 +101,28 @@ def test_git_hash_streams_large_untracked_files_without_read_bytes(tmp_path, mon
     assert working_tree_patch_hash(tmp_path) != first
 
 
+def test_git_hash_does_not_capture_complete_diffs_in_memory(tmp_path, monkeypatch):
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    subprocess.run(["git", "-C", str(tmp_path), "config", "user.email", "test@example.com"], check=True)
+    subprocess.run(["git", "-C", str(tmp_path), "config", "user.name", "Test"], check=True)
+    tracked = tmp_path / "large.txt"
+    tracked.write_text("before\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(tmp_path), "add", "large.txt"], check=True)
+    subprocess.run(["git", "-C", str(tmp_path), "commit", "-qm", "fixture"], check=True)
+    tracked.write_text("after\n" * 200_000, encoding="utf-8")
+
+    real_run = subprocess.run
+
+    def reject_diff_capture(command, *args, **kwargs):
+        if command[:2] == ["git", "diff"]:
+            assert "capture_output" not in kwargs
+        return real_run(command, *args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", reject_diff_capture)
+
+    assert len(working_tree_patch_hash(tmp_path)) == 64
+
+
 def test_non_git_hash_ignores_timestamp_only_changes(tmp_path):
     source = tmp_path / "source.txt"
     source.write_text("content", encoding="utf-8")

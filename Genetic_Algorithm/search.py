@@ -146,7 +146,7 @@ def _reject_reference_symlinks(root: Path, reference: str, *, label: str) -> Non
     current = root.resolve()
     for part in Path(reference).parts:
         current /= part
-        if os.path.lexists(current) and current.is_symlink():
+        if os.path.lexists(current) and stat.S_ISLNK(os.lstat(current).st_mode):
             raise ValueError(f"{label} path is unsafe because it traverses a symlink: {reference!r}")
 
 
@@ -277,6 +277,9 @@ def _load_archive(path: str | Path | None) -> tuple[list[dict[str, Any]], dict[s
         relative, digest = reference.get("path"), reference.get("sha256")
         if not isinstance(relative, str) or not isinstance(digest, str):
             raise ValueError(f"archive value artifact reference is malformed for {identifier}")
+        _reject_reference_symlinks(
+            archive_path.parent, relative, label="archive value artifact"
+        )
         artifact_path = _confined_reference(
             archive_path.parent, relative, label="archive value artifact"
         )

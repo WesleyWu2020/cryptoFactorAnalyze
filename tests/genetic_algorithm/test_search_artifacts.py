@@ -271,6 +271,30 @@ def test_load_archive_rejects_value_artifact_missing_candidate_panel(tmp_path):
     with pytest.raises(ValueError, match="missing panel.*candidate"):
         _load_archive(archive_path)
 
+
+def test_load_archive_rejects_in_tree_symlink_value_artifact(tmp_path):
+    real_values_path = tmp_path / "real-values.json"
+    value_artifact = write_value_artifact(
+        real_values_path,
+        {"candidate": pd.DataFrame(
+            [[1.0]], index=pd.date_range("2024-01-01", periods=1), columns=["S0"]
+        )},
+    )
+    symlink_path = tmp_path / "values.json"
+    symlink_path.symlink_to(real_values_path)
+    archive_path = tmp_path / "archive.json"
+    write_artifact(
+        archive_path,
+        {"training_only": True, "candidates": [{
+            **_valid_archive_entry("candidate"),
+            "value_artifact": {"path": symlink_path.name, "sha256": value_artifact.sha256},
+        }]},
+        immutable=True,
+    )
+
+    with pytest.raises(ValueError, match="traverses a symlink"):
+        _load_archive(archive_path)
+
 @pytest.mark.parametrize(
     "missing",
     ["expression_id", "training_only", "ast", "training_fingerprint", "operator_version", "training_diagnostics"],

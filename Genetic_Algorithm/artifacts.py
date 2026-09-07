@@ -366,25 +366,27 @@ def working_tree_patch_hash(repository_root: str | Path) -> str:
     """Hash tracked patches and untracked files in the working tree."""
     root = Path(repository_root)
     try:
-        staged = subprocess.run(
-            ["git", "diff", "--binary", "--cached"], cwd=root, check=True, capture_output=True
-        ).stdout
-        unstaged = subprocess.run(
-            ["git", "diff", "--binary"], cwd=root, check=True, capture_output=True
-        ).stdout
-        untracked_paths = subprocess.run(
-            ["git", "ls-files", "--others", "--exclude-standard", "-z"],
+        subprocess.run(
+            ["git", "rev-parse", "--is-inside-work-tree"],
             cwd=root,
             check=True,
-            capture_output=True,
-        ).stdout.split(b"\0")
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
     except (OSError, subprocess.CalledProcessError):
         return _non_git_working_tree_hash(root)
+
     digest = hashlib.sha256()
-    digest.update(staged)
+    _hash_git_output(digest, ["git", "diff", "--binary", "--cached"], cwd=root)
     digest.update(b"\0")
-    digest.update(unstaged)
+    _hash_git_output(digest, ["git", "diff", "--binary"], cwd=root)
     digest.update(b"\0")
+    untracked_paths = subprocess.run(
+        ["git", "ls-files", "--others", "--exclude-standard", "-z"],
+        cwd=root,
+        check=True,
+        capture_output=True,
+    ).stdout.split(b"\0")
     for raw_path in sorted(path for path in untracked_paths if path):
         path = root / os.fsdecode(raw_path)
         digest.update(raw_path)
@@ -401,6 +403,18 @@ def working_tree_patch_hash(repository_root: str | Path) -> str:
                     digest.update(content)
         digest.update(b"\0")
     return digest.hexdigest()
+
+
+def _hash_git_output(digest: Any, command: list[str], *, cwd: Path) -> None:
+    """Hash Git output without retaining the complete output in memory."""
+    with tempfile.TemporaryFile() as handle:
+        subprocess.run(command, cwd=cwd, check=True, stdout=handle)
+        handle.seek(0)
+        while True:
+            content = handle.read(_NON_GIT_READ_CHUNK)
+            if not content:
+                break
+            digest.update(content)
 
 
 def _non_git_working_tree_hash(root: Path) -> str:
