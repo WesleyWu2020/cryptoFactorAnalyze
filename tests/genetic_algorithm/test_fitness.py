@@ -70,6 +70,24 @@ def test_reversed_factor_gets_direction_from_training_only():
     assert all(value > 0.99 for value in score.quarter_means.values())
 
 
+def test_zero_raw_training_mean_is_ineligible_before_direction_and_quarter_gates():
+    from Genetic_Algorithm.fitness import score_training
+
+    values, labels, quality = _panel()
+    for row, date in enumerate(values.index):
+        if row % 2:
+            values.loc[date] = values.loc[date].iloc[::-1].to_numpy()
+
+    score = score_training(values, labels, quality, _config())
+
+    assert score.direction == 0
+    assert score.mean_ic is None
+    assert score.worst_quarter_ic is None
+    assert score.objective_vector == (None, None, -score.node_count)
+    assert not score.eligible
+    assert any("zero raw training mean" in reason for reason in score.reasons)
+
+
 def test_fewer_than_minimum_pairs_produce_no_valid_daily_ic():
     from Genetic_Algorithm.fitness import score_training
 

@@ -4,6 +4,7 @@ import pytest
 
 from Genetic_Algorithm.evolution import (
     Candidate,
+    CandidateInvalidError,
     SearchFormationError,
     crowding_distance,
     nondominated_sort,
@@ -220,7 +221,7 @@ def test_evaluator_exception_is_logged_and_resampled_within_max_attempts():
         nonlocal calls
         calls += 1
         if calls == 1:
-            raise RuntimeError("transient evaluator failure")
+            raise CandidateInvalidError("transient evaluator failure")
         return {"score": (1.0, 1.0), "eligible": True, "reasons": ()}
 
     result = search(
@@ -239,7 +240,7 @@ def test_evaluator_exception_is_logged_and_resampled_within_max_attempts():
 
     assert calls == 2
     assert result.generation_log[0]["invalid_reasons"] == {
-        "RuntimeError: transient evaluator failure": 1,
+        "CandidateInvalidError: transient evaluator failure": 1,
     }
     assert len(result.candidates) == 1
 
@@ -250,7 +251,7 @@ def test_population_scaled_attempt_cap_limits_evaluator_calls():
     def evaluate(*args):
         nonlocal calls
         calls += 1
-        raise RuntimeError("always fails")
+        raise CandidateInvalidError("always fails")
 
     with pytest.raises(SearchFormationError, match="after 50/50 attempts"):
         search(
@@ -268,6 +269,26 @@ def test_population_scaled_attempt_cap_limits_evaluator_calls():
         )
 
     assert calls == 50
+
+
+def test_unexpected_evaluator_exception_is_not_swallowed():
+    def evaluate(*args):
+        raise RuntimeError("broken evaluator contract")
+
+    with pytest.raises(RuntimeError, match="broken evaluator contract"):
+        search(
+            {"marker": "synthetic"},
+            {
+                "seed": 10,
+                "population": 1,
+                "generations": 1,
+                "max_depth": 0,
+                "max_nodes": 1,
+                "max_attempts": 2,
+                "initial_trees": [Node("close")],
+                "evaluate_candidate": evaluate,
+            },
+        )
 
 
 def test_copy_probability_selects_copy_branch():

@@ -112,6 +112,20 @@ def score_training(
     cell_coverage = observed / denominator if denominator else 0.0
 
     raw_mean = _finite(daily["rank_ic"].mean()) if valid_days else None
+    if raw_mean == 0.0:
+        return TrainingScore(
+            direction=0,
+            mean_ic=None,
+            worst_quarter_ic=None,
+            icir=None,
+            quarter_means={f"Q{quarter}": None for quarter in range(1, 5)},
+            valid_days=valid_days,
+            day_coverage=float(day_coverage),
+            cell_coverage=float(cell_coverage),
+            node_count=int(_config_value(config, "node_count", 0)),
+            eligible=False,
+            reasons=("zero raw training mean; direction is undefined",),
+        )
     direction = 1 if raw_mean is None or raw_mean >= 0 else -1
     directed = daily["rank_ic"] * direction
     mean_ic = _finite(directed.mean()) if valid_days else None

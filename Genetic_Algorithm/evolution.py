@@ -37,6 +37,10 @@ class SearchFormationError(RuntimeError):
     """Raised when the structural population cannot be formed in its budget."""
 
 
+class CandidateInvalidError(ValueError):
+    """Raised when one candidate is invalid but search may try another."""
+
+
 def _value(config: Any, name: str, default: Any = None) -> Any:
     if isinstance(config, dict):
         return config.get(name, default)
@@ -330,7 +334,7 @@ def search(stage_data: Any, config: Any) -> SearchResult:
                 evaluations += 1
                 try:
                     score, eligible, failure_reasons = _training_evaluate(canonical, stage_data, config)
-                except Exception as exc:
+                except CandidateInvalidError as exc:
                     reasons[type(exc).__name__ + ": " + str(exc)] += 1
                     continue
                 cache[identifier] = (score, eligible, tuple(failure_reasons), canonical)
@@ -414,6 +418,6 @@ def search(stage_data: Any, config: Any) -> SearchResult:
 
 
 __all__ = [
-    "Candidate", "SearchResult", "SearchFormationError", "nondominated_sort",
+    "Candidate", "CandidateInvalidError", "SearchResult", "SearchFormationError", "nondominated_sort",
     "crowding_distance", "select_population", "select_exploratory", "search",
 ]
