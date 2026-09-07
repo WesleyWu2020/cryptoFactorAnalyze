@@ -50,7 +50,7 @@ from .profiles import resolve_profile
 from .reporting import render_result
 from .storage import FactorStorage, snapshot_source_stats
 from .validation import check_cutoff, scan_future_leaks
-from .value_engine import compute_factor, value_pipeline_fingerprint
+from .value_engine import _quality_mask, compute_factor, value_pipeline_fingerprint
 
 _SCENARIO_TABLES = (
     "ledger",
@@ -415,6 +415,18 @@ class FactorManager:
             if cached is not None:
                 values, cached_payload = cached
                 eligible = self.dp.get_universe(start=start, end=end)
+                if spec.setting.get("context_eligible", False):
+                    eligible &= _quality_mask(
+                        self.dp,
+                        start=start,
+                        end=end,
+                        expected=(values.index, values.columns),
+                    )
+                # Treat the point-in-time universe as the final authority even
+                # when a cache file was produced by an older process.  This
+                # prevents stale non-member values from reaching ranking and
+                # order generation.
+                values = values.where(eligible.reindex_like(values).fillna(False))
                 value_diag = {
                     "eligible_count": int(eligible.to_numpy().sum()),
                     "ineligible_count": int(eligible.size - eligible.to_numpy().sum()),

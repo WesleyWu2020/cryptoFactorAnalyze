@@ -27,7 +27,7 @@ META = {{"factor_name": "{name}", "author": "test", "level": "daily",
 
 SETTING = {{"data_needed": ["close"], "universe": "historical_top50",
           "warmup_bars": 1, "preprocessing": "none",
-          "params": {{"window": 1}}, "factor_direction": {direction}}}
+          "params": {{"window": 1}}, "factor_direction": {direction}{context_setting}}}
 
 
 def calc_factor(data_ctx):
@@ -60,10 +60,15 @@ def _no_network(monkeypatch):
 
 
 def _write_factor(tmp_path: Path, name: str = "mom1", *, direction: int = 1,
-                  formula: str = CAUSAL_FORMULA) -> Path:
+                  formula: str = CAUSAL_FORMULA,
+                  context_eligible: bool = False) -> Path:
+    context_setting = ", \"context_eligible\": True" if context_eligible else ""
     path = tmp_path / f"{name}.py"
     path.write_text(
-        FACTOR_SOURCE.format(name=name, direction=direction, formula=formula),
+        FACTOR_SOURCE.format(
+            name=name, direction=direction, formula=formula,
+            context_setting=context_setting,
+        ),
         encoding="utf-8",
     )
     return path
@@ -171,6 +176,29 @@ def test_evaluate_does_not_persist_evaluation_by_default(tmp_path, h5_fixture, f
     assert result["evaluation_id"] is None
     assert result["paths"]["evaluation_dir"] is None
     assert list((tmp_path / "factor_results").glob("mom1.evaluation*")) == []
+
+
+def test_cached_context_eligible_values_recompute_quality_diagnostics(
+    manager, tmp_path, monkeypatch
+):
+    factor_file = _write_factor(tmp_path, name="context_mom", context_eligible=True)
+    original_get_quality = manager.dp.get_quality
+
+    def get_quality_with_unknown(*, start, end, symbols):
+        quality = original_get_quality(start=start, end=end, symbols=symbols).copy()
+        key = (pd.Timestamp("2024-01-07"), "AUSDT")
+        if key in quality.index:
+            quality.loc[key, "has_complete_kline"] = np.nan
+        return quality
+
+    monkeypatch.setattr(manager.dp, "get_quality", get_quality_with_unknown)
+
+    first = manager.evaluate(str(factor_file), params=dict(BASE_PARAMS), plot=False)
+    second = manager.evaluate(str(factor_file), params=dict(BASE_PARAMS), plot=False)
+
+    assert first["run_id"] == second["run_id"]
+    assert first["diagnostics"]["value"]["ineligible_count"] >= 2
+    assert second["diagnostics"]["value"] == first["diagnostics"]["value"]
 
 
 def test_evaluate_dataframe_long_table(manager):

@@ -152,6 +152,31 @@ def test_opt_in_context_uses_complete_non_placeholder_quality_mask():
     assert diagnostics["eligible_count"] == 1
 
 
+def test_opt_in_context_rejects_unknown_quality_values():
+    close = frame([[1.0, 2.0, 3.0, 4.0]])
+    eligible = frame([[True, True, True, True]])
+    quality = {
+        "has_complete_kline": frame([[True, True, True, np.nan]]),
+        "has_placeholder_kline": frame([[False, np.nan, "unknown", False]]),
+    }
+
+    values, diagnostics = compute_factor(
+        spec(context_eligible=True),
+        MemoryProvider(close, eligible, quality),
+        start=close.index[0],
+        end=close.index[-1],
+    )
+
+    assert values.iloc[0, 0] == 1.0
+    assert values.iloc[0, 1:].isna().all()
+    assert diagnostics == {
+        "eligible_count": 1,
+        "ineligible_count": 3,
+        "missing_count": 0,
+        "valid_count": 1,
+    }
+
+
 def test_diagnostics_distinguish_missing_from_ineligible_and_keep_nan():
     close = frame([[5., np.inf, -np.inf, np.nan, 99.], [np.nan]*5])
     eligible = frame([[True, True, True, True, False], [True]*5])

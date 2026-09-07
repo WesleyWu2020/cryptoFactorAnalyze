@@ -87,10 +87,14 @@ def _quality_mask(dp, *, start, end, expected):
         [dates, instruments], names=["date", "instrument"]
     )
     quality = quality.reindex(quality_index)
-    complete = quality["has_complete_kline"].eq(True).to_numpy().reshape(
+    complete = quality["has_complete_kline"].map(
+        lambda value: type(value) in (bool, np.bool_) and bool(value)
+    ).to_numpy().reshape(
         len(dates), len(instruments)
     )
-    non_placeholder = ~quality["has_placeholder_kline"].eq(True).to_numpy().reshape(
+    non_placeholder = quality["has_placeholder_kline"].map(
+        lambda value: type(value) in (bool, np.bool_) and not bool(value)
+    ).to_numpy().reshape(
         len(dates), len(instruments)
     )
     return pd.DataFrame(
