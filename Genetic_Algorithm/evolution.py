@@ -246,6 +246,7 @@ def _random_tree(rng: np.random.Generator, config: Any, depth: int = 0) -> Node:
 def _variation(parent_a: Node, parent_b: Node, rng: np.random.Generator, config: Any) -> Node:
     crossover = float(_value(config, "crossover_probability", 0.6))
     mutation = float(_value(config, "mutation_probability", 0.3))
+    copy = float(_value(config, "copy_probability", 0.1))
     draw = float(rng.random())
     if draw < crossover:
         parent_a_paths = _paths(parent_a)
@@ -257,7 +258,9 @@ def _variation(parent_a: Node, parent_b: Node, rng: np.random.Generator, config:
         parent_paths = _paths(parent_a)
         target = parent_paths[int(rng.integers(len(parent_paths)))]
         return _replace(parent_a, target, _random_tree(rng, config))
-    return parent_a
+    if draw < crossover + mutation + copy:
+        return parent_a
+    raise ValueError("variation probabilities must cover the random draw")
 
 
 def _training_evaluate(tree: Node, stage_data: Any, config: Any) -> tuple[tuple[float, ...], bool, tuple[str, ...]]:
@@ -283,10 +286,16 @@ def _training_evaluate(tree: Node, stage_data: Any, config: Any) -> tuple[tuple[
 
 def search(stage_data: Any, config: Any) -> SearchResult:
     """Run a deterministic GP search using one local random generator."""
+    from .config import SearchConfig
+
+    if isinstance(config, dict):
+        config = SearchConfig(**config)
+    elif not isinstance(config, SearchConfig):
+        raise TypeError("search config must be a SearchConfig or mapping")
     rng = np.random.default_rng(int(_value(config, "seed", 42)))
     population_size = int(_value(config, "population", 200))
     generations = int(_value(config, "generations", 20))
-    max_attempts = int(_value(config, "max_attempts", population_size * 50))
+    max_attempts = config.max_attempts
     cache: dict[str, tuple[tuple[Any, ...], bool, tuple[str, ...], Node]] = {}
     evaluations = 0
     objective_width: int | None = None
@@ -322,7 +331,8 @@ def search(stage_data: Any, config: Any) -> SearchResult:
                 try:
                     score, eligible, failure_reasons = _training_evaluate(canonical, stage_data, config)
                 except Exception as exc:
-                    score, eligible, failure_reasons = (), False, (type(exc).__name__ + ": " + str(exc),)
+                    reasons[type(exc).__name__ + ": " + str(exc)] += 1
+                    continue
                 cache[identifier] = (score, eligible, tuple(failure_reasons), canonical)
             score = tuple(score)
             if not score:

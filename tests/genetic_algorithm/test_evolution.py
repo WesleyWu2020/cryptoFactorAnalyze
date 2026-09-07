@@ -114,7 +114,8 @@ def test_invalid_offspring_is_rejected_and_no_legal_population_raises():
                 "population": 2,
                 "generations": 1,
                 "max_depth": 0,
-                "max_nodes": 0,
+                "max_nodes": 1,
+                "max_attempts": 2,
                 "initial_trees": [Node("not-an-op")],
                 "evaluate_candidate": lambda *args: {
                     "score": (1.0, 1.0), "eligible": True, "reasons": ()
@@ -210,6 +211,60 @@ def test_invalid_offspring_is_resampled_and_reasons_are_logged():
     assert result.generation_log[1]["invalid_reasons"]["bad offspring"] >= 2
     assert result.candidates == ()
     assert len(calls) > 2
+
+
+def test_evaluator_exception_is_logged_and_resampled_within_max_attempts():
+    calls = 0
+
+    def evaluate(tree, stage_data, labels, config):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("transient evaluator failure")
+        return {"score": (1.0, 1.0), "eligible": True, "reasons": ()}
+
+    result = search(
+        {"marker": "synthetic"},
+        {
+            "seed": 9,
+            "population": 1,
+            "generations": 1,
+            "max_depth": 0,
+            "max_nodes": 1,
+            "max_attempts": 2,
+            "initial_trees": [Node("close")],
+            "evaluate_candidate": evaluate,
+        },
+    )
+
+    assert calls == 2
+    assert result.generation_log[0]["invalid_reasons"] == {
+        "RuntimeError: transient evaluator failure": 1,
+    }
+    assert len(result.candidates) == 1
+
+
+def test_copy_probability_selects_copy_branch():
+    from Genetic_Algorithm import evolution
+
+    class FixedRng:
+        def random(self):
+            return 0.95
+
+    parent_a = Node("close")
+    parent_b = Node("open")
+    result = evolution._variation(
+        parent_a,
+        parent_b,
+        FixedRng(),
+        {
+            "crossover_probability": 0.2,
+            "mutation_probability": 0.3,
+            "copy_probability": 0.5,
+        },
+    )
+
+    assert result == parent_a
 
 
 def test_duplicate_canonical_trees_do_not_form_population():

@@ -4,6 +4,7 @@ import pandas as pd
 import pytest
 
 from Genetic_Algorithm.config import STAGES, Stage, SearchConfig, load_config
+from Genetic_Algorithm.expression import Node
 
 
 @pytest.mark.parametrize("name,last", [
@@ -34,6 +35,11 @@ def test_default_search_config_values_are_frozen():
     assert config.windows == (3, 5, 10, 20, 40, 60)
     assert config.lags == (1, 3, 5, 10)
     assert config.enable_funding_features is False
+    assert config.max_attempts == 10000
+    assert config.tournament_size == 2
+    assert config.hold_days == 1
+    assert config.initial_trees == ()
+    assert config.evaluate_candidate is None
     with pytest.raises((AttributeError, TypeError)):
         config.population = 12
 
@@ -101,6 +107,21 @@ def test_coverage_fields_reject_integers(field):
 def test_unknown_keys_are_rejected():
     with pytest.raises(TypeError, match="Unknown configuration keys"):
         SearchConfig(unknown_key=1)
+
+
+@pytest.mark.parametrize("field", ["population", "generations", "max_attempts", "tournament_size", "hold_days"])
+def test_search_integer_budgets_reject_invalid_raw_values(field):
+    with pytest.raises((TypeError, ValueError)):
+        SearchConfig(**{field: True})
+    with pytest.raises((TypeError, ValueError)):
+        SearchConfig(**{field: 0})
+
+
+def test_search_only_config_values_are_strictly_validated():
+    with pytest.raises(TypeError):
+        SearchConfig(initial_trees=Node("close"))
+    with pytest.raises(TypeError):
+        SearchConfig(evaluate_candidate=1)
 
 
 def test_stage_rejects_reversed_dates():

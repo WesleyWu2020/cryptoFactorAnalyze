@@ -11,6 +11,8 @@ from typing import Any
 
 import pandas as pd
 
+from .expression import Node
+
 
 @dataclass(frozen=True)
 class Stage:
@@ -61,6 +63,11 @@ class SearchConfig:
     frozen_limit: int = 5
     cache_bytes: int = 268435456
     enable_funding_features: bool = False
+    max_attempts: int = 10000
+    tournament_size: int = 2
+    initial_trees: tuple[Node, ...] = ()
+    evaluate_candidate: Any = None
+    hold_days: int = 1
 
     def __init__(self, **overrides: Any) -> None:
         unknown = set(overrides) - set(self.__dataclass_fields__)
@@ -69,9 +76,9 @@ class SearchConfig:
             raise TypeError(f"Unknown configuration keys: {names}")
         for name, field in self.__dataclass_fields__.items():
             value = overrides.get(name, field.default)
-            if name in {"windows", "lags"}:
+            if name in {"windows", "lags", "initial_trees"}:
                 if not isinstance(value, (list, tuple)):
-                    raise TypeError(f"{name} must be a list or tuple of integers")
+                    raise TypeError(f"{name} must be a list or tuple")
                 value = tuple(value)
             object.__setattr__(self, name, value)
         self._validate()
@@ -80,7 +87,8 @@ class SearchConfig:
         integer_fields = {
             "seed", "population", "generations", "max_depth", "max_nodes",
             "max_history", "min_pairs", "min_quarter_days", "min_overlap_days",
-            "validation_limit", "frozen_limit", "cache_bytes",
+            "validation_limit", "frozen_limit", "cache_bytes", "max_attempts",
+            "tournament_size", "hold_days",
         }
         for name in integer_fields:
             value = getattr(self, name)
@@ -90,7 +98,7 @@ class SearchConfig:
         positive_fields = {
             "population", "generations", "max_nodes", "max_history", "min_pairs",
             "min_quarter_days", "min_overlap_days", "validation_limit", "frozen_limit",
-            "cache_bytes",
+            "cache_bytes", "max_attempts", "tournament_size", "hold_days",
         }
         for name in positive_fields:
             if getattr(self, name) <= 0:
@@ -102,6 +110,10 @@ class SearchConfig:
             values = getattr(self, name)
             if not values or any(type(value) is not int or value <= 0 for value in values):
                 raise ValueError(f"{name} must contain positive integers")
+        if any(not isinstance(tree, Node) for tree in self.initial_trees):
+            raise TypeError("initial_trees must contain Node instances")
+        if self.evaluate_candidate is not None and not callable(self.evaluate_candidate):
+            raise TypeError("evaluate_candidate must be callable or None")
 
         probability_fields = (
             "crossover_probability", "mutation_probability", "copy_probability",
