@@ -326,10 +326,10 @@ def _recover_publish_destination(destination: Path) -> None:
         paths["backup"] = resolved
     if paths["destination"] != destination:
         raise ValueError(f"publish journal destination mismatch: {journal_path}")
-    if paths["staging"] == paths["destination"]:
+    if paths["staging"] in {paths["destination"], journal_path}:
         raise ValueError(f"publish journal staging collides with destination: {journal_path}")
     if "backup" in paths and paths["backup"] in {
-        paths["destination"], paths["staging"]
+        paths["destination"], paths["staging"], journal_path
     }:
         raise ValueError(f"publish journal backup collides with another path: {journal_path}")
 

@@ -20,6 +20,8 @@ import pandas as pd
 
 _DIGEST_FIELD = "sha256"
 _VALUE_ARTIFACT_VERSION = 1
+_NON_GIT_MAX_FILES = 4096
+_NON_GIT_MAX_BYTES = 64 * 1024 * 1024
 
 
 def _requirement_names(repository_root: Path) -> tuple[str, ...]:
@@ -308,7 +310,7 @@ def working_tree_patch_hash(repository_root: str | Path) -> str:
             capture_output=True,
         ).stdout.split(b"\0")
     except (OSError, subprocess.CalledProcessError):
-        return hashlib.sha256(b"non-git-repository\0").hexdigest()
+        return _non_git_working_tree_hash(root)
     untracked = bytearray()
     for raw_path in sorted(path for path in untracked_paths if path):
         path = root / os.fsdecode(raw_path)
@@ -317,6 +319,51 @@ def working_tree_patch_hash(repository_root: str | Path) -> str:
         untracked.extend(path.read_bytes())
         untracked.extend(b"\0")
     return hashlib.sha256(staged + b"\0" + unstaged + b"\0" + bytes(untracked)).hexdigest()
+
+
+def _non_git_working_tree_hash(root: Path) -> str:
+    """Hash a deterministic, bounded snapshot when Git metadata is unavailable."""
+    digest = hashlib.sha256(b"non-git-working-tree-v1\0")
+    file_count = 0
+    byte_count = 0
+    root = root.resolve()
+    if not root.is_dir():
+        digest.update(b"missing-root\0")
+        return digest.hexdigest()
+
+    for directory, dirnames, filenames in os.walk(root, followlinks=False):
+        dirnames[:] = sorted(name for name in dirnames if name != ".git")
+        for name in sorted(filenames):
+            if file_count >= _NON_GIT_MAX_FILES:
+                digest.update(b"file-limit\0")
+                return digest.hexdigest()
+            path = Path(directory) / name
+            relative = path.relative_to(root).as_posix().encode("utf-8", "surrogateescape")
+            digest.update(b"path\0" + relative + b"\0")
+            file_count += 1
+            if path.is_symlink():
+                digest.update(b"symlink\0")
+                digest.update(os.readlink(path).encode("utf-8", "surrogateescape"))
+                digest.update(b"\0")
+                continue
+            if not path.is_file():
+                digest.update(b"unsupported\0")
+                continue
+            digest.update(b"file\0")
+            remaining = _NON_GIT_MAX_BYTES - byte_count
+            if remaining <= 0:
+                digest.update(b"byte-limit\0")
+                return digest.hexdigest()
+            with path.open("rb") as handle:
+                content = handle.read(remaining)
+                truncated = len(content) == remaining and handle.read(1)
+            digest.update(content)
+            byte_count += len(content)
+            if truncated:
+                digest.update(b"truncated\0")
+                return digest.hexdigest()
+            digest.update(b"\0")
+    return digest.hexdigest()
 
 
 def build_provenance(

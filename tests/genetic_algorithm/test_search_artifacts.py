@@ -323,6 +323,8 @@ def test_publish_recovery_normalizes_destination_alias(tmp_path):
         ("run", ".run.staging"),
         (".run.audit-backup", ".run.audit-backup"),
         (".run.audit-backup", "../outside"),
+        (".run.publish.json", ".run.staging"),
+        (".run.audit-backup", ".run.publish.json"),
     ],
 )
 def test_publish_recovery_rejects_invalid_journal_paths(tmp_path, backup, staging):
@@ -340,6 +342,29 @@ def test_publish_recovery_rejects_invalid_journal_paths(tmp_path, backup, stagin
 
     with pytest.raises(ValueError, match="publish journal"):
         search_module._recover_publish_destination(destination)
+
+    assert journal.exists()
+
+
+def test_publish_recovery_rejects_symlink_alias_to_journal_without_deleting_it(tmp_path):
+    destination = tmp_path / "run"
+    journal = tmp_path / ".run.publish.json"
+    alias = tmp_path / ".run.staging"
+    alias.symlink_to(journal)
+    journal.write_text(
+        json.dumps({
+            "version": 1,
+            "destination": destination.name,
+            "backup": None,
+            "staging": alias.name,
+        }),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="publish journal"):
+        search_module._recover_publish_destination(destination)
+
+    assert journal.exists()
 
 
 def test_run_search_rejects_same_expression_id_with_incompatible_provenance(

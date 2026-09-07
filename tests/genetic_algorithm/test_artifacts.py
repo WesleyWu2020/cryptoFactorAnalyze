@@ -28,6 +28,17 @@ def test_working_tree_patch_hash_is_deterministic_without_git(tmp_path):
     assert len(first) == 64
 
 
+def test_working_tree_patch_hash_changes_for_different_non_git_trees(tmp_path):
+    first_tree = tmp_path / "first"
+    second_tree = tmp_path / "second"
+    first_tree.mkdir()
+    second_tree.mkdir()
+    (first_tree / "source.py").write_text("VALUE = 1\n", encoding="utf-8")
+    (second_tree / "source.py").write_text("VALUE = 2\n", encoding="utf-8")
+
+    assert working_tree_patch_hash(first_tree) != working_tree_patch_hash(second_tree)
+
+
 def test_manifest_is_immutable_and_verified(tmp_path):
     path = tmp_path / "run.manifest.json"
     write_artifact(path, {"metrics": {"ic": float("nan")}, "seed": 7})
