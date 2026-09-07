@@ -8,6 +8,7 @@ import pandas as pd
 from Genetic_Algorithm.evolution import Candidate, SearchResult
 from Genetic_Algorithm.expression import Node
 from Genetic_Algorithm.config import STAGES
+from Genetic_Algorithm.evolution import search as evolution_search
 from Genetic_Algorithm import search as search_module
 from Genetic_Algorithm.artifacts import write_artifact
 
@@ -38,7 +39,7 @@ def test_run_search_writes_training_artifacts_without_validation(tmp_path, monke
         selected_code_paths=(),
         seed=7,
         operator_version="ops-v1",
-        backtest_profile={"fees": 0.001},
+        backtest_profile={"fee_rate": 0.001},
         experiment_id="train-exp",
     )
 
@@ -50,6 +51,56 @@ def test_run_search_writes_training_artifacts_without_validation(tmp_path, monke
     assert provenance["selected_code_content_hashes"]
     assert provenance["package_versions"]
     assert archive["candidates"][0]["expression_id"] == "candidate-id"
+
+
+def test_run_search_persists_real_search_panels_and_compares_on_second_run(tmp_path, monkeypatch):
+    audit_path = tmp_path / "audit_train.json"
+    audit_path.write_text(
+        json.dumps({"training_only": True, "fingerprint": "train-fingerprint", "stage": {"name": "train"}}),
+        encoding="utf-8",
+    )
+    dates = pd.date_range("2024-01-01", periods=120, freq="D")
+    values = pd.DataFrame(
+        np.arange(120 * 24, dtype="float64").reshape(120, 24),
+        index=dates,
+        columns=[f"S{i:02d}" for i in range(24)],
+    )
+    search_config = {
+        "seed": 3,
+        "population": 1,
+        "generations": 1,
+        "max_depth": 0,
+        "max_nodes": 1,
+        "initial_trees": [Node("close")],
+        "evaluate_candidate": lambda tree, stage_data, labels, config: {
+            "score": (1.0, 1.0, -1), "eligible": True, "reasons": (), "values": values,
+        },
+    }
+    monkeypatch.setattr(search_module, "run_training_audit", lambda *args, **kwargs: audit_path)
+
+    def search_stage(_audit):
+        return evolution_search({"marker": "synthetic"}, search_config)
+
+    first = search_module.run_search(
+        "unused.h5", audit_path, stage=STAGES["train"], warmup_days=0, fields=["close"],
+        search_stage=search_stage, artifact_dir=tmp_path / "first", repository_root=REPOSITORY_ROOT,
+        operator_version="ops-v1",
+    )
+    assert first.values_by_id
+    first_archive = tmp_path / "first" / "training_candidates.json"
+    second = search_module.run_search(
+        "unused.h5", audit_path, stage=STAGES["train"], warmup_days=0, fields=["close"],
+        search_stage=search_stage, artifact_dir=tmp_path / "second", archive_path=first_archive,
+        repository_root=REPOSITORY_ROOT, operator_version="ops-v1",
+    )
+
+    assert second.candidates == ()
+    dedup = json.loads((tmp_path / "second" / "deduplication.json").read_text(encoding="utf-8"))
+    assert any(
+        "duplicate" in reason
+        for reasons in dedup["rejection_reasons"].values()
+        for reason in reasons
+    )
 
 
 def test_run_search_uses_deterministic_default_artifact_dir(tmp_path, monkeypatch):
@@ -118,6 +169,28 @@ def test_run_search_writes_value_artifact_and_deduplicates_with_archive(tmp_path
     assert reference["path"] == "training_values.json"
     assert len(reference["sha256"]) == 64
     assert (tmp_path / "run" / reference["path"]).exists()
+
+
+def test_run_search_resolves_default_backtest_profile_and_merges_overrides(tmp_path, monkeypatch):
+    audit_path = tmp_path / "audit_train.json"
+    audit_path.write_text(
+        json.dumps({"training_only": True, "fingerprint": "train-fingerprint", "stage": {"name": "train"}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(search_module, "run_training_audit", lambda *args, **kwargs: audit_path)
+
+    search_module.run_search(
+        "unused.h5", audit_path, stage=STAGES["train"], warmup_days=0, fields=["close"],
+        search_stage=lambda path: SearchResult((), (), 0), artifact_dir=tmp_path / "run",
+        repository_root=REPOSITORY_ROOT, backtest_profile={"fee_rate": 0.001},
+    )
+
+    provenance = json.loads((tmp_path / "run" / "provenance.json").read_text(encoding="utf-8"))
+    profile = provenance["backtest_profile"]
+    assert profile["profile_id"] == "perp_1d"
+    assert profile["fee_rate"] == 0.001
+    assert profile["slippage"] == 0.001
+    assert profile["include_funding"] is True
 
 
 def test_run_search_loads_existing_archive_for_novelty(tmp_path, monkeypatch):

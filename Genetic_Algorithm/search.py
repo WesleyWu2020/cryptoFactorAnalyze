@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import replace
+from dataclasses import asdict, replace
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping, TypeVar
 
@@ -21,9 +21,15 @@ from .artifacts import (
 from .config import Stage
 from .data import run_training_audit
 from .selection import deduplicate_training
+from factor_common.profiles import resolve_profile
 
 
 Result = TypeVar("Result")
+
+
+def _resolve_backtest_profile(overrides: Mapping[str, Any] | None) -> dict[str, Any]:
+    profile = resolve_profile("perp_1d", {} if overrides is None else overrides)
+    return asdict(profile)
 
 
 def _default_artifact_dir(audit_path: str | Path, experiment_id: str) -> Path:
@@ -82,7 +88,7 @@ def run_search(
         package_names=tuple(package_names) or ("numpy", "pandas", "tables"),
         seed=(seed if seed is not None else int((config or {}).get("seed", 42))),
         operator_version=operator_version,
-        backtest_profile=backtest_profile or {},
+        backtest_profile=_resolve_backtest_profile(backtest_profile),
         experiment_id=experiment_id,
         validation_attempts=validation_attempts,
         validation_experiment_id=validation_experiment_id,
@@ -184,6 +190,7 @@ def _write_training_artifacts(
     with Path(audit_path).open(encoding="utf-8") as handle:
         audit = json.load(handle)
     training_fingerprint = str(audit["fingerprint"])
+    backtest_profile = _resolve_backtest_profile(backtest_profile)
     candidates = tuple(getattr(result, "candidates", ()))
     current_values = _result_values(result)
     archive_entries, archive_values = _load_archive(archive_path)

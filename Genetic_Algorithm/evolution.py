@@ -268,7 +268,9 @@ def _variation(parent_a: Node, parent_b: Node, rng: np.random.Generator, config:
     raise ValueError("variation probabilities must cover the random draw")
 
 
-def _training_evaluate(tree: Node, stage_data: Any, config: Any) -> tuple[tuple[float, ...], bool, tuple[str, ...]]:
+def _training_evaluate(
+    tree: Node, stage_data: Any, config: Any
+) -> tuple[tuple[float, ...], bool, tuple[str, ...], Any]:
     """Evaluate one tree; forward labels are created only within this function."""
     custom = _value(config, "evaluate_candidate")
     opens = _value(stage_data, "opens")
@@ -276,8 +278,17 @@ def _training_evaluate(tree: Node, stage_data: Any, config: Any) -> tuple[tuple[
     if callable(custom):
         raw = custom(tree, stage_data, labels, config)
         if isinstance(raw, dict):
-            return tuple(raw["score"]), bool(raw.get("eligible", True)), tuple(raw.get("reasons", ()))
-        return tuple(raw), True, ()
+            values = next(
+                (raw[key] for key in ("values", "factor_values", "training_values") if key in raw),
+                None,
+            )
+            return (
+                tuple(raw["score"]),
+                bool(raw.get("eligible", True)),
+                tuple(raw.get("reasons", ())),
+                values,
+            )
+        return tuple(raw), True, (), None
     features = _value(stage_data, "features")
     eligible = _value(stage_data, "eligible")
     quality = _value(stage_data, "quality_eligible")
@@ -286,7 +297,7 @@ def _training_evaluate(tree: Node, stage_data: Any, config: Any) -> tuple[tuple[
     score_config = dict(config) if isinstance(config, dict) else config.__dict__.copy()
     score_config["node_count"] = _tree_size(tree)
     score = score_training(values, labels, quality, score_config)
-    return tuple(score.objective_vector), score.eligible, score.reasons
+    return tuple(score.objective_vector), score.eligible, score.reasons, values
 
 
 def search(stage_data: Any, config: Any) -> SearchResult:
@@ -301,7 +312,8 @@ def search(stage_data: Any, config: Any) -> SearchResult:
     population_size = int(_value(config, "population", 200))
     generations = int(_value(config, "generations", 20))
     max_attempts = min(config.max_attempts, population_size * 50)
-    cache: dict[str, tuple[tuple[Any, ...], bool, tuple[str, ...], Node]] = {}
+    cache: dict[str, tuple[tuple[Any, ...], bool, tuple[str, ...], Node, Any]] = {}
+    values_by_id: dict[str, Any] = {}
     evaluations = 0
     objective_width: int | None = None
     logs: list[dict[str, Any]] = []
@@ -327,18 +339,20 @@ def search(stage_data: Any, config: Any) -> SearchResult:
                 hits += 1
                 continue
             if identifier in cache:
-                score, eligible, failure_reasons, cached_tree = cache[identifier]
+                score, eligible, failure_reasons, cached_tree, values = cache[identifier]
                 hits += 1
                 canonical = cached_tree
             else:
                 unique += 1
                 evaluations += 1
                 try:
-                    score, eligible, failure_reasons = _training_evaluate(canonical, stage_data, config)
+                    score, eligible, failure_reasons, values = _training_evaluate(canonical, stage_data, config)
                 except CandidateInvalidError as exc:
                     reasons[type(exc).__name__ + ": " + str(exc)] += 1
                     continue
-                cache[identifier] = (score, eligible, tuple(failure_reasons), canonical)
+                cache[identifier] = (score, eligible, tuple(failure_reasons), canonical, values)
+            if values is not None:
+                values_by_id[identifier] = {"values": values}
             score = tuple(score)
             if not score:
                 raise ValueError("evaluator objective vector length must be positive")
@@ -415,7 +429,12 @@ def search(stage_data: Any, config: Any) -> SearchResult:
         current = merged_valid
         exploratory_current = merged_exploratory
         logs.append(log)
-    return SearchResult(tuple(current), tuple(logs), evaluations)
+    retained_values = {
+        candidate.expression_id: values_by_id[candidate.expression_id]
+        for candidate in current
+        if candidate.expression_id in values_by_id
+    }
+    return SearchResult(tuple(current), tuple(logs), evaluations, retained_values)
 
 
 __all__ = [

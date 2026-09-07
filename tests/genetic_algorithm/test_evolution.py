@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import pandas as pd
 import pytest
 
 from Genetic_Algorithm.evolution import (
@@ -149,6 +150,34 @@ def test_repeated_seed_has_identical_search_output():
 
     assert first == second
     assert [candidate.tree.op for candidate in first.candidates] == ["close", "open", "high"]
+
+
+def test_search_retains_training_values_for_retained_candidates():
+    dates = pd.date_range("2024-01-01", periods=3, freq="D")
+    values = pd.DataFrame([[1.0, 2.0], [2.0, 1.0], [3.0, 4.0]], index=dates, columns=["A", "B"])
+
+    result = search(
+        {"marker": "synthetic"},
+        {
+            "seed": 7,
+            "population": 1,
+            "generations": 1,
+            "max_depth": 0,
+            "max_nodes": 1,
+            "initial_trees": [Node("close")],
+            "evaluate_candidate": lambda tree, stage_data, labels, config: {
+                "score": (1.0, 1.0),
+                "eligible": True,
+                "reasons": (),
+                "values": values,
+            },
+        },
+    )
+
+    assert [candidate.expression_id for candidate in result.candidates]
+    assert result.values_by_id
+    retained_id = result.candidates[0].expression_id
+    pd.testing.assert_frame_equal(result.values_by_id[retained_id]["values"], values)
 
 
 def _variation_config(**overrides):
