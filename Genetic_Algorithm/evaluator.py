@@ -43,8 +43,13 @@ def _operator_source_hash() -> str:
 
 
 def _eligible_fingerprint(eligible: pd.DataFrame) -> str:
+    digest = hashlib.sha256()
+    digest.update(json.dumps(list(eligible.shape)).encode())
+    digest.update(json.dumps([str(x) for x in eligible.index], default=str).encode())
+    digest.update(json.dumps([str(x) for x in eligible.columns], default=str).encode())
     values = eligible.astype(bool).to_numpy(dtype=np.uint8)
-    return hashlib.sha256(np.ascontiguousarray(values).tobytes()).hexdigest()
+    digest.update(np.ascontiguousarray(values).tobytes())
+    return digest.hexdigest()
 
 
 def _apply(node: Node, data_ctx: dict[str, pd.DataFrame], eligible: pd.DataFrame) -> pd.DataFrame:

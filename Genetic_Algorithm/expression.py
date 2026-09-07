@@ -9,7 +9,8 @@ from typing import Any
 
 from .features import TERMINAL_DEPENDENCIES, TERMINAL_FIELDS, TERMINAL_HISTORY
 from .operators import (
-    COMMUTATIVE_OPERATORS, OPERATOR_ARITY, ROLLING_OPERATORS, WINDOW_OPERATORS,
+    COMMUTATIVE_OPERATORS, OPERATORS, OPERATOR_ARITY, ROLLING_OPERATORS,
+    WINDOW_OPERATORS,
 )
 
 
@@ -52,13 +53,14 @@ def _stats(node: Node, depth: int = 0) -> tuple[int, int, int, set[str]]:
 def validate_node_attributes(node: Node) -> None:
     if not isinstance(node, Node):
         raise TypeError("tree must contain Node instances")
-    if node.op not in OPERATOR_ARITY:
-        field = node.field or node.op
-        if field not in TERMINAL_FIELDS:
-            raise ValueError(f"unknown field: {field}")
+    if node.op in TERMINAL_FIELDS:
+        if node.field is not None and node.field != node.op:
+            raise ValueError(f"terminal {node.op} field must match op")
         if node.children or node.window is not None:
             raise ValueError("terminal cannot have children or window")
         return
+    if node.op not in OPERATORS or node.op not in OPERATOR_ARITY:
+        raise ValueError(f"unknown op: {node.op}")
     if len(node.children) != OPERATOR_ARITY[node.op]:
         raise ValueError(f"operator {node.op} requires arity {OPERATOR_ARITY[node.op]}")
     if node.field is not None:

@@ -40,8 +40,36 @@ def test_validation_rejects_illegal_lags_unknown_fields_and_budget_overruns():
     config = {"max_depth": 2, "max_nodes": 5, "max_history": 10}
     with pytest.raises(ValueError, match="positive"):
         validate_tree(Node("lag", (Node("close"),), window=-1), config)
-    with pytest.raises(ValueError, match="unknown field"):
+    with pytest.raises(ValueError, match="unknown op"):
         validate_tree(Node("not_a_field"), config)
     too_deep = Node("negate", (Node("negate", (Node("negate", (Node("close"),)),)),))
     with pytest.raises(ValueError, match="depth"):
         validate_tree(too_deep, config)
+
+
+@pytest.mark.parametrize("node", [
+    Node("not_an_op", field="close"),
+    Node("close", field="open"),
+])
+def test_validation_rejects_unknown_ops_and_mismatched_terminal_fields(node):
+    with pytest.raises(ValueError, match="(unknown op|field)"):
+        validate_tree(node, {})
+
+
+@pytest.mark.parametrize("node", [
+    Node("add", (Node("close"), Node("open")), field="close"),
+    Node("add", (Node("close"), Node("open")), window=2),
+    Node("negate", (Node("close"),), window=2),
+])
+def test_validation_rejects_operator_terminal_attributes(node):
+    with pytest.raises(ValueError, match="(field|window)"):
+        validate_tree(node, {})
+
+
+@pytest.mark.parametrize("node", [
+    Node("add", (Node("close"),)),
+    Node("rolling_mean", (Node("close"),), window=None),
+])
+def test_validation_checks_registered_operator_arity_and_attributes(node):
+    with pytest.raises(ValueError, match="(arity|window)"):
+        validate_tree(node, {})

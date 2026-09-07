@@ -54,6 +54,45 @@ def test_evaluator_cache_respects_byte_budget():
     assert cache == {}
 
 
+def test_evaluator_cache_fingerprint_includes_eligibility_axes():
+    ctx, dates, symbols = _ctx()
+    cache = {}
+    first_eligible = pd.DataFrame(True, index=dates, columns=symbols)
+    second_eligible = first_eligible.copy()
+    second_eligible = second_eligible.loc[:, ["C", "B", "A"]]
+
+    evaluate_tree(Node("close"), ctx, first_eligible, cache=cache)
+    result = evaluate_tree(Node("close"), ctx, second_eligible, cache=cache)
+
+    assert result.index.equals(second_eligible.index)
+    assert result.columns.equals(second_eligible.columns)
+    expected = ctx["close"].reindex(index=second_eligible.index, columns=second_eligible.columns)
+    assert result.equals(expected)
+
+
+def test_nested_rank_ignores_extreme_future_only_ineligible_symbol():
+    dates = pd.date_range("2025-01-01", periods=4, freq="D")
+    symbols = ["A", "B", "FUTURE_EXTREME"]
+    close = pd.DataFrame(
+        [[1.0, 2.0, np.nan], [2.0, 3.0, np.nan], [3.0, 4.0, np.nan], [4.0, 5.0, 1e300]],
+        index=dates,
+        columns=symbols,
+    )
+    ctx = {"close": close}
+    eligible = pd.DataFrame(True, index=dates, columns=symbols)
+    eligible["FUTURE_EXTREME"] = False
+    tree = Node("rank", (Node("rank", (Node("close"),)),))
+
+    result = evaluate_tree(tree, ctx, eligible)
+    baseline = evaluate_tree(
+        tree,
+        {"close": close.drop(columns="FUTURE_EXTREME")},
+        eligible.drop(columns="FUTURE_EXTREME"),
+    )
+
+    pd.testing.assert_frame_equal(result.drop(columns="FUTURE_EXTREME"), baseline)
+
+
 def test_terminal_formulas_are_causal_and_use_safe_division():
     ctx, dates, symbols = _ctx()
     ctx["volume"].iloc[0, 0] = 0.0
