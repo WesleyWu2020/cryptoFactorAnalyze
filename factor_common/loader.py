@@ -25,6 +25,8 @@ _SETTING_FIELDS = (
     "params",
     "factor_direction",
 )
+_OPTIONAL_SETTING_FIELDS = ("context_eligible",)
+_RESERVED_CONTEXT_KEYS = frozenset({"__eligible__"})
 _SUPPORTED_PREPROCESSING = frozenset({"none", "mad_rank"})
 _SUPPORTED_FIELDS = frozenset(MARKET_FIELDS)
 
@@ -69,7 +71,10 @@ def _validate_meta(meta: dict[str, Any], factor_id: str) -> None:
 
 
 def _validate_settings(setting: dict[str, Any]) -> None:
-    unsupported_keys = [key for key in setting if key not in (*_SETTING_FIELDS, "frequency")]
+    unsupported_keys = [
+        key for key in setting
+        if key not in (*_SETTING_FIELDS, *_OPTIONAL_SETTING_FIELDS, "frequency")
+    ]
     if unsupported_keys:
         raise ValueError(f"SETTING contains unsupported key(s): {unsupported_keys}")
     missing = [field_name for field_name in _SETTING_FIELDS if field_name not in setting]
@@ -83,6 +88,11 @@ def _validate_settings(setting: dict[str, Any]) -> None:
         raise ValueError("SETTING.data_needed must contain only non-empty strings")
     if len(set(data_needed)) != len(data_needed):
         raise ValueError("SETTING.data_needed must not contain duplicate fields")
+    reserved = sorted(set(data_needed) & _RESERVED_CONTEXT_KEYS)
+    if reserved:
+        raise ValueError(
+            f"SETTING.data_needed contains reserved context key(s): {reserved}"
+        )
     unsupported = sorted(set(data_needed) - _SUPPORTED_FIELDS)
     if unsupported:
         raise ValueError(f"SETTING.data_needed contains unsupported field(s): {unsupported}")
@@ -101,6 +111,10 @@ def _validate_settings(setting: dict[str, Any]) -> None:
 
     if not isinstance(setting["params"], Mapping):
         raise ValueError("SETTING.params must be a mapping")
+
+    context_eligible = setting.setdefault("context_eligible", False)
+    if not isinstance(context_eligible, bool):
+        raise ValueError("SETTING.context_eligible must be boolean")
 
     direction = setting["factor_direction"]
     if isinstance(direction, bool) or not isinstance(direction, int) or direction not in (-1, 1):

@@ -10,6 +10,7 @@ from pandas.api.types import is_bool_dtype
 from data.crypto_quant import reader as _cq_reader
 
 from . import data_provider as _data_provider
+from . import loader as _loader
 from . import preprocessing as _preprocessing
 from .definitions import FactorSpec
 from .preprocessing import rank_to_unit_by_date, winsorize_by_date
@@ -24,8 +25,15 @@ def value_pipeline_fingerprint() -> str:
     """
 
     digest = hashlib.sha256()
-    for path in (_cq_reader.__file__, _data_provider.__file__, _preprocessing.__file__, __file__):
+    for path in (
+        _cq_reader.__file__,
+        _data_provider.__file__,
+        _loader.__file__,
+        _preprocessing.__file__,
+        __file__,
+    ):
         digest.update(Path(path).read_bytes())
+    digest.update(b"context-eligible-v1")
     return digest.hexdigest()
 
 
@@ -54,6 +62,42 @@ def _day(value):
     if pd.isna(day) or day.tzinfo is not None or day != day.normalize():
         raise ValueError("start/end must be daily UTC-naive midnight dates")
     return day
+
+
+def _validate_universe(eligible, *, expected):
+    _validate_axes(eligible, name="universe", expected=expected)
+    if not all(is_bool_dtype(dtype) for dtype in eligible.dtypes) or eligible.isna().any().any():
+        raise ValueError("universe must contain only non-missing boolean eligibility")
+
+
+def _quality_mask(dp, *, start, end, expected):
+    dates, instruments = expected
+    quality = dp.get_quality(start=start, end=end, symbols=instruments)
+    if not isinstance(quality, pd.DataFrame):
+        raise TypeError("quality must be a DataFrame indexed by date/instrument")
+    if not isinstance(quality.index, pd.MultiIndex) or quality.index.nlevels != 2:
+        raise ValueError("quality must be indexed by (date, instrument)")
+    if quality.index.names != ["date", "instrument"]:
+        raise ValueError("quality must be indexed by (date, instrument)")
+    required = {"has_complete_kline", "has_placeholder_kline"}
+    missing = sorted(required - set(quality.columns))
+    if missing:
+        raise ValueError(f"quality is missing required field(s): {missing}")
+    quality_index = pd.MultiIndex.from_product(
+        [dates, instruments], names=["date", "instrument"]
+    )
+    quality = quality.reindex(quality_index)
+    complete = quality["has_complete_kline"].eq(True).to_numpy().reshape(
+        len(dates), len(instruments)
+    )
+    non_placeholder = ~quality["has_placeholder_kline"].eq(True).to_numpy().reshape(
+        len(dates), len(instruments)
+    )
+    return pd.DataFrame(
+        complete & non_placeholder,
+        index=dates,
+        columns=instruments,
+    )
 
 
 def compute_factor(spec: FactorSpec, dp, *, start, end) -> tuple[pd.DataFrame, dict[str, int]]:
@@ -87,13 +131,21 @@ def compute_factor(spec: FactorSpec, dp, *, start, end) -> tuple[pd.DataFrame, d
         _validate_axes(matrix, name=f"context {field}", expected=axes)
         if axes is None:
             axes = (matrix.index.copy(), matrix.columns.copy())
+    context_eligible = setting.get("context_eligible", False)
+    eligible = None
+    if context_eligible:
+        universe = dp.get_universe(start=history_start, end=end)
+        _validate_universe(universe, expected=axes)
+        quality = _quality_mask(dp, start=history_start, end=end, expected=axes)
+        eligible = universe & quality
+        ctx["__eligible__"] = eligible
+
     raw = spec.calc_factor(ctx)
     _validate_axes(raw, name="factor output", expected=axes)
     raw = raw.replace([np.inf, -np.inf], np.nan)
-    eligible = dp.get_universe(start=history_start, end=end)
-    _validate_axes(eligible, name="universe", expected=axes)
-    if not all(is_bool_dtype(dtype) for dtype in eligible.dtypes) or eligible.isna().any().any():
-        raise ValueError("universe must contain only non-missing boolean eligibility")
+    if eligible is None:
+        eligible = dp.get_universe(start=history_start, end=end)
+        _validate_universe(eligible, expected=axes)
     masked = raw.where(eligible)
     if mode == "mad_rank":
         # Omit missing entries before ranking: legacy singleton math returns 0

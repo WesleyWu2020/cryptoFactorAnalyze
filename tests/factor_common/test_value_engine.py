@@ -11,9 +11,10 @@ from factor_common.value_engine import compute_factor
 class MemoryProvider:
     """Calendar-preserving provider with no labels, files, or network access."""
 
-    def __init__(self, close, eligible=None):
+    def __init__(self, close, eligible=None, quality=None):
         self.close = close
         self.eligible = eligible if eligible is not None else close.notna()
+        self.quality = quality or {}
         self.calls = []
 
     def get_single_data(self, field, *, start, end):
@@ -24,6 +25,19 @@ class MemoryProvider:
     def get_universe(self, *, start, end):
         self.calls.append(("universe", start, end))
         return self.eligible.reindex(pd.date_range(start, end, name="date"), fill_value=False)
+
+    def get_quality(self, *, start, end, symbols):
+        self.calls.append(("quality", start, end, tuple(symbols)))
+        dates = pd.date_range(start, end, name="date")
+        index = pd.MultiIndex.from_product([dates, symbols], names=["date", "instrument"])
+        result = pd.DataFrame(index=index)
+        for field, default in (("has_complete_kline", True), ("has_placeholder_kline", False)):
+            matrix = self.quality.get(field)
+            if matrix is None:
+                result[field] = default
+            else:
+                result[field] = matrix.reindex(index=dates, columns=symbols).to_numpy().reshape(-1)
+        return result
 
 
 def spec(calc=lambda ctx: ctx["close"], *, preprocessing="none", warmup=0, **extra):
@@ -75,6 +89,67 @@ def test_same_day_eligible_finite_only_and_cutoff_invariance(preprocessing):
     assert full.iloc[:2, 3].isna().all()
     if preprocessing == "mad_rank":
         np.testing.assert_allclose(full.iloc[:2, :3], [[-1, 0, 1], [1, 0, -1]])
+
+
+def test_opt_in_context_masks_cross_sectional_rank_before_formula():
+    close = frame([[1.0, 2.0, 3.0, 1e15]])
+    eligible = frame([[True, True, True, False]])
+    factor = spec(
+        lambda ctx: ctx["close"].where(ctx["__eligible__"]).rank(axis=1, pct=True),
+        context_eligible=True,
+    )
+
+    with_extreme, _ = compute_factor(
+        factor, MemoryProvider(close, eligible), start=close.index[0], end=close.index[-1]
+    )
+    without_extreme, _ = compute_factor(
+        factor,
+        MemoryProvider(close.iloc[:, :3], eligible.iloc[:, :3]),
+        start=close.index[0],
+        end=close.index[-1],
+    )
+
+    pd.testing.assert_frame_equal(with_extreme.iloc[:, :3], without_extreme)
+    np.testing.assert_allclose(with_extreme.iloc[0, :3], [1 / 3, 2 / 3, 1.0])
+    assert pd.isna(with_extreme.iloc[0, 3])
+
+
+def test_legacy_formula_receives_only_market_context():
+    close = frame([[1.0]])
+    eligible = frame([[True]])
+
+    def legacy_formula(data_ctx):
+        assert set(data_ctx) == {"close"}
+        return data_ctx["close"]
+
+    values, _ = compute_factor(
+        spec(legacy_formula),
+        MemoryProvider(close, eligible),
+        start=close.index[0],
+        end=close.index[-1],
+    )
+
+    assert values.iloc[0, 0] == 1.0
+
+
+def test_opt_in_context_uses_complete_non_placeholder_quality_mask():
+    close = frame([[1.0, 2.0, 3.0]])
+    eligible = frame([[True, True, True]])
+    quality = {
+        "has_complete_kline": frame([[True, False, True]]),
+        "has_placeholder_kline": frame([[False, False, True]]),
+    }
+
+    values, diagnostics = compute_factor(
+        spec(context_eligible=True),
+        MemoryProvider(close, eligible, quality),
+        start=close.index[0],
+        end=close.index[-1],
+    )
+
+    assert values.iloc[0, 0] == 1.0
+    assert values.iloc[0, 1:].isna().all()
+    assert diagnostics["eligible_count"] == 1
 
 
 def test_diagnostics_distinguish_missing_from_ineligible_and_keep_nan():

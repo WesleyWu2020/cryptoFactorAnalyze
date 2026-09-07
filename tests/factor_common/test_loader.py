@@ -243,6 +243,46 @@ def test_load_factor_rejects_nonexistent_data_field(tmp_path):
         load_factor(path)
 
 
+def test_load_factor_context_eligible_defaults_false_and_accepts_true(tmp_path):
+    from factor_common.loader import load_factor
+
+    legacy = load_factor(_write_factor(tmp_path, _factor_source()))
+    opted_in = load_factor(_write_factor(
+        tmp_path,
+        _factor_source(
+            factor_name="opted_in",
+            setting_overrides={"context_eligible": True},
+        ),
+        name="opted_in",
+    ))
+
+    assert legacy.setting["context_eligible"] is False
+    assert opted_in.setting["context_eligible"] is True
+
+
+@pytest.mark.parametrize("value", [None, 0, 1, "true", [], {}])
+def test_load_factor_rejects_nonboolean_context_eligible(tmp_path, value):
+    from factor_common.loader import load_factor
+
+    source = _factor_source(setting_overrides={"context_eligible": value})
+    path = _write_factor(tmp_path, source)
+
+    with pytest.raises(ValueError, match="context_eligible.*boolean"):
+        load_factor(path)
+
+
+def test_load_factor_rejects_reserved_eligibility_context_collision(tmp_path):
+    from factor_common.loader import load_factor
+
+    path = _write_factor(
+        tmp_path,
+        _factor_source(setting_overrides={"data_needed": ["__eligible__"]}),
+    )
+
+    with pytest.raises(ValueError, match="reserved.*__eligible__"):
+        load_factor(path)
+
+
 @pytest.mark.parametrize("warmup", [-1, 1.5, True, "20"])
 def test_load_factor_rejects_invalid_warmup(tmp_path, warmup):
     from factor_common.loader import load_factor
