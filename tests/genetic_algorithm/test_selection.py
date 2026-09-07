@@ -145,6 +145,27 @@ def test_incompatible_archive_reference_rejects_candidate_before_correlation():
     assert "incompatible archive reference old" in result.rejection_reasons["candidate"][0]
 
 
+def test_matching_archive_expression_id_is_rejected_before_selection():
+    values = _values()
+    result = deduplicate_training(
+        [_candidate("same-id")],
+        {"same-id": _metadata(values)},
+        [{
+            "expression_id": "same-id",
+            "training_fingerprint": "train",
+            "operator_version": "ops",
+            "values": values.copy(),
+        }],
+        {"min_overlap_days": 120, "correlation_limit": 0.90, "validation_limit": 20},
+    )
+
+    assert result.accepted == ()
+    assert result.comparisons == ()
+    assert result.rejection_reasons["same-id"] == (
+        "duplicate expression_id in compatible archive: same-id",
+    )
+
+
 def test_archive_reference_without_values_is_explicitly_unverifiable():
     result = deduplicate_training(
         [_candidate("candidate")],

@@ -99,6 +99,7 @@ def _value_payload(frame: pd.DataFrame) -> dict[str, Any]:
 def _value_document(panels: Mapping[str, Any]) -> dict[str, Any]:
     payload = {
         "artifact_version": _VALUE_ARTIFACT_VERSION,
+        "training_only": True,
         "panels": {
             str(identifier): _value_payload(_value_frame(panels[identifier]))
             for identifier in sorted(panels, key=str)
@@ -128,6 +129,14 @@ def read_verified_value_artifact(
         document = json.load(handle)
     if not isinstance(document, dict) or document.get("artifact_version") != _VALUE_ARTIFACT_VERSION:
         raise ValueError("unsupported value artifact")
+    if document.get("training_only") is not True:
+        raise ValueError("value artifact must be marked training_only")
+    unexpected_keys = set(document) - {"artifact_version", "training_only", "panels", _DIGEST_FIELD}
+    if unexpected_keys:
+        raise ValueError(
+            "value artifact contains non-training fields: "
+            + ", ".join(sorted(unexpected_keys))
+        )
     supplied = document.get(_DIGEST_FIELD)
     if not isinstance(supplied, str):
         raise ValueError("value artifact hash is missing")
@@ -433,6 +442,7 @@ def training_archive_entry(
     """Return an archive-safe record containing only the AST and train diagnostics."""
     entry = {
         "expression_id": str(candidate.expression_id),
+        "training_only": True,
         "ast": _tree_payload(candidate.tree),
         "training_fingerprint": training_fingerprint,
         "operator_version": operator_version,

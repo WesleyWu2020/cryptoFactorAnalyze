@@ -164,12 +164,61 @@ def test_load_archive_rejects_duplicate_expression_ids(tmp_path):
     write_artifact(
         archive_path,
         {"training_only": True, "candidates": [
-            {"expression_id": "same"}, {"expression_id": "same"},
+            {"expression_id": "same", "training_only": True},
+            {"expression_id": "same", "training_only": True},
         ]},
         immutable=True,
     )
 
     with pytest.raises(ValueError, match="duplicate expression_id.*same"):
+        _load_archive(archive_path)
+
+
+@pytest.mark.parametrize(
+    ("entry", "message"),
+    [
+        ({"expression_id": "candidate"}, "training_only"),
+        ({"expression_id": "candidate", "training_only": True, "validation_metrics": {}}, "non-training"),
+    ],
+)
+def test_load_archive_rejects_unmarked_or_non_training_candidate_entries(
+    tmp_path, entry, message
+):
+    archive_path = tmp_path / "archive.json"
+    write_artifact(
+        archive_path,
+        {"training_only": True, "candidates": [entry]},
+        immutable=True,
+    )
+
+    with pytest.raises(ValueError, match=message):
+        _load_archive(archive_path)
+
+
+def test_load_archive_rejects_unmarked_value_artifact(tmp_path):
+    values_path = tmp_path / "values.json"
+    from Genetic_Algorithm.artifacts import write_value_artifact
+
+    value_artifact = write_value_artifact(
+        values_path,
+        {"candidate": pd.DataFrame([[1.0]], index=pd.date_range("2024-01-01", periods=1), columns=["S0"])},
+    )
+    raw_value = json.loads(values_path.read_text(encoding="utf-8"))
+    raw_value.pop("training_only")
+    from Genetic_Algorithm.artifacts import _manifest_payload
+    values_path.write_text(json.dumps(_manifest_payload(raw_value)), encoding="utf-8")
+    archive_path = tmp_path / "archive.json"
+    write_artifact(
+        archive_path,
+        {"training_only": True, "candidates": [{
+            "expression_id": "candidate",
+            "training_only": True,
+            "value_artifact": {"path": values_path.name, "sha256": value_artifact.sha256},
+        }]},
+        immutable=True,
+    )
+
+    with pytest.raises(ValueError, match="training_only"):
         _load_archive(archive_path)
 
 
@@ -367,6 +416,20 @@ def test_publish_recovery_rejects_symlink_alias_to_journal_without_deleting_it(t
     assert journal.exists()
 
 
+def test_publish_recovery_rejects_journal_symlink_to_unrelated_parent_file(tmp_path):
+    destination = tmp_path / "run"
+    journal = tmp_path / ".run.publish.json"
+    unrelated = tmp_path / "unrelated.json"
+    unrelated.write_text(json.dumps({"version": 1}), encoding="utf-8")
+    journal.symlink_to(unrelated)
+
+    with pytest.raises(ValueError, match="publish journal"):
+        search_module._recover_publish_destination(destination)
+
+    assert journal.is_symlink()
+    assert unrelated.exists()
+
+
 @pytest.mark.parametrize("journal_target_field", ["staging", "backup"])
 def test_publish_recovery_rejects_journal_symlink_aliasing_recovery_path(
     tmp_path, journal_target_field
@@ -453,7 +516,7 @@ def test_run_search_rejects_archive_artifact_path_outside_archive_directory(tmp_
     write_artifact(
         archive_path,
         {"training_only": True, "candidates": [{
-            "expression_id": "old", "value_artifact": {"path": reference, "sha256": "0" * 64},
+            "expression_id": "old", "training_only": True, "value_artifact": {"path": reference, "sha256": "0" * 64},
         }]},
         immutable=True,
     )
@@ -464,6 +527,91 @@ def test_run_search_rejects_archive_artifact_path_outside_archive_directory(tmp_
             "unused.h5", audit_path, stage=STAGES["train"], warmup_days=0, fields=["close"],
             search_stage=lambda path: SearchResult((), (), 0), artifact_dir=tmp_path / "run",
             archive_path=archive_path, repository_root=REPOSITORY_ROOT,
+        )
+
+
+@pytest.mark.parametrize("reserved_name", [
+    "deduplication.json",
+    "training_candidates.json",
+    "training_values.json",
+    "provenance.json",
+    ".run.publish.json",
+])
+def test_run_search_rejects_archive_artifact_path_reserved_by_publication(
+    tmp_path, reserved_name, monkeypatch
+):
+    audit_path = tmp_path / "audit_train.json"
+    audit_path.write_text(
+        json.dumps({"training_only": True, "fingerprint": "train-fingerprint", "stage": {"name": "train"}}),
+        encoding="utf-8",
+    )
+    archive_dir = tmp_path / "archive"
+    archive_dir.mkdir()
+    values_path = archive_dir / reserved_name
+    from Genetic_Algorithm.artifacts import write_value_artifact
+
+    value_artifact = write_value_artifact(
+        values_path,
+        {"old": pd.DataFrame([[1.0]], index=pd.date_range("2024-01-01", periods=1), columns=["S0"])},
+    )
+    archive_path = archive_dir / "source-archive.json"
+    write_artifact(
+        archive_path,
+        {"training_only": True, "candidates": [{
+            "expression_id": "old",
+            "training_only": True,
+            "training_fingerprint": "train-fingerprint",
+            "operator_version": "ops-v1",
+            "value_artifact": {"path": reserved_name, "sha256": value_artifact.sha256},
+        }]},
+        immutable=True,
+    )
+    monkeypatch.setattr(search_module, "run_training_audit", lambda *args, **kwargs: audit_path)
+
+    with pytest.raises(ValueError, match="reserved"):
+        search_module.run_search(
+            "unused.h5", audit_path, stage=STAGES["train"], warmup_days=0,
+            fields=["close"], search_stage=lambda path: SearchResult((), (), 0),
+            artifact_dir=tmp_path / "run", archive_path=archive_path,
+            repository_root=REPOSITORY_ROOT,
+        )
+
+
+def test_run_search_rejects_archive_artifact_path_shared_by_candidates(tmp_path, monkeypatch):
+    audit_path = tmp_path / "audit_train.json"
+    audit_path.write_text(
+        json.dumps({"training_only": True, "fingerprint": "train-fingerprint", "stage": {"name": "train"}}),
+        encoding="utf-8",
+    )
+    archive_dir = tmp_path / "archive"
+    archive_dir.mkdir()
+    values_path = archive_dir / "shared-values.json"
+    from Genetic_Algorithm.artifacts import write_value_artifact
+
+    value_artifact = write_value_artifact(
+        values_path,
+        {
+            "first": pd.DataFrame([[1.0]], index=pd.date_range("2024-01-01", periods=1), columns=["S0"]),
+            "second": pd.DataFrame([[2.0]], index=pd.date_range("2024-01-01", periods=1), columns=["S0"]),
+        },
+    )
+    archive_path = archive_dir / "training_candidates.json"
+    write_artifact(
+        archive_path,
+        {"training_only": True, "candidates": [
+            {"expression_id": "first", "training_only": True, "value_artifact": {"path": values_path.name, "sha256": value_artifact.sha256}},
+            {"expression_id": "second", "training_only": True, "value_artifact": {"path": values_path.name, "sha256": value_artifact.sha256}},
+        ]},
+        immutable=True,
+    )
+    monkeypatch.setattr(search_module, "run_training_audit", lambda *args, **kwargs: audit_path)
+
+    with pytest.raises(ValueError, match="multiple archive candidates"):
+        search_module.run_search(
+            "unused.h5", audit_path, stage=STAGES["train"], warmup_days=0,
+            fields=["close"], search_stage=lambda path: SearchResult((), (), 0),
+            artifact_dir=tmp_path / "run", archive_path=archive_path,
+            repository_root=REPOSITORY_ROOT,
         )
 
 
@@ -553,7 +701,7 @@ def test_run_search_writes_value_artifact_and_deduplicates_with_archive(tmp_path
     archive = json.loads((tmp_path / "run" / "training_candidates.json").read_text(encoding="utf-8"))
     entry = archive["candidates"][0]
     reference = entry["value_artifact"]
-    assert reference["path"] == "training_values.json"
+    assert reference["path"] == "training_values_archive.json"
     assert len(reference["sha256"]) == 64
     assert (tmp_path / "run" / reference["path"]).exists()
 
@@ -701,6 +849,7 @@ def test_run_search_loads_existing_archive_for_novelty(tmp_path, monkeypatch):
         archive_path,
         {"training_only": True, "candidates": [{
             "expression_id": "old",
+            "training_only": True,
             "training_fingerprint": "train-fingerprint",
             "operator_version": "ops-v1",
             "value_artifact": {"path": values_path.name, "sha256": value_artifact.sha256},

@@ -146,14 +146,45 @@ def _load_archive(path: str | Path | None) -> tuple[list[dict[str, Any]], dict[s
         return [], {}
     archive_path = Path(path)
     document = read_verified_manifest(archive_path)
+    if document.get("training_only") is not True:
+        raise ValueError("training archive must be marked training_only")
+    allowed_document_keys = {"sha256", "training_only", "candidates"}
+    unexpected_document_keys = set(document) - allowed_document_keys
+    if unexpected_document_keys:
+        raise ValueError(
+            "training archive contains non-training fields: "
+            + ", ".join(sorted(unexpected_document_keys))
+        )
     entries = document.get("candidates", ())
     if not isinstance(entries, list):
         raise ValueError("training archive candidates must be a list")
     values: dict[str, Any] = {}
     seen_ids: set[str] = set()
+    allowed_entry_keys = {
+        "expression_id", "hash", "training_only", "ast", "training_fingerprint",
+        "operator_version", "training_diagnostics", "value_artifact",
+    }
     for entry in entries:
         if not isinstance(entry, Mapping):
             raise ValueError("training archive entry is malformed")
+        if entry.get("training_only") is not True:
+            raise ValueError("training archive candidate must be marked training_only")
+        unexpected_entry_keys = set(entry) - allowed_entry_keys
+        if unexpected_entry_keys:
+            raise ValueError(
+                "training archive candidate contains non-training fields: "
+                + ", ".join(sorted(unexpected_entry_keys))
+            )
+        diagnostics = entry.get("training_diagnostics")
+        if diagnostics is not None:
+            if not isinstance(diagnostics, Mapping):
+                raise ValueError("training archive diagnostics are malformed")
+            unexpected_diagnostic_keys = set(diagnostics) - {"score", "eligible", "reasons"}
+            if unexpected_diagnostic_keys:
+                raise ValueError(
+                    "training archive diagnostics contain non-training fields: "
+                    + ", ".join(sorted(unexpected_diagnostic_keys))
+                )
         identifier = str(entry.get("expression_id", entry.get("hash", "archive")))
         if identifier in seen_ids:
             raise ValueError(f"duplicate expression_id in training archive: {identifier}")
@@ -166,6 +197,8 @@ def _load_archive(path: str | Path | None) -> tuple[list[dict[str, Any]], dict[s
             }
             continue
         relative, digest = reference.get("path"), reference.get("sha256")
+        if set(reference) != {"path", "sha256"}:
+            raise ValueError(f"archive value artifact reference contains non-training fields for {identifier}")
         if not isinstance(relative, str) or not isinstance(digest, str):
             raise ValueError(f"archive value artifact reference is malformed for {identifier}")
         artifact_path = _confined_reference(
@@ -288,6 +321,8 @@ def _recover_publish_destination(destination: Path) -> None:
     journal_path = _publish_journal_path(destination)
     if not os.path.lexists(journal_path):
         return
+    if journal_path.is_symlink() or not journal_path.is_file():
+        raise ValueError(f"publish journal path is unsafe: {journal_path}")
     try:
         journal_resolved = journal_path.resolve(strict=True)
         journal_resolved.relative_to(destination.parent)
@@ -451,6 +486,14 @@ def _copy_archive_value_artifacts(
 ) -> None:
     if archive_path is None:
         return
+    reserved_names = {
+        "deduplication.json", "training_candidates.json", "training_values.json",
+        "provenance.json", "config.json", "audit_train.json", "validation.json",
+        "frozen.json", "generations.jsonl", "progress.json",
+        _publish_journal_path(destination).name,
+    }
+    references: list[tuple[Path, Path, str]] = []
+    targets: dict[Path, str] = {}
     for entry in archive_entries:
         reference = entry.get("value_artifact")
         if not isinstance(reference, Mapping):
@@ -462,8 +505,21 @@ def _copy_archive_value_artifacts(
             archive_path.parent, relative, label="archive value artifact"
         )
         target = _confined_reference(destination, relative, label="destination value artifact")
+        if target.parent == destination and (
+            target.name in reserved_names or target.name.endswith(".publish.json")
+        ):
+            raise ValueError(f"archive value artifact path is reserved: {target.name}")
+        previous = targets.get(target)
+        if previous is not None:
+            raise ValueError(
+                "archive value artifact path is used by multiple archive candidates: "
+                f"{previous} and {_archive_key(entry)}"
+            )
+        targets[target] = _archive_key(entry)
         if not source.is_file():
             raise ValueError(f"archive value artifact is missing: {source}")
+        references.append((source, target, _archive_key(entry)))
+    for source, target, _identifier in references:
         target.parent.mkdir(parents=True, exist_ok=True)
         if target.exists():
             if target.read_bytes() != source.read_bytes():
@@ -550,7 +606,7 @@ def _write_training_artifacts(
     }
     try:
         _copy_archive_value_artifacts(archive_path, archive_entries, staging)
-        value_artifact_path = staging / "training_values.json"
+        value_artifact_path = staging / "training_values_archive.json"
         if value_artifact_path.exists():
             value_artifact_path = staging / "training_values.new.json"
         value_artifact = write_value_artifact(value_artifact_path, value_panels)
@@ -574,7 +630,7 @@ def _write_training_artifacts(
         for entry in (*archive_entries, *sorted(new_archive, key=_archive_key)):
             identifier = _archive_key(entry)
             if identifier in seen_ids:
-                continue
+                raise ValueError(f"duplicate expression_id during archive merge: {identifier}")
             seen_ids.add(identifier)
             published = dict(entry)
             if identifier in value_panels:

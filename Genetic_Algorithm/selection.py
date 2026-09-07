@@ -197,6 +197,11 @@ def deduplicate_training(
                 reference_fingerprint,
                 reference_operator,
             )
+            if reference_id == candidate_id and reason is None:
+                candidate_reasons.append(
+                    f"duplicate expression_id in compatible archive: {candidate_id}"
+                )
+                continue
             if reason is not None:
                 comparisons.append(Comparison(candidate_id, reference_id, 0, None, False, reason))
                 candidate_reasons.append(reason)
