@@ -85,6 +85,8 @@ def _value_payload(frame: pd.DataFrame) -> dict[str, Any]:
     serialized_columns = [str(value) for value in frame.columns]
     if len(serialized_columns) != len(set(serialized_columns)):
         raise ValueError("training value panel column label collision after serialization")
+    frame = frame.copy()
+    frame.columns = serialized_columns
     frame = frame.sort_index().sort_index(axis=1)
     numeric = frame.astype("float64")
     array = numeric.to_numpy(copy=True)
@@ -376,7 +378,11 @@ def working_tree_patch_hash(repository_root: str | Path) -> str:
         path = root / os.fsdecode(raw_path)
         untracked.extend(raw_path)
         untracked.extend(b"\0")
-        untracked.extend(path.read_bytes())
+        if path.is_symlink():
+            untracked.extend(b"symlink\0")
+            untracked.extend(os.fsencode(os.readlink(path)))
+        else:
+            untracked.extend(path.read_bytes())
         untracked.extend(b"\0")
     return hashlib.sha256(staged + b"\0" + unstaged + b"\0" + bytes(untracked)).hexdigest()
 

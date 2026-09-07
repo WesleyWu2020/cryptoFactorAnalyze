@@ -142,6 +142,14 @@ def _confined_reference(root: Path, reference: str, *, label: str) -> Path:
     return resolved
 
 
+def _reject_reference_symlinks(root: Path, reference: str, *, label: str) -> None:
+    current = root.resolve()
+    for part in Path(reference).parts:
+        current /= part
+        if os.path.lexists(current) and current.is_symlink():
+            raise ValueError(f"{label} path is unsafe because it traverses a symlink: {reference!r}")
+
+
 _ARCHIVE_REQUIRED_ENTRY_KEYS = {
     "expression_id", "training_only", "ast", "training_fingerprint",
     "operator_version", "training_diagnostics",
@@ -599,8 +607,8 @@ def _copy_archive_value_artifacts(
         "frozen.json", "generations.jsonl", "progress.json",
         _publish_journal_path(destination).name,
     }
-    references: list[tuple[Path, Path, str]] = []
-    targets: dict[Path, str] = {}
+    references: list[tuple[Path, Path, bytes]] = []
+    targets: dict[Path, tuple[str, bytes]] = {}
     for entry in archive_entries:
         reference = entry.get("value_artifact")
         if not isinstance(reference, Mapping):
@@ -611,25 +619,33 @@ def _copy_archive_value_artifacts(
         source = _confined_reference(
             archive_path.parent, relative, label="archive value artifact"
         )
+        _reject_reference_symlinks(archive_path.parent, relative, label="archive value artifact")
         target = _confined_reference(destination, relative, label="destination value artifact")
+        _reject_reference_symlinks(destination, relative, label="destination value artifact")
         if target.parent == destination and (
             target.name in reserved_names or target.name.endswith(".publish.json")
         ):
             raise ValueError(f"archive value artifact path is reserved: {target.name}")
-        previous = targets.get(target)
-        if previous is not None:
-            raise ValueError(
-                "archive value artifact path is used by multiple archive candidates: "
-                f"{previous} and {_archive_key(entry)}"
-            )
-        targets[target] = _archive_key(entry)
         if not source.is_file():
             raise ValueError(f"archive value artifact is missing: {source}")
-        references.append((source, target, _archive_key(entry)))
-    for source, target, _identifier in references:
+        content = source.read_bytes()
+        declared = reference.get("sha256")
+        if not isinstance(declared, str):
+            raise ValueError(f"archive value artifact reference is malformed: {source}")
+        try:
+            read_verified_value_artifact(source, expected_sha256=declared)
+        except ValueError as exc:
+            raise ValueError(f"archive value artifact hash does not match reference: {source}") from exc
+        previous = targets.get(target)
+        if previous is not None and previous != (declared, content):
+            raise ValueError(f"archive value artifact path collision: {target}")
+        if previous is None:
+            targets[target] = (declared, content)
+            references.append((source, target, content))
+    for source, target, content in references:
         target.parent.mkdir(parents=True, exist_ok=True)
         if target.exists():
-            if target.read_bytes() != source.read_bytes():
+            if target.is_symlink() or target.read_bytes() != content:
                 raise ValueError(f"archive value artifact path collision: {target}")
         else:
             shutil.copy2(source, target)

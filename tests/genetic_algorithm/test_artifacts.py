@@ -4,6 +4,7 @@ import json
 import hashlib
 import math
 import os
+import subprocess
 
 import pytest
 
@@ -67,6 +68,20 @@ def test_non_git_hash_includes_symlink_target_and_does_not_follow_symlink_direct
     link.symlink_to(tmp_path / "other.txt")
 
     assert working_tree_patch_hash(tmp_path) != first
+
+
+def test_git_hash_does_not_read_untracked_symlink_target_outside_repository(tmp_path):
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    subprocess.run(["git", "-C", str(tmp_path), "commit", "--allow-empty", "-qm", "fixture"], check=True)
+    outside = tmp_path.parent / "outside-content.txt"
+    outside.write_text("one", encoding="utf-8")
+    link = tmp_path / "untracked-link.txt"
+    link.symlink_to(outside)
+
+    first = working_tree_patch_hash(tmp_path)
+    outside.write_text("two", encoding="utf-8")
+
+    assert working_tree_patch_hash(tmp_path) == first
 
 
 def test_non_git_hash_ignores_timestamp_only_changes(tmp_path):
@@ -212,6 +227,18 @@ def test_value_artifact_rejects_serialized_column_label_collisions(tmp_path):
 
     with pytest.raises(ValueError, match="column label collision"):
         write_value_artifact(tmp_path / "values.json", {"candidate": values})
+
+
+def test_value_artifact_normalizes_mixed_column_labels_before_sorting(tmp_path):
+    values = pd.DataFrame(
+        [[1.0, 2.0]],
+        index=pd.date_range("2024-01-01", periods=1),
+        columns=["A", 1],
+    )
+
+    artifact = write_value_artifact(tmp_path / "values.json", {"candidate": values})
+
+    assert read_verified_value_artifact(artifact.path)["candidate"].columns.tolist() == ["1", "A"]
 
 
 def test_immutable_write_is_atomic_and_cleans_temp_on_link_failure(tmp_path, monkeypatch):

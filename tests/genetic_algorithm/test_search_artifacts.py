@@ -693,7 +693,9 @@ def test_run_search_rejects_archive_artifact_path_reserved_by_publication(
         )
 
 
-def test_run_search_rejects_archive_artifact_path_shared_by_candidates(tmp_path, monkeypatch):
+def test_run_search_copies_shared_archive_artifact_once_and_preserves_all_references(
+    tmp_path, monkeypatch
+):
     audit_path = tmp_path / "audit_train.json"
     audit_path.write_text(
         json.dumps({"training_only": True, "fingerprint": "train-fingerprint", "stage": {"name": "train"}}),
@@ -722,13 +724,17 @@ def test_run_search_rejects_archive_artifact_path_shared_by_candidates(tmp_path,
     )
     monkeypatch.setattr(search_module, "run_training_audit", lambda *args, **kwargs: audit_path)
 
-    with pytest.raises(ValueError, match="multiple archive candidates"):
-        search_module.run_search(
-            "unused.h5", audit_path, stage=STAGES["train"], warmup_days=0,
-            fields=["close"], search_stage=lambda path: SearchResult((), (), 0),
-            artifact_dir=tmp_path / "run", archive_path=archive_path,
-            repository_root=REPOSITORY_ROOT,
-        )
+    search_module.run_search(
+        "unused.h5", audit_path, stage=STAGES["train"], warmup_days=0,
+        fields=["close"], search_stage=lambda path: SearchResult((), (), 0),
+        artifact_dir=tmp_path / "run", archive_path=archive_path,
+        repository_root=REPOSITORY_ROOT,
+    )
+
+    document = json.loads((tmp_path / "run" / "training_candidates.json").read_text(encoding="utf-8"))
+    assert [entry["expression_id"] for entry in document["candidates"]] == ["first", "second"]
+    assert document["candidates"][0]["value_artifact"] == document["candidates"][1]["value_artifact"]
+    assert len(list((tmp_path / "run").glob("shared-values.json"))) == 1
 
 
 def test_run_search_rejects_selected_candidate_without_value_panel(tmp_path, monkeypatch):
