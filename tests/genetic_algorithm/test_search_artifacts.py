@@ -515,6 +515,50 @@ def test_publish_recovery_rejects_journal_symlink_aliasing_recovery_path(
     assert journal_target.exists()
 
 
+@pytest.mark.parametrize("journal_target_field", ["staging", "backup"])
+@pytest.mark.parametrize("target_kind", ["directory", "file"])
+def test_publish_recovery_rejects_symlink_alias_to_sensitive_target(
+    tmp_path, journal_target_field, target_kind
+):
+    destination = tmp_path / "run"
+    journal = tmp_path / ".run.publish.json"
+    sensitive = tmp_path / f"sensitive-{target_kind}"
+    if target_kind == "directory":
+        sensitive.mkdir()
+        (sensitive / "sentinel").write_text("keep", encoding="utf-8")
+    else:
+        sensitive.write_text("keep", encoding="utf-8")
+
+    staging = tmp_path / ".run.staging"
+    backup = tmp_path / ".run.audit-backup"
+    if journal_target_field == "staging":
+        staging.symlink_to(sensitive, target_is_directory=target_kind == "directory")
+        backup_name = None
+    else:
+        staging.mkdir()
+        backup.symlink_to(sensitive, target_is_directory=target_kind == "directory")
+        backup_name = backup.name
+    journal.write_text(
+        json.dumps({
+            "version": 1,
+            "destination": destination.name,
+            "backup": backup_name,
+            "staging": staging.name,
+        }),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="publish journal"):
+        search_module._recover_publish_destination(destination)
+
+    assert sensitive.exists()
+    if target_kind == "directory":
+        assert (sensitive / "sentinel").read_text(encoding="utf-8") == "keep"
+    else:
+        assert sensitive.read_text(encoding="utf-8") == "keep"
+    assert journal.exists()
+
+
 def test_run_search_rejects_same_expression_id_with_incompatible_provenance(
     tmp_path, monkeypatch
 ):

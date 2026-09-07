@@ -8,6 +8,7 @@ import inspect
 import os
 import re
 import shutil
+import stat
 import tempfile
 from dataclasses import asdict, replace
 from pathlib import Path
@@ -411,7 +412,15 @@ def _recover_publish_destination(destination: Path) -> None:
         path = Path(value)
         if path.is_absolute() or path.parent != Path("."):
             raise ValueError(f"publish journal path must be a sibling name: {key}")
-        resolved = (parent / path).resolve()
+        original = parent / path
+        if key in {"staging", "backup"} and os.path.lexists(original):
+            try:
+                original_mode = os.lstat(original).st_mode
+            except OSError as exc:
+                raise ValueError(f"publish journal path is unsafe: {original}") from exc
+            if stat.S_ISLNK(original_mode):
+                raise ValueError(f"publish journal path is unsafe: {original}")
+        resolved = original.resolve()
         try:
             resolved.relative_to(parent)
         except ValueError as exc:
@@ -426,7 +435,15 @@ def _recover_publish_destination(destination: Path) -> None:
         backup_path = Path(backup_name)
         if backup_path.is_absolute() or backup_path.parent != Path("."):
             raise ValueError("publish journal path must be a sibling name: backup")
-        resolved = (parent / backup_path).resolve()
+        original = parent / backup_path
+        if os.path.lexists(original):
+            try:
+                original_mode = os.lstat(original).st_mode
+            except OSError as exc:
+                raise ValueError(f"publish journal path is unsafe: {original}") from exc
+            if stat.S_ISLNK(original_mode):
+                raise ValueError(f"publish journal path is unsafe: {original}")
+        resolved = original.resolve()
         try:
             resolved.relative_to(parent)
         except ValueError as exc:
