@@ -286,10 +286,18 @@ def _recover_publish_destination(destination: Path) -> None:
     """Resolve an interrupted immutable directory publication deterministically."""
     destination = Path(destination).resolve()
     journal_path = _publish_journal_path(destination)
-    if not journal_path.exists():
+    if not os.path.lexists(journal_path):
         return
-    with journal_path.open(encoding="utf-8") as handle:
-        journal = json.load(handle)
+    try:
+        journal_resolved = journal_path.resolve(strict=True)
+        journal_resolved.relative_to(destination.parent)
+    except (OSError, ValueError) as exc:
+        raise ValueError(f"publish journal path is unsafe: {journal_path}") from exc
+    try:
+        with journal_resolved.open(encoding="utf-8") as handle:
+            journal = json.load(handle)
+    except OSError as exc:
+        raise ValueError(f"publish journal is unreadable: {journal_path}") from exc
     if journal.get("version") != 1:
         raise ValueError(f"unsupported publish journal: {journal_path}")
     parent = destination.parent.resolve()
@@ -326,10 +334,12 @@ def _recover_publish_destination(destination: Path) -> None:
         paths["backup"] = resolved
     if paths["destination"] != destination:
         raise ValueError(f"publish journal destination mismatch: {journal_path}")
-    if paths["staging"] in {paths["destination"], journal_path}:
+    if journal_resolved in {paths["destination"], paths["staging"]}:
+        raise ValueError(f"publish journal collides with a recovery path: {journal_path}")
+    if paths["staging"] in {paths["destination"], journal_resolved}:
         raise ValueError(f"publish journal staging collides with destination: {journal_path}")
     if "backup" in paths and paths["backup"] in {
-        paths["destination"], paths["staging"], journal_path
+        paths["destination"], paths["staging"], journal_resolved
     }:
         raise ValueError(f"publish journal backup collides with another path: {journal_path}")
 

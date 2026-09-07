@@ -367,6 +367,35 @@ def test_publish_recovery_rejects_symlink_alias_to_journal_without_deleting_it(t
     assert journal.exists()
 
 
+@pytest.mark.parametrize("journal_target_field", ["staging", "backup"])
+def test_publish_recovery_rejects_journal_symlink_aliasing_recovery_path(
+    tmp_path, journal_target_field
+):
+    destination = tmp_path / "run"
+    staging = tmp_path / ".run.staging"
+    backup = tmp_path / ".run.audit-backup"
+    staging.write_text("staging", encoding="utf-8")
+    backup.write_text("backup", encoding="utf-8")
+    journal = tmp_path / ".run.publish.json"
+    journal_target = staging if journal_target_field == "staging" else backup
+    journal_target.write_text(
+        json.dumps({
+            "version": 1,
+            "destination": destination.name,
+            "backup": backup.name,
+            "staging": staging.name,
+        }),
+        encoding="utf-8",
+    )
+    journal.symlink_to(journal_target)
+
+    with pytest.raises(ValueError, match="publish journal"):
+        search_module._recover_publish_destination(destination)
+
+    assert journal.is_symlink()
+    assert journal_target.exists()
+
+
 def test_run_search_rejects_same_expression_id_with_incompatible_provenance(
     tmp_path, monkeypatch
 ):

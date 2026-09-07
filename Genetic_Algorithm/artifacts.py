@@ -20,8 +20,9 @@ import pandas as pd
 
 _DIGEST_FIELD = "sha256"
 _VALUE_ARTIFACT_VERSION = 1
-_NON_GIT_MAX_FILES = 4096
-_NON_GIT_MAX_BYTES = 64 * 1024 * 1024
+_NON_GIT_MAX_PATH_BYTES = 4096
+_NON_GIT_MAX_SYMLINK_TARGET_BYTES = 4096
+_NON_GIT_READ_CHUNK = 1024 * 1024
 
 
 def _requirement_names(repository_root: Path) -> tuple[str, ...]:
@@ -322,7 +323,7 @@ def working_tree_patch_hash(repository_root: str | Path) -> str:
 
 
 def _non_git_working_tree_hash(root: Path) -> str:
-    """Hash a deterministic, bounded snapshot when Git metadata is unavailable."""
+    """Hash every relevant entry without following symlink directories."""
     digest = hashlib.sha256(b"non-git-working-tree-v1\0")
     file_count = 0
     byte_count = 0
@@ -331,38 +332,52 @@ def _non_git_working_tree_hash(root: Path) -> str:
         digest.update(b"missing-root\0")
         return digest.hexdigest()
 
-    for directory, dirnames, filenames in os.walk(root, followlinks=False):
-        dirnames[:] = sorted(name for name in dirnames if name != ".git")
-        for name in sorted(filenames):
-            if file_count >= _NON_GIT_MAX_FILES:
-                digest.update(b"file-limit\0")
-                return digest.hexdigest()
-            path = Path(directory) / name
+    def visit(directory: Path) -> None:
+        nonlocal file_count, byte_count
+        entries = []
+        try:
+            with os.scandir(directory) as handle:
+                entries = sorted(handle, key=lambda entry: os.fsencode(entry.name))
+        except OSError as exc:
+            raise ValueError(f"cannot snapshot working-tree directory: {directory}") from exc
+        for entry in entries:
+            if entry.name == ".git":
+                continue
+            path = Path(entry.path)
             relative = path.relative_to(root).as_posix().encode("utf-8", "surrogateescape")
+            if len(relative) > _NON_GIT_MAX_PATH_BYTES:
+                raise ValueError(f"working-tree path is too long: {relative!r}")
+            try:
+                stat = entry.stat(follow_symlinks=False)
+            except OSError as exc:
+                raise ValueError(f"cannot snapshot working-tree entry: {path}") from exc
             digest.update(b"path\0" + relative + b"\0")
-            file_count += 1
-            if path.is_symlink():
-                digest.update(b"symlink\0")
-                digest.update(os.readlink(path).encode("utf-8", "surrogateescape"))
+            digest.update(f"mode:{stat.st_mode:o};size:{stat.st_size};mtime:{stat.st_mtime_ns}\0".encode())
+            if entry.is_symlink():
+                target = os.readlink(path)
+                target_bytes = os.fsencode(target)
+                if len(target_bytes) > _NON_GIT_MAX_SYMLINK_TARGET_BYTES:
+                    raise ValueError(f"working-tree symlink target is too long: {path}")
+                digest.update(b"symlink\0" + target_bytes + b"\0")
+            elif entry.is_dir(follow_symlinks=False):
+                digest.update(b"directory\0")
+                visit(path)
+            elif entry.is_file(follow_symlinks=False):
+                file_count += 1
+                digest.update(b"file\0")
+                with path.open("rb") as handle:
+                    while True:
+                        content = handle.read(_NON_GIT_READ_CHUNK)
+                        if not content:
+                            break
+                        digest.update(content)
+                        byte_count += len(content)
                 digest.update(b"\0")
-                continue
-            if not path.is_file():
+            else:
                 digest.update(b"unsupported\0")
-                continue
-            digest.update(b"file\0")
-            remaining = _NON_GIT_MAX_BYTES - byte_count
-            if remaining <= 0:
-                digest.update(b"byte-limit\0")
-                return digest.hexdigest()
-            with path.open("rb") as handle:
-                content = handle.read(remaining)
-                truncated = len(content) == remaining and handle.read(1)
-            digest.update(content)
-            byte_count += len(content)
-            if truncated:
-                digest.update(b"truncated\0")
-                return digest.hexdigest()
-            digest.update(b"\0")
+
+    visit(root)
+    digest.update(f"entries:{file_count};bytes:{byte_count}\0".encode())
     return digest.hexdigest()
 
 

@@ -39,6 +39,35 @@ def test_working_tree_patch_hash_changes_for_different_non_git_trees(tmp_path):
     assert working_tree_patch_hash(first_tree) != working_tree_patch_hash(second_tree)
 
 
+def test_non_git_hash_remains_sensitive_to_late_files(tmp_path):
+    (tmp_path / "early.txt").write_text("a", encoding="utf-8")
+    late = tmp_path / "late.txt"
+    late.write_text("before", encoding="utf-8")
+
+    before = working_tree_patch_hash(tmp_path)
+    late.write_text("after!", encoding="utf-8")
+
+    assert working_tree_patch_hash(tmp_path) != before
+
+
+def test_non_git_hash_includes_symlink_target_and_does_not_follow_symlink_directory(tmp_path):
+    target = tmp_path / "target.txt"
+    target.write_text("one", encoding="utf-8")
+    link = tmp_path / "link.txt"
+    link.symlink_to(target)
+    linked_dir = tmp_path / "linked-dir"
+    linked_dir.mkdir()
+    (linked_dir / "hidden.txt").write_text("hidden", encoding="utf-8")
+    directory_link = tmp_path / "directory-link"
+    directory_link.symlink_to(linked_dir, target_is_directory=True)
+
+    first = working_tree_patch_hash(tmp_path)
+    link.unlink()
+    link.symlink_to(tmp_path / "other.txt")
+
+    assert working_tree_patch_hash(tmp_path) != first
+
+
 def test_manifest_is_immutable_and_verified(tmp_path):
     path = tmp_path / "run.manifest.json"
     write_artifact(path, {"metrics": {"ic": float("nan")}, "seed": 7})
