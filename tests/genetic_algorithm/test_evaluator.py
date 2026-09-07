@@ -2,6 +2,7 @@ from collections import OrderedDict
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from Genetic_Algorithm.evaluator import evaluate_tree
 from Genetic_Algorithm.expression import Node, expression_hash
@@ -58,6 +59,57 @@ def test_evaluate_tree_has_cumulative_history_and_ignores_future_only_symbols():
     assert pd.isna(result.loc[dates[0], "A"])
     assert result.loc[dates[2], "A"] == 2.0
     assert pd.isna(result.loc[dates[2], "C"])
+
+
+@pytest.mark.parametrize("index_mutation, message", [
+    (lambda index: index[[1, 0, 2, 3]], "monotonic"),
+    (lambda index: index[[0, 1, 1, 3]], "duplicate"),
+])
+def test_evaluate_tree_rejects_invalid_date_indexes_before_row_order_operations(
+    index_mutation, message
+):
+    ctx, dates, symbols = _ctx()
+    invalid = ctx["close"].copy()
+    invalid.index = index_mutation(dates)
+    eligible = pd.DataFrame(True, index=dates, columns=symbols)
+
+    with pytest.raises(ValueError, match=message):
+        evaluate_tree(Node("rolling_mean", (Node("close"),), window=2), {"close": invalid}, eligible)
+
+
+def test_evaluator_cache_content_hash_rejects_stale_reused_supplied_fingerprint():
+    ctx, dates, symbols = _ctx()
+    eligible = pd.DataFrame(True, index=dates, columns=symbols)
+    cache = {}
+    first = {"close": ctx["close"], "fingerprint": "reused-by-caller"}
+    changed_close = ctx["close"].copy()
+    changed_close.iloc[0, 0] = 999.0
+    second = {"close": changed_close, "fingerprint": "reused-by-caller"}
+
+    evaluate_tree(Node("close"), first, eligible, cache=cache)
+    result = evaluate_tree(Node("close"), second, eligible, cache=cache)
+
+    assert result.iloc[0, 0] == 999.0
+
+
+def test_evaluate_tree_full_and_cutoff_replays_match_through_cutoff_for_nested_expression():
+    ctx, dates, symbols = _ctx()
+    eligible = pd.DataFrame(True, index=dates, columns=symbols)
+    tree = Node(
+        "rank",
+        (Node("rolling_mean", (Node("delta", (Node("close"),), window=1),), window=2),),
+    )
+    cutoff = dates[2]
+    full = evaluate_tree(tree, ctx, eligible)
+    cutoff_ctx = {name: frame.loc[:cutoff] for name, frame in ctx.items()}
+    cutoff_eligible = eligible.loc[:cutoff]
+    replay = evaluate_tree(tree, cutoff_ctx, cutoff_eligible)
+    expected = full.loc[:cutoff]
+
+    pd.testing.assert_frame_equal(expected.isna(), replay.isna())
+    np.testing.assert_allclose(
+        expected.to_numpy(dtype="float64"), replay.to_numpy(dtype="float64"), equal_nan=True
+    )
 
 
 def test_evaluator_cache_respects_byte_budget():

@@ -40,13 +40,22 @@ def _frame_fingerprint(frame: pd.DataFrame) -> str:
 
 def _ctx_fingerprint(data_ctx: dict[str, pd.DataFrame]) -> str:
     supplied = data_ctx.get("fingerprint") if isinstance(data_ctx, dict) else None
-    if supplied is not None and not isinstance(supplied, pd.DataFrame):
-        return str(supplied)
     digest = hashlib.sha256()
+    digest.update(json.dumps({
+        "supplied_fingerprint_type": f"{type(supplied).__module__}.{type(supplied).__qualname__}",
+        "supplied_fingerprint": repr(supplied),
+    }, sort_keys=True, separators=(",", ":")).encode())
     for name in sorted(key for key, value in data_ctx.items() if isinstance(value, pd.DataFrame)):
         digest.update(name.encode())
         digest.update(_frame_fingerprint(data_ctx[name]).encode())
     return digest.hexdigest()
+
+
+def _validate_causal_index(name: str, frame: pd.DataFrame) -> None:
+    if frame.index.has_duplicates:
+        raise ValueError(f"{name} date index contains duplicate dates")
+    if not frame.index.is_monotonic_increasing:
+        raise ValueError(f"{name} date index must be monotonic increasing")
 
 
 def _operator_source_hash() -> str:
@@ -118,6 +127,10 @@ def evaluate_tree(
         raise ValueError("cache_bytes must be non-negative")
     if not isinstance(eligible, pd.DataFrame):
         raise TypeError("eligible must be a DataFrame")
+    for name, frame in data_ctx.items():
+        if isinstance(frame, pd.DataFrame):
+            _validate_causal_index(f"data_ctx[{name!r}]", frame)
+    _validate_causal_index("eligible", eligible)
     eligible = eligible.fillna(False).astype(bool)
     if cache is not None:
         _trim_cache(cache, cache_bytes)
