@@ -85,6 +85,36 @@ def _metadata(candidate: Any, values: Any) -> tuple[str | None, str | None]:
     return source.get("training_fingerprint"), source.get("operator_version")
 
 
+def _compatibility_reason(
+    scope: str,
+    reference_id: str,
+    candidate_fingerprint: str | None,
+    candidate_operator: str | None,
+    reference_fingerprint: str | None,
+    reference_operator: str | None,
+) -> str | None:
+    missing = []
+    if not candidate_fingerprint:
+        missing.append("candidate training fingerprint")
+    if not candidate_operator:
+        missing.append("candidate operator version")
+    if not reference_fingerprint:
+        missing.append("reference training fingerprint")
+    if not reference_operator:
+        missing.append("reference operator version")
+    if missing:
+        return (
+            f"incompatible {scope} reference {reference_id}: unverifiable; "
+            f"missing {', '.join(missing)}"
+        )
+    if reference_fingerprint != candidate_fingerprint or reference_operator != candidate_operator:
+        return (
+            f"incompatible {scope} reference {reference_id}: "
+            "training fingerprint/operator version does not match"
+        )
+    return None
+
+
 def _ast(node: Any) -> dict[str, Any]:
     return {
         "op": node.op,
@@ -130,7 +160,7 @@ def deduplicate_training(
         candidate_id = _candidate_id(candidate)
         left = _frame(values_by_id.get(candidate_id))
         candidate_reasons: list[str] = []
-        references: list[tuple[str, Any, Mapping[str, Any] | None]] = []
+        references: list[tuple[str, Any, Any, Any]] = []
         candidate_fingerprint, candidate_operator = _metadata(candidate, values_by_id.get(candidate_id))
         for item in archive_items:
             reference_id = str(item.get("expression_id", item.get("hash", "archive")))
@@ -138,37 +168,47 @@ def deduplicate_training(
             if right is None:
                 right = _frame(values_by_id.get(reference_id))
             reference_fingerprint, reference_operator = _metadata(item, right)
-            if (reference_fingerprint is not None and candidate_fingerprint is not None and reference_fingerprint != candidate_fingerprint) or (
-                reference_operator is not None and candidate_operator is not None and reference_operator != candidate_operator
-            ):
-                reason = (
-                    f"incompatible archive reference {reference_id}: "
-                    f"training fingerprint/operator version does not match"
-                )
+            reason = _compatibility_reason(
+                "archive",
+                reference_id,
+                candidate_fingerprint,
+                candidate_operator,
+                reference_fingerprint,
+                reference_operator,
+            )
+            if reason is not None:
                 comparisons.append(Comparison(candidate_id, reference_id, 0, None, False, reason))
+                if "unverifiable" in reason:
+                    candidate_reasons.append(reason)
                 continue
-            references.append((reference_id, right, item))
+            references.append((reference_id, right, item, values_by_id.get(reference_id)))
         references.extend(
             (
                 _candidate_id(item),
                 _frame(values_by_id.get(_candidate_id(item))),
-                values_by_id.get(_candidate_id(item)) if isinstance(values_by_id.get(_candidate_id(item)), Mapping) else None,
+                item,
+                values_by_id.get(_candidate_id(item)),
             )
             for item in accepted
         )
 
-        for reference_id, right, metadata in references:
+        for reference_id, right, metadata, metadata_values in references:
             reference_fingerprint, reference_operator = _metadata(
-                metadata or {}, right if right is not None else values_by_id.get(reference_id)
+                metadata,
+                metadata_values if metadata_values is not None else right,
             )
-            if (reference_fingerprint is not None and candidate_fingerprint is not None and reference_fingerprint != candidate_fingerprint) or (
-                reference_operator is not None and candidate_operator is not None and reference_operator != candidate_operator
-            ):
-                reason = (
-                    f"incompatible accepted reference {reference_id}: "
-                    f"training fingerprint/operator version does not match"
-                )
+            reason = _compatibility_reason(
+                "accepted",
+                reference_id,
+                candidate_fingerprint,
+                candidate_operator,
+                reference_fingerprint,
+                reference_operator,
+            )
+            if reason is not None:
                 comparisons.append(Comparison(candidate_id, reference_id, 0, None, False, reason))
+                if "unverifiable" in reason:
+                    candidate_reasons.append(reason)
                 continue
             if left is None or right is None:
                 reason = f"insufficient overlap with {reference_id}: missing value panel"

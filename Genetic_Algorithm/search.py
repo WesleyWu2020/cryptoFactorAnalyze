@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping, TypeVar
 
@@ -12,6 +13,14 @@ from .data import run_training_audit
 
 
 Result = TypeVar("Result")
+
+
+def _default_artifact_dir(audit_path: str | Path, experiment_id: str) -> Path:
+    with Path(audit_path).open(encoding="utf-8") as handle:
+        audit = json.load(handle)
+    fingerprint = str(audit["fingerprint"])
+    safe_experiment_id = re.sub(r"[^A-Za-z0-9_.-]+", "_", experiment_id).strip("._") or "training-search"
+    return Path("Genetic_Algorithm") / "runs" / f"{safe_experiment_id}-{fingerprint}"
 
 
 def run_search(
@@ -48,22 +57,24 @@ def run_search(
         fields=fields,
     )
     result = search_stage(persisted_audit)
-    if artifact_dir is not None:
-        _write_training_artifacts(
-            result,
-            persisted_audit,
-            artifact_dir=artifact_dir,
-            config=config or {},
-            repository_root=repository_root,
-            selected_code_paths=selected_code_paths,
-            package_names=package_names,
-            seed=seed,
-            operator_version=operator_version,
-            backtest_profile=backtest_profile or {},
-            experiment_id=experiment_id,
-            validation_attempts=validation_attempts,
-            validation_experiment_id=validation_experiment_id,
-        )
+    destination = Path(artifact_dir) if artifact_dir is not None else _default_artifact_dir(
+        persisted_audit, experiment_id
+    )
+    _write_training_artifacts(
+        result,
+        persisted_audit,
+        artifact_dir=destination,
+        config=config or {},
+        repository_root=repository_root,
+        selected_code_paths=selected_code_paths,
+        package_names=package_names,
+        seed=seed,
+        operator_version=operator_version,
+        backtest_profile=backtest_profile or {},
+        experiment_id=experiment_id,
+        validation_attempts=validation_attempts,
+        validation_experiment_id=validation_experiment_id,
+    )
     return result
 
 

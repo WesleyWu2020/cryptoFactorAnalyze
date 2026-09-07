@@ -235,6 +235,7 @@ def test_search_entry_audits_before_callback_and_stops_on_audit_failure(
         warmup_days=0,
         fields=["close"],
         search_stage=search_stage,
+        artifact_dir=tmp_path / "run",
     )
 
     assert result == "search-result"
@@ -253,6 +254,7 @@ def test_search_entry_audits_before_callback_and_stops_on_audit_failure(
             warmup_days=0,
             fields=["close"],
             search_stage=lambda audit_path: callback_calls.append(audit_path),
+            artifact_dir=tmp_path / "failed" / "run",
         )
     assert callback_calls == []
 

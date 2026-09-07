@@ -21,13 +21,21 @@ def _candidate(name: str, *, mean: float = 0.5, worst: float = 0.4, nodes: int =
     return Candidate(Node("close"), name, (mean, worst, -nodes))
 
 
+def _metadata(values: pd.DataFrame, fingerprint: str = "train", operator_version: str = "ops") -> dict:
+    return {
+        "values": values,
+        "training_fingerprint": fingerprint,
+        "operator_version": operator_version,
+    }
+
+
 def test_identical_and_sign_inverted_training_values_are_duplicates():
     values = _values()
     candidates = [_candidate("a"), _candidate("b", mean=0.4)]
 
     result = deduplicate_training(
         candidates,
-        {"a": values, "b": -values},
+        {"a": _metadata(values), "b": _metadata(-values)},
         [],
         {"min_overlap_days": 120, "correlation_limit": 0.90, "validation_limit": 20},
     )
@@ -40,7 +48,7 @@ def test_one_hundred_nineteen_common_days_are_insufficient_evidence():
     values = _values(days=119)
     result = deduplicate_training(
         [_candidate("a"), _candidate("b")],
-        {"a": values, "b": values.copy()},
+        {"a": _metadata(values), "b": _metadata(values.copy())},
         [],
         {"min_overlap_days": 120, "correlation_limit": 0.90, "validation_limit": 20},
     )
@@ -54,7 +62,7 @@ def test_one_hundred_twenty_days_with_low_correlation_establish_novelty():
     right = _values(2)
     result = deduplicate_training(
         [_candidate("a"), _candidate("b")],
-        {"a": left, "b": right},
+        {"a": _metadata(left), "b": _metadata(right)},
         [],
         {"min_overlap_days": 120, "correlation_limit": 0.90, "validation_limit": 20},
     )
@@ -75,7 +83,7 @@ def test_first_candidate_without_archive_comparisons_is_admissible():
 
 
 def test_selection_order_and_limit_are_deterministic():
-    values = {str(i): _values(i) for i in range(25)}
+    values = {str(i): _metadata(_values(i)) for i in range(25)}
     candidates = [
         _candidate(str(i), mean=0.5, worst=0.4, nodes=3)
         for i in range(25)
@@ -110,7 +118,7 @@ def test_incompatible_archive_reference_is_skipped_with_reason_before_correlatio
     assert result.rejection_reasons == {}
 
 
-def test_archive_reference_without_values_is_explicit_insufficient_overlap():
+def test_archive_reference_without_values_is_explicitly_unverifiable():
     result = deduplicate_training(
         [_candidate("candidate")],
         {"candidate": _values()},
@@ -119,7 +127,9 @@ def test_archive_reference_without_values_is_explicit_insufficient_overlap():
     )
 
     assert [candidate.expression_id for candidate in result] == []
-    assert "insufficient overlap" in result.rejection_reasons["candidate"][0]
+    assert result.comparisons[0].compatible is False
+    assert "unverifiable" in (result.comparisons[0].reason or "")
+    assert "unverifiable" in result.rejection_reasons["candidate"][0]
     assert "old" in result.comparisons[0].reason
 
 
@@ -138,3 +148,39 @@ def test_incompatible_accepted_reference_is_skipped_with_reason():
     assert [candidate.expression_id for candidate in result] == ["first", "second"]
     assert result.comparisons[-1].compatible is False
     assert "incompatible accepted reference first" in (result.comparisons[-1].reason or "")
+
+
+def test_missing_archive_metadata_is_unverifiable_and_never_duplicate():
+    values = _values()
+    result = deduplicate_training(
+        [_candidate("candidate")],
+        {"candidate": _metadata(values)},
+        [{"expression_id": "old", "values": values}],
+        {"min_overlap_days": 120, "correlation_limit": 0.90, "validation_limit": 20},
+    )
+
+    assert [candidate.expression_id for candidate in result] == []
+    comparison = result.comparisons[0]
+    assert comparison.compatible is False
+    assert "unverifiable" in (comparison.reason or "")
+    assert "training fingerprint" in (comparison.reason or "")
+    assert comparison.mean_abs_daily_spearman is None
+    assert "unverifiable" in result.rejection_reasons["candidate"][0]
+
+
+def test_missing_accepted_metadata_is_unverifiable_and_never_duplicate():
+    values = _values()
+    result = deduplicate_training(
+        [_candidate("first"), _candidate("second", mean=0.4)],
+        {"first": values, "second": _metadata(values)},
+        [],
+        {"min_overlap_days": 120, "correlation_limit": 0.90, "validation_limit": 20},
+    )
+
+    assert [candidate.expression_id for candidate in result] == ["first"]
+    comparison = result.comparisons[-1]
+    assert comparison.compatible is False
+    assert "unverifiable" in (comparison.reason or "")
+    assert "training fingerprint" in (comparison.reason or "")
+    assert comparison.mean_abs_daily_spearman is None
+    assert "unverifiable" in result.rejection_reasons["second"][0]
