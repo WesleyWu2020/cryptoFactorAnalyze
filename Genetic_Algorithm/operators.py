@@ -46,22 +46,27 @@ def delta(a: pd.DataFrame, window: int) -> pd.DataFrame:
 
 
 def rolling_mean(a: pd.DataFrame, window: int) -> pd.DataFrame:
+    _validate_window(window)
     return a.rolling(window=window, min_periods=window, center=False).mean()
 
 
 def rolling_std(a: pd.DataFrame, window: int) -> pd.DataFrame:
+    _validate_window(window)
     return a.rolling(window=window, min_periods=window, center=False).std(ddof=1)
 
 
 def rolling_min(a: pd.DataFrame, window: int) -> pd.DataFrame:
+    _validate_window(window)
     return a.rolling(window=window, min_periods=window, center=False).min()
 
 
 def rolling_max(a: pd.DataFrame, window: int) -> pd.DataFrame:
+    _validate_window(window)
     return a.rolling(window=window, min_periods=window, center=False).max()
 
 
 def rolling_correlation(a: pd.DataFrame, b: pd.DataFrame, window: int) -> pd.DataFrame:
+    _validate_window(window)
     return a.rolling(window=window, min_periods=window, center=False).corr(b)
 
 

@@ -4,6 +4,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+import Genetic_Algorithm.evaluator as evaluator_module
 from Genetic_Algorithm.evaluator import evaluate_tree
 from Genetic_Algorithm.expression import Node, expression_hash
 
@@ -75,6 +76,75 @@ def test_evaluate_tree_rejects_invalid_date_indexes_before_row_order_operations(
 
     with pytest.raises(ValueError, match=message):
         evaluate_tree(Node("rolling_mean", (Node("close"),), window=2), {"close": invalid}, eligible)
+
+
+@pytest.mark.parametrize("mutation, message", [
+    (lambda frame: frame.rename(columns={"A": "AA"}), "axes"),
+    (lambda frame: frame.iloc[:, [0, 0, 2]], "duplicate"),
+])
+def test_evaluate_tree_rejects_context_axis_mismatches_and_duplicates(mutation, message):
+    ctx, dates, symbols = _ctx()
+    invalid = mutation(ctx["close"])
+    eligible = pd.DataFrame(True, index=dates, columns=symbols)
+
+    with pytest.raises(ValueError, match=message):
+        evaluate_tree(Node("close"), {"close": invalid}, eligible)
+
+
+def test_evaluate_tree_rejects_mismatched_required_panel_axes():
+    ctx, dates, symbols = _ctx()
+    ctx["open"] = ctx["open"].rename(columns={"A": "AA"})
+    eligible = pd.DataFrame(True, index=dates, columns=symbols)
+
+    with pytest.raises(ValueError, match="identical axes"):
+        evaluate_tree(Node("body_relative"), ctx, eligible)
+
+
+@pytest.mark.parametrize("invalid_value", [1, 0, "True", object()])
+def test_evaluate_tree_rejects_non_boolean_eligibility_values(invalid_value):
+    ctx, dates, symbols = _ctx()
+    eligible = pd.DataFrame(True, index=dates, columns=symbols, dtype=object)
+    eligible.iloc[0, 0] = invalid_value
+
+    with pytest.raises(ValueError, match="boolean"):
+        evaluate_tree(Node("close"), ctx, eligible)
+
+
+def test_evaluate_tree_accepts_boolean_na_eligibility_and_treats_na_as_false():
+    ctx, dates, symbols = _ctx()
+    eligible = pd.DataFrame(True, index=dates, columns=symbols, dtype=object)
+    eligible.iloc[0, 0] = pd.NA
+
+    result = evaluate_tree(Node("close"), ctx, eligible)
+
+    assert pd.isna(result.iloc[0, 0])
+
+
+@pytest.mark.parametrize("axis", ["index", "columns"])
+def test_evaluate_tree_rejects_duplicate_eligible_axes(axis):
+    ctx, dates, symbols = _ctx()
+    eligible = pd.DataFrame(True, index=dates, columns=symbols)
+    if axis == "index":
+        eligible = eligible.iloc[[0, 0, 2, 3]]
+    else:
+        eligible = eligible.iloc[:, [0, 0, 2]]
+
+    with pytest.raises(ValueError, match="duplicate"):
+        evaluate_tree(Node("close"), ctx, eligible)
+
+
+def test_evaluate_tree_cache_fingerprint_includes_feature_and_evaluator_sources(monkeypatch):
+    ctx, dates, symbols = _ctx()
+    eligible = pd.DataFrame(True, index=dates, columns=symbols)
+    cache = {}
+
+    evaluate_tree(Node("close"), ctx, eligible, cache=cache)
+    monkeypatch.setattr(evaluator_module, "_features_source_hash", lambda: "changed-features")
+    monkeypatch.setattr(evaluator_module, "_evaluator_source_hash", lambda: "changed-evaluator")
+    result = evaluate_tree(Node("close"), ctx, eligible, cache=cache)
+
+    assert result.equals(ctx["close"])
+    assert len(cache) == 2
 
 
 def test_evaluator_cache_content_hash_rejects_stale_reused_supplied_fingerprint():
@@ -169,7 +239,7 @@ def test_evaluator_cache_fingerprint_preserves_axis_label_types():
     assert all(isinstance(label, str) for label in result.index)
 
 
-def test_evaluator_cache_fingerprint_includes_eligibility_axes():
+def test_evaluate_tree_rejects_reordered_eligibility_axes():
     ctx, dates, symbols = _ctx()
     cache = {}
     first_eligible = pd.DataFrame(True, index=dates, columns=symbols)
@@ -177,12 +247,8 @@ def test_evaluator_cache_fingerprint_includes_eligibility_axes():
     second_eligible = second_eligible.loc[:, ["C", "B", "A"]]
 
     evaluate_tree(Node("close"), ctx, first_eligible, cache=cache)
-    result = evaluate_tree(Node("close"), ctx, second_eligible, cache=cache)
-
-    assert result.index.equals(second_eligible.index)
-    assert result.columns.equals(second_eligible.columns)
-    expected = ctx["close"].reindex(index=second_eligible.index, columns=second_eligible.columns)
-    assert result.equals(expected)
+    with pytest.raises(ValueError, match="axes"):
+        evaluate_tree(Node("close"), ctx, second_eligible, cache=cache)
 
 
 def test_nested_rank_ignores_extreme_future_only_ineligible_symbol():

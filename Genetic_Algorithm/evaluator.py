@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import inspect
 import json
+import sys
 from collections import OrderedDict
 from typing import Any
 
@@ -12,8 +13,8 @@ import numpy as np
 import pandas as pd
 
 from . import operators
-from .expression import Node, expression_hash, validate_tree
-from .features import evaluate_terminal
+from . import features
+from .expression import Node, expression_hash, required_fields, validate_tree
 
 
 def _typed_axis_labels(axis: pd.Index) -> str:
@@ -56,10 +57,66 @@ def _validate_causal_index(name: str, frame: pd.DataFrame) -> None:
         raise ValueError(f"{name} date index contains duplicate dates")
     if not frame.index.is_monotonic_increasing:
         raise ValueError(f"{name} date index must be monotonic increasing")
+    if frame.columns.has_duplicates:
+        raise ValueError(f"{name} instrument axis contains duplicate labels")
+
+
+def _validate_context_axes(
+    node: Node,
+    data_ctx: dict[str, pd.DataFrame],
+    eligible: pd.DataFrame,
+) -> None:
+    if not isinstance(data_ctx, dict):
+        raise TypeError("data_ctx must be a dict of DataFrames")
+    for name, frame in data_ctx.items():
+        if isinstance(frame, pd.DataFrame):
+            _validate_causal_index(f"data_ctx[{name!r}]", frame)
+    _validate_causal_index("eligible", eligible)
+
+    required = required_fields(node)
+    missing = sorted(name for name in required if name not in data_ctx)
+    if missing:
+        raise ValueError(f"data_ctx is missing required panels: {missing}")
+    non_frames = sorted(name for name in required if not isinstance(data_ctx[name], pd.DataFrame))
+    if non_frames:
+        raise TypeError(f"required data_ctx panels must be DataFrames: {non_frames}")
+
+    reference_name = sorted(required)[0]
+    reference = data_ctx[reference_name]
+    if not reference.index.equals(eligible.index) or not reference.columns.equals(eligible.columns):
+        raise ValueError(
+            f"eligible axes must exactly match data_ctx[{reference_name!r}] axes"
+        )
+    for name in sorted(required):
+        frame = data_ctx[name]
+        if not frame.index.equals(reference.index) or not frame.columns.equals(reference.columns):
+            raise ValueError(
+                f"required data_ctx panels must have identical axes; {name!r} differs"
+            )
+
+
+def _validate_eligibility_values(eligible: pd.DataFrame) -> None:
+    def valid(value: object) -> bool:
+        if isinstance(value, (bool, np.bool_)):
+            return True
+        missing = pd.isna(value)
+        return isinstance(missing, (bool, np.bool_)) and bool(missing)
+
+    valid_values = eligible.map(valid)
+    if not bool(valid_values.to_numpy(dtype=bool).all()):
+        raise ValueError("eligible values must be boolean or NA")
 
 
 def _operator_source_hash() -> str:
     return hashlib.sha256(inspect.getsource(operators).encode()).hexdigest()
+
+
+def _features_source_hash() -> str:
+    return hashlib.sha256(inspect.getsource(features).encode()).hexdigest()
+
+
+def _evaluator_source_hash() -> str:
+    return hashlib.sha256(inspect.getsource(sys.modules[__name__]).encode()).hexdigest()
 
 
 def _eligible_fingerprint(eligible: pd.DataFrame) -> str:
@@ -74,7 +131,7 @@ def _eligible_fingerprint(eligible: pd.DataFrame) -> str:
 
 def _apply(node: Node, data_ctx: dict[str, pd.DataFrame], eligible: pd.DataFrame) -> pd.DataFrame:
     if node.op not in operators.OPERATORS:
-        return evaluate_terminal(node.field or node.op, data_ctx)
+        return features.evaluate_terminal(node.field or node.op, data_ctx)
     children = [_apply(child, data_ctx, eligible) for child in node.children]
     if node.op == "rank":
         return operators.cross_sectional_rank(children[0], eligible)
@@ -127,15 +184,14 @@ def evaluate_tree(
         raise ValueError("cache_bytes must be non-negative")
     if not isinstance(eligible, pd.DataFrame):
         raise TypeError("eligible must be a DataFrame")
-    for name, frame in data_ctx.items():
-        if isinstance(frame, pd.DataFrame):
-            _validate_causal_index(f"data_ctx[{name!r}]", frame)
-    _validate_causal_index("eligible", eligible)
+    _validate_context_axes(node, data_ctx, eligible)
+    _validate_eligibility_values(eligible)
     eligible = eligible.fillna(False).astype(bool)
     if cache is not None:
         _trim_cache(cache, cache_bytes)
     key = (
         expression_hash(node), _ctx_fingerprint(data_ctx), _operator_source_hash(),
+        _features_source_hash(), _evaluator_source_hash(),
         _eligible_fingerprint(eligible),
     )
     if cache is not None and key in cache:

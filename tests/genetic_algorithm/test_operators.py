@@ -6,6 +6,9 @@ from Genetic_Algorithm.operators import safe_div
 from Genetic_Algorithm.operators import (
     cross_sectional_rank,
     rolling_mean,
+    rolling_min,
+    rolling_max,
+    rolling_correlation,
     rolling_std,
 )
 from Genetic_Algorithm.operators import delta, lag
@@ -62,3 +65,28 @@ def test_direct_lag_and_delta_reject_non_positive_windows_before_shift(
 
     with pytest.raises(ValueError, match="positive"):
         operator(values, window)
+
+
+@pytest.mark.parametrize(
+    "operator,args",
+    [
+        (rolling_mean, ()),
+        (rolling_std, ()),
+        (rolling_min, ()),
+        (rolling_max, ()),
+        (rolling_correlation, (pd.DataFrame({"open": [1.0, 2.0, 3.0]}),)),
+    ],
+)
+@pytest.mark.parametrize("window", [0, -1, 1.5])
+def test_direct_rolling_operators_reject_invalid_windows_before_rolling(
+    operator, args, window, monkeypatch
+):
+    values = pd.DataFrame({"close": [1.0, 2.0, 3.0]})
+
+    def unexpected_rolling(*args, **kwargs):
+        raise AssertionError("invalid windows must be rejected before rolling")
+
+    monkeypatch.setattr(pd.DataFrame, "rolling", unexpected_rolling)
+
+    with pytest.raises(ValueError, match="positive"):
+        operator(values, *args, window)
