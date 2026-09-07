@@ -84,3 +84,57 @@ def test_selection_order_and_limit_are_deterministic():
 
     assert len(result) == 20
     assert [candidate.expression_id for candidate in result] == sorted(str(i) for i in range(25))[:20]
+
+
+def test_incompatible_archive_reference_is_skipped_with_reason_before_correlation():
+    values = _values()
+    result = deduplicate_training(
+        [_candidate("candidate")],
+        {"candidate": {
+            "values": values,
+            "training_fingerprint": "current-data",
+            "operator_version": "same-ops",
+        }},
+        [{
+            "expression_id": "old",
+            "training_fingerprint": "different-data",
+            "operator_version": "same-ops",
+            "values": values,
+        }],
+        {"min_overlap_days": 120, "correlation_limit": 0.90, "validation_limit": 20},
+    )
+
+    assert [candidate.expression_id for candidate in result] == ["candidate"]
+    assert result.comparisons[0].compatible is False
+    assert "incompatible" in (result.comparisons[0].reason or "")
+    assert result.rejection_reasons == {}
+
+
+def test_archive_reference_without_values_is_explicit_insufficient_overlap():
+    result = deduplicate_training(
+        [_candidate("candidate")],
+        {"candidate": _values()},
+        [{"expression_id": "old", "training_fingerprint": "same", "operator_version": "ops"}],
+        {"min_overlap_days": 120, "correlation_limit": 0.90, "validation_limit": 20},
+    )
+
+    assert [candidate.expression_id for candidate in result] == []
+    assert "insufficient overlap" in result.rejection_reasons["candidate"][0]
+    assert "old" in result.comparisons[0].reason
+
+
+def test_incompatible_accepted_reference_is_skipped_with_reason():
+    values = _values()
+    result = deduplicate_training(
+        [_candidate("first"), _candidate("second", mean=0.4)],
+        {
+            "first": {"values": values, "training_fingerprint": "data-a", "operator_version": "ops"},
+            "second": {"values": values, "training_fingerprint": "data-b", "operator_version": "ops"},
+        },
+        [],
+        {"min_overlap_days": 120, "correlation_limit": 0.90, "validation_limit": 20},
+    )
+
+    assert [candidate.expression_id for candidate in result] == ["first", "second"]
+    assert result.comparisons[-1].compatible is False
+    assert "incompatible accepted reference first" in (result.comparisons[-1].reason or "")

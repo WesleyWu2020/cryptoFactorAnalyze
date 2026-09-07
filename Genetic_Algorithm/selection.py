@@ -76,7 +76,10 @@ def _frame(value: Any) -> pd.DataFrame | None:
 
 
 def _metadata(candidate: Any, values: Any) -> tuple[str | None, str | None]:
-    source = candidate if isinstance(candidate, Mapping) else {}
+    source = candidate if isinstance(candidate, Mapping) else {
+        name: getattr(candidate, name, None)
+        for name in ("training_fingerprint", "operator_version")
+    }
     if isinstance(values, Mapping):
         source = {**source, **values}
     return source.get("training_fingerprint"), source.get("operator_version")
@@ -128,22 +131,49 @@ def deduplicate_training(
         left = _frame(values_by_id.get(candidate_id))
         candidate_reasons: list[str] = []
         references: list[tuple[str, Any, Mapping[str, Any] | None]] = []
+        candidate_fingerprint, candidate_operator = _metadata(candidate, values_by_id.get(candidate_id))
         for item in archive_items:
             reference_id = str(item.get("expression_id", item.get("hash", "archive")))
             right = _frame(item)
             if right is None:
                 right = _frame(values_by_id.get(reference_id))
             reference_fingerprint, reference_operator = _metadata(item, right)
-            candidate_fingerprint, candidate_operator = _metadata(candidate, values_by_id.get(candidate_id))
             if (reference_fingerprint is not None and candidate_fingerprint is not None and reference_fingerprint != candidate_fingerprint) or (
                 reference_operator is not None and candidate_operator is not None and reference_operator != candidate_operator
             ):
+                reason = (
+                    f"incompatible archive reference {reference_id}: "
+                    f"training fingerprint/operator version does not match"
+                )
+                comparisons.append(Comparison(candidate_id, reference_id, 0, None, False, reason))
                 continue
             references.append((reference_id, right, item))
-        references.extend((_candidate_id(item), _frame(values_by_id.get(_candidate_id(item))), None) for item in accepted)
+        references.extend(
+            (
+                _candidate_id(item),
+                _frame(values_by_id.get(_candidate_id(item))),
+                values_by_id.get(_candidate_id(item)) if isinstance(values_by_id.get(_candidate_id(item)), Mapping) else None,
+            )
+            for item in accepted
+        )
 
-        for reference_id, right, _ in references:
+        for reference_id, right, metadata in references:
+            reference_fingerprint, reference_operator = _metadata(
+                metadata or {}, right if right is not None else values_by_id.get(reference_id)
+            )
+            if (reference_fingerprint is not None and candidate_fingerprint is not None and reference_fingerprint != candidate_fingerprint) or (
+                reference_operator is not None and candidate_operator is not None and reference_operator != candidate_operator
+            ):
+                reason = (
+                    f"incompatible accepted reference {reference_id}: "
+                    f"training fingerprint/operator version does not match"
+                )
+                comparisons.append(Comparison(candidate_id, reference_id, 0, None, False, reason))
+                continue
             if left is None or right is None:
+                reason = f"insufficient overlap with {reference_id}: missing value panel"
+                candidate_reasons.append(reason)
+                comparisons.append(Comparison(candidate_id, reference_id, 0, None, False, reason))
                 continue
             common_days, mean_abs = _daily_correlation(left, right)
             if common_days < minimum_days:
