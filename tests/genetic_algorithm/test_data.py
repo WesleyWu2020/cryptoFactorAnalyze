@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pandas as pd
 import pytest
 
@@ -110,25 +112,45 @@ def test_load_stage_rejects_duplicate_membership_axis(stage_fixture, monkeypatch
         )
 
 
-def test_load_stage_full_and_cutoff_inputs_have_identical_training_rows(tmp_path):
-    from Genetic_Algorithm.data import load_stage
+def test_provider_full_and_cutoff_stage_panels_match_through_cutoff(tmp_path):
+    from factor_common.data_provider import DataProvider
     from tests.factor_common.conftest import write_h5_fixture
 
-    full = write_h5_fixture(tmp_path / "full.h5", funding_schedule=pd.DataFrame())
-    cutoff = write_h5_fixture(
-        tmp_path / "cutoff.h5",
-        calendar=pd.date_range("2024-01-01", "2024-01-05", freq="D"),
+    path = write_h5_fixture(
+        tmp_path / "full.h5",
+        calendar=pd.date_range("2024-01-01", "2024-01-08", freq="D"),
         funding_schedule=pd.DataFrame(),
     )
-    stage = Stage("fixture", "2024-01-03", "2024-01-05")
-    full_data = load_stage(full, stage, warmup_days=2, fields=["close", "volume"])
-    cutoff_data = load_stage(cutoff, stage, warmup_days=2, fields=["close", "volume"])
+    cutoff = pd.Timestamp("2024-01-05")
+    history_start = pd.Timestamp("2024-01-03")
+    full_provider = DataProvider(path)
+    cutoff_provider = DataProvider(path, as_of=cutoff)
+    cutoff_symbols = list(cutoff_provider.symbols)
 
-    for field in full_data.features:
-        diff = (full_data.features[field] - cutoff_data.features[field]).abs().to_numpy()
-        assert float(pd.DataFrame(diff).max().max()) == 0.0
-    pd.testing.assert_frame_equal(full_data.eligible, cutoff_data.eligible)
-    assert full_data.audit["provider_cutoff"] == cutoff_data.audit["provider_cutoff"]
+    for field in ("close", "volume", "open"):
+        full = full_provider.get_single_data(field, start=history_start, end=cutoff)
+        bounded = cutoff_provider.get_single_data(field, start=history_start, end=cutoff)
+        full = full.reindex(columns=cutoff_symbols)
+        bounded = bounded.reindex(columns=cutoff_symbols)
+        pd.testing.assert_frame_equal(full, bounded)
+        assert full.isna().equals(bounded.isna())
+        values = full.to_numpy(dtype="float64")
+        bounded_values = bounded.to_numpy(dtype="float64")
+        finite = ~full.isna().to_numpy() & ~bounded.isna().to_numpy()
+        assert float(abs(values[finite] - bounded_values[finite]).max(initial=0.0)) <= 1e-12
+
+    full_membership = full_provider.get_universe(start=history_start, end=cutoff).reindex(
+        columns=cutoff_symbols
+    )
+    bounded_membership = cutoff_provider.get_universe(start=history_start, end=cutoff)
+    pd.testing.assert_frame_equal(full_membership, bounded_membership)
+    assert full_membership.isna().equals(bounded_membership.isna())
+
+    symbols = cutoff_symbols
+    full_quality = full_provider.get_quality(start=history_start, end=cutoff, symbols=symbols)
+    bounded_quality = cutoff_provider.get_quality(start=history_start, end=cutoff, symbols=symbols)
+    pd.testing.assert_frame_equal(full_quality, bounded_quality)
+    assert full_quality.isna().equals(bounded_quality.isna())
 
 
 def test_warmup_availability_counts_only_rows_in_warmup_window(tmp_path):
@@ -275,13 +297,12 @@ def test_stage_fingerprint_changes_when_stage_identity_changes(stage_fixture):
         fixture.quality_eligible,
         fixture.opens,
         stage=Stage("fixture", "2024-01-04", "2024-01-05"),
-        code_fingerprint=fixture.audit["provenance"]["code_fingerprint"],
     )
 
     assert other_stage != fixture.fingerprint
 
 
-def test_stage_fingerprint_changes_when_code_identity_changes(stage_fixture, monkeypatch):
+def test_stage_content_fingerprint_is_separate_from_code_identity(stage_fixture, monkeypatch):
     from Genetic_Algorithm import data as data_module
 
     loaded = data_module.load_stage(
@@ -298,7 +319,33 @@ def test_stage_fingerprint_changes_when_code_identity_changes(stage_fixture, mon
         fields=["close"],
     )
 
-    assert changed.fingerprint != loaded.fingerprint
+    assert changed.fingerprint == loaded.fingerprint
+    assert changed.audit["provenance"]["code_fingerprint"] != loaded.audit["provenance"]["code_fingerprint"]
+    assert changed.audit["cache_identity"]["content_fingerprint"] == changed.fingerprint
+    assert changed.audit["cache_identity"]["code_fingerprint"] == changed.audit["provenance"]["code_fingerprint"]
+
+
+def test_stage_fingerprint_includes_funding_events_schema_identity():
+    from Genetic_Algorithm import data as data_module
+
+    frames = {
+        "close": pd.DataFrame([[1.0]], index=pd.date_range("2024-01-01", periods=1), columns=["AUSDT"]),
+    }
+    eligible = pd.DataFrame([[True]], index=frames["close"].index, columns=frames["close"].columns)
+    stage = Stage("fixture", "2024-01-01", "2024-01-01")
+    original = data_module.TABLE_SPECS["funding_events"]
+    changed = data_module._fingerprint(frames, eligible, eligible, frames["close"], stage=stage)
+    data_module.TABLE_SPECS["funding_events"] = replace(
+        original, schema_version=original.schema_version + 1
+    )
+    try:
+        changed_schema = data_module._fingerprint(
+            frames, eligible, eligible, frames["close"], stage=stage
+        )
+    finally:
+        data_module.TABLE_SPECS["funding_events"] = original
+
+    assert changed_schema != changed
 
 
 def test_stage_fingerprint_declares_all_stage_loading_sources():

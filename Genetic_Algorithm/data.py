@@ -99,18 +99,15 @@ def _fingerprint(
     opens: pd.DataFrame,
     *,
     stage: Stage,
-    code_fingerprint: str,
 ) -> str:
     digest = hashlib.sha256()
     digest.update(json.dumps({
         "fingerprint_version": _FINGERPRINT_VERSION,
-        "operator_version": _OPERATOR_VERSION,
         "stage": {
             "name": stage.name,
             "start": _day(stage.start).isoformat(),
             "end": _day(stage.end).isoformat(),
         },
-        "code_fingerprint": code_fingerprint,
     }, sort_keys=True).encode())
     for name, frame in [
         *sorted(features.items()),
@@ -125,7 +122,12 @@ def _fingerprint(
             "columns": list(spec.columns),
         }
         for name, spec in sorted(TABLE_SPECS.items())
-        if name in {"klines_daily", "universe_monthly", "research_panel_daily"}
+        if name in {
+            "klines_daily",
+            "funding_events",
+            "universe_monthly",
+            "research_panel_daily",
+        }
     }, sort_keys=True).encode())
     return digest.hexdigest()
 
@@ -234,6 +236,13 @@ def load_stage(
     )
     warmup_dates = history_dates[history_dates < start]
     code_fingerprint = _code_fingerprint()
+    content_fingerprint = _fingerprint(
+        features,
+        eligible,
+        quality_eligible,
+        opens,
+        stage=stage,
+    )
     audit = {
         "provider_cutoff": end.strftime("%Y-%m-%d"),
         "stage_days": int(len(stage_dates)),
@@ -265,7 +274,6 @@ def load_stage(
         },
         "provenance": {
             "code_fingerprint": code_fingerprint,
-            "fingerprint_version": _FINGERPRINT_VERSION,
             "operator_version": _OPERATOR_VERSION,
             "source_files": list(_CODE_FINGERPRINT_SOURCES),
             "environment": {
@@ -274,6 +282,12 @@ def load_stage(
                 "pid": os.getpid(),
             },
         },
+        "cache_identity": {
+            "content_fingerprint": content_fingerprint,
+            "code_fingerprint": code_fingerprint,
+            "fingerprint_version": _FINGERPRINT_VERSION,
+            "operator_version": _OPERATOR_VERSION,
+        },
     }
     return StageData(
         stage=stage,
@@ -281,14 +295,7 @@ def load_stage(
         eligible=eligible,
         quality_eligible=quality_eligible,
         opens=opens,
-        fingerprint=_fingerprint(
-            features,
-            eligible,
-            quality_eligible,
-            opens,
-            stage=stage,
-            code_fingerprint=code_fingerprint,
-        ),
+        fingerprint=content_fingerprint,
         audit=audit,
     )
 
