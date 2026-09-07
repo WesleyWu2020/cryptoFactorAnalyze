@@ -296,6 +296,32 @@ def test_provenance_rejects_code_paths_outside_or_through_symlink(tmp_path, monk
         build_provenance(selected_code_paths=[escape], **kwargs)
 
 
+def test_provenance_hashes_selected_code_without_read_bytes(tmp_path, monkeypatch):
+    source = tmp_path / "selected.py"
+    payload = bytes(range(256)) * 8192
+    source.write_bytes(payload)
+    monkeypatch.setattr("Genetic_Algorithm.artifacts.working_tree_patch_hash", lambda root: "patch")
+
+    def fail_read_bytes(self):
+        raise AssertionError("selected-code hashing must stream file contents")
+
+    monkeypatch.setattr(type(source), "read_bytes", fail_read_bytes)
+
+    provenance = build_provenance(
+        config={},
+        stage_content_hashes={},
+        selected_code_paths=[source],
+        repository_root=tmp_path,
+        package_names=(),
+        seed=1,
+        operator_version="ops",
+        backtest_profile={},
+        experiment_id="exp",
+    )
+
+    assert provenance["selected_code_content_hashes"][source.name] == hashlib.sha256(payload).hexdigest()
+
+
 def test_provenance_preserves_runtime_inputs_with_deterministic_identities(tmp_path, monkeypatch):
     monkeypatch.setattr("Genetic_Algorithm.artifacts.working_tree_patch_hash", lambda root: "patch")
 

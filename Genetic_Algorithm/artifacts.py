@@ -335,7 +335,14 @@ def _tree_payload(tree: Any) -> dict[str, Any]:
 
 
 def _file_hash(path: Path) -> str:
-    return hashlib.sha256(path.read_bytes()).hexdigest()
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        while True:
+            content = handle.read(_NON_GIT_READ_CHUNK)
+            if not content:
+                break
+            digest.update(content)
+    return digest.hexdigest()
 
 
 def _confined_code_path(repository_root: Path, path: str | Path) -> tuple[str, Path]:
