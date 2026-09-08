@@ -40,6 +40,7 @@ def _validation(**overrides):
     [
         ({"all_costs_cumulative_return": -0.01}, "cumulative return"),
         ({"net_sharpe": None}, "Sharpe"),
+        ({"net_sharpe": 1.0}, "Sharpe"),
         ({"direction": -1}, "direction"),
     ],
 )

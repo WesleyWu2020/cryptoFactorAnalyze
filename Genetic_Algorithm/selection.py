@@ -360,8 +360,15 @@ def select_validation(
                 failures.append("fewer than 3 positive validation quarters")
             if (_finite(result.get("all_costs_cumulative_return")) or 0.0) <= 0.0:
                 failures.append("all_costs cumulative return is not positive")
-            if _finite(result.get("net_sharpe")) is None:
+            net_sharpe = _finite(result.get("net_sharpe"))
+            if net_sharpe is None:
                 failures.append("net Sharpe is not finite")
+            else:
+                minimum_sharpe = float(_value(config, "min_all_costs_sharpe", 1.0))
+                if net_sharpe <= minimum_sharpe:
+                    failures.append(
+                        f"all_costs Sharpe is not greater than {minimum_sharpe:g}"
+                    )
         if failures:
             rejected.append(candidate)
             reasons[candidate_id] = (*reasons.get(candidate_id, ()), *failures)

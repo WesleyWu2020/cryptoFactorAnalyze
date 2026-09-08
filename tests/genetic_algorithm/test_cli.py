@@ -91,3 +91,15 @@ def test_freeze_rejects_tampered_validation_artifact(tmp_path):
 
     with pytest.raises(ValueError, match="hash verification"):
         cli._freeze(argparse.Namespace(run_dir=str(run_dir)))
+
+
+def test_validation_metrics_use_all_costs_total_return_not_a_missing_alias():
+    metrics = cli._all_costs_validation_metrics(
+        {"total_return": 0.911753, "sharpe": 1.8495, "turnover": 0.1088}
+    )
+
+    assert metrics == {
+        "all_costs_cumulative_return": 0.911753,
+        "net_sharpe": 1.8495,
+        "turnover": 0.1088,
+    }

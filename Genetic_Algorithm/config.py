@@ -57,6 +57,7 @@ class SearchConfig:
     min_quarter_days: int = 45
     min_day_coverage: float = 0.8
     min_cell_coverage: float = 0.8
+    min_all_costs_sharpe: float = 1.0
     correlation_limit: float = 0.9
     min_overlap_days: int = 120
     validation_limit: int = 20
@@ -134,6 +135,10 @@ class SearchConfig:
                 raise TypeError(f"{name} must be a float")
             if not 0 <= value <= 1:
                 raise ValueError(f"{name} must be between 0 and 1")
+        if type(self.min_all_costs_sharpe) is not float:
+            raise TypeError("min_all_costs_sharpe must be a float")
+        if not math.isfinite(self.min_all_costs_sharpe):
+            raise ValueError("min_all_costs_sharpe must be finite")
         if type(self.enable_funding_features) is not bool:
             raise TypeError("enable_funding_features must be a boolean")
         if self.enable_funding_features:

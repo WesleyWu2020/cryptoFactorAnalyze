@@ -97,6 +97,15 @@ def _validation_evidence(candidate: dict[str, Any], stage_data: Any, config: Any
     }
 
 
+def _all_costs_validation_metrics(metrics: dict[str, Any]) -> dict[str, Any]:
+    """Map the certified full-ledger metric names into validation gates."""
+    return {
+        "all_costs_cumulative_return": metrics.get("total_return"),
+        "net_sharpe": metrics.get("sharpe"),
+        "turnover": metrics.get("turnover", 0.0),
+    }
+
+
 def _audit(args: argparse.Namespace) -> dict[str, Any]:
     if args.stage != "train":
         raise ValueError("audit supports only the frozen train stage")
@@ -149,7 +158,11 @@ def _validate(args: argparse.Namespace) -> dict[str, Any]:
         result = replay(candidate, STAGES["validation"], args.h5, run_dir, direction=candidate["direction"])
         metrics = result["metrics"]
         evidence = _validation_evidence(candidate, stage_data, config)
-        outcomes[candidate["expression_id"]] = {**evidence, "all_costs_cumulative_return": metrics.get("cumulative_return", 0.0), "net_sharpe": metrics.get("sharpe"), "turnover": metrics.get("turnover", 0.0), "replay": result["artifact_path"]}
+        outcomes[candidate["expression_id"]] = {
+            **evidence,
+            **_all_costs_validation_metrics(metrics),
+            "replay": result["artifact_path"],
+        }
     selected = select_validation(candidates, outcomes, config)
     _write_json(run_dir / "validation.json", {"status": "complete" if selected.accepted else "no_candidates", "accepted": [item["expression_id"] for item in selected.accepted], "rejected": [item["expression_id"] for item in selected.rejected], "rejection_reasons": selected.rejection_reasons, "results": outcomes, "training_archive_sha256": archive["sha256"], "provenance_sha256": provenance["sha256"], "config_sha256": config_document["sha256"], "validation_fingerprint": stage_data.fingerprint}, immutable=True)
     return {"status": "complete" if selected.accepted else "no_candidates", "artifact": str(run_dir / "validation.json")}
