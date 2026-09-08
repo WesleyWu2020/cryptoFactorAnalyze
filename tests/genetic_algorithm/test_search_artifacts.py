@@ -807,7 +807,8 @@ def test_run_search_rejects_same_expression_id_with_incompatible_provenance(
     assert second.candidates == ()
     dedup = json.loads((second_dir / "deduplication.json").read_text(encoding="utf-8"))
     reason = dedup["rejection_reasons"]["same-id"][0]
-    assert "incompatible archive reference same-id" in reason
+    assert reason == "conflicting expression_id in incompatible archive: same-id"
+    assert "incompatible archive reference same-id" in dedup["comparisons"][0]["reason"]
     archive = json.loads((second_dir / "training_candidates.json").read_text(encoding="utf-8"))
     assert [entry["expression_id"] for entry in archive["candidates"]] == ["same-id"]
 

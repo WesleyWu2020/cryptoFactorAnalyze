@@ -147,7 +147,7 @@ def test_ineligible_candidate_is_rejected_before_ranking_and_archive_comparison(
     assert result.archive_entries == ()
 
 
-def test_incompatible_archive_reference_rejects_candidate_before_correlation():
+def test_incompatible_archive_reference_is_skipped_before_correlation():
     values = _values()
     result = deduplicate_training(
         [_candidate("candidate")],
@@ -165,10 +165,32 @@ def test_incompatible_archive_reference_rejects_candidate_before_correlation():
         {"min_overlap_days": 120, "correlation_limit": 0.90, "validation_limit": 20},
     )
 
-    assert [candidate.expression_id for candidate in result] == []
+    assert [candidate.expression_id for candidate in result] == ["candidate"]
     assert result.comparisons[0].compatible is False
     assert "incompatible" in (result.comparisons[0].reason or "")
-    assert "incompatible archive reference old" in result.rejection_reasons["candidate"][0]
+    assert "candidate" not in result.rejection_reasons
+
+
+def test_matching_archive_expression_id_with_incompatible_provenance_is_rejected_as_conflict():
+    values = _values()
+    result = deduplicate_training(
+        [_candidate("same-id")],
+        {"same-id": _metadata(values, fingerprint="current")},
+        [{
+            "expression_id": "same-id",
+            "training_fingerprint": "old",
+            "operator_version": "ops",
+            "values": values.copy(),
+        }],
+        {"min_overlap_days": 120, "correlation_limit": 0.90, "validation_limit": 20},
+    )
+
+    assert result.accepted == ()
+    assert result.rejection_reasons["same-id"] == (
+        "conflicting expression_id in incompatible archive: same-id",
+    )
+    assert result.comparisons[0].compatible is False
+    assert "incompatible archive reference same-id" in (result.comparisons[0].reason or "")
 
 
 def test_matching_archive_expression_id_is_rejected_before_selection():
@@ -192,18 +214,18 @@ def test_matching_archive_expression_id_is_rejected_before_selection():
     )
 
 
-def test_archive_reference_without_values_is_explicitly_unverifiable():
+def test_compatible_archive_reference_without_values_is_insufficient_evidence():
     result = deduplicate_training(
         [_candidate("candidate")],
-        {"candidate": _values()},
+        {"candidate": _metadata(_values(), fingerprint="same")},
         [{"expression_id": "old", "training_fingerprint": "same", "operator_version": "ops"}],
         {"min_overlap_days": 120, "correlation_limit": 0.90, "validation_limit": 20},
     )
 
     assert [candidate.expression_id for candidate in result] == []
     assert result.comparisons[0].compatible is False
-    assert "unverifiable" in (result.comparisons[0].reason or "")
-    assert "unverifiable" in result.rejection_reasons["candidate"][0]
+    assert "missing value panel" in (result.comparisons[0].reason or "")
+    assert "missing value panel" in result.rejection_reasons["candidate"][0]
     assert "old" in result.comparisons[0].reason
 
 
@@ -234,13 +256,13 @@ def test_missing_archive_metadata_is_unverifiable_and_never_duplicate():
         {"min_overlap_days": 120, "correlation_limit": 0.90, "validation_limit": 20},
     )
 
-    assert [candidate.expression_id for candidate in result] == []
+    assert [candidate.expression_id for candidate in result] == ["candidate"]
     comparison = result.comparisons[0]
     assert comparison.compatible is False
     assert "unverifiable" in (comparison.reason or "")
     assert "training fingerprint" in (comparison.reason or "")
     assert comparison.mean_abs_daily_spearman is None
-    assert "unverifiable" in result.rejection_reasons["candidate"][0]
+    assert "candidate" not in result.rejection_reasons
 
 
 def test_missing_accepted_metadata_is_unverifiable_and_never_duplicate():

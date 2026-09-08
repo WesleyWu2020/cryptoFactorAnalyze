@@ -223,7 +223,10 @@ def deduplicate_training(
                 continue
             if reason is not None:
                 comparisons.append(Comparison(candidate_id, reference_id, 0, None, False, reason))
-                candidate_reasons.append(reason)
+                if reference_id == candidate_id:
+                    candidate_reasons.append(
+                        f"conflicting expression_id in incompatible archive: {candidate_id}"
+                    )
                 continue
             references.append((reference_id, right, item, values_by_id.get(reference_id)))
         references.extend(
