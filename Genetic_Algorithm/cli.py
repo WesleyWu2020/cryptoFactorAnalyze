@@ -129,6 +129,7 @@ def _search(args: argparse.Namespace) -> dict[str, Any]:
         search_stage=lambda _audit: evolution_search(load_stage(args.h5, STAGES["train"], config.max_history, fields), config),
         artifact_dir=run_dir, config=asdict(config), repository_root=Path.cwd(),
         selected_code_paths=(), seed=config.seed, experiment_id=run_dir.name,
+        backtest_profile={"n_groups": config.n_groups},
     )
     _write_json(config_path, raw_config, immutable=True)
     (run_dir / "generations.jsonl").write_text("".join(json.dumps(entry, sort_keys=True) + "\n" for entry in result.generation_log), encoding="utf-8")
@@ -155,7 +156,15 @@ def _validate(args: argparse.Namespace) -> dict[str, Any]:
     stage_data = load_stage(args.h5, STAGES["validation"], config.max_history, sorted(RAW_FIELDS))
     outcomes: dict[str, Any] = {}
     for candidate in candidates[:config.validation_limit]:
-        result = replay(candidate, STAGES["validation"], args.h5, run_dir, direction=candidate["direction"])
+        result = replay(
+            candidate,
+            STAGES["validation"],
+            args.h5,
+            run_dir,
+            direction=candidate["direction"],
+            n_groups=config.n_groups,
+            render_reports=config.render_reports,
+        )
         metrics = result["metrics"]
         evidence = _validation_evidence(candidate, stage_data, config)
         outcomes[candidate["expression_id"]] = {
@@ -191,7 +200,27 @@ def _test(args: argparse.Namespace) -> dict[str, Any]:
     frozen = read_verified_manifest(manifest)
     run_dir = manifest.parent
     config = _load_run_config(run_dir / "config.json")
-    receipt = test_manifest(manifest, test_stage=STAGES["test"], run_dir=run_dir, training_fingerprint=frozen["stage_fingerprints"]["training"], validation_fingerprint=frozen["stage_fingerprints"]["validation"], load_test_data=lambda stage: {"fingerprint": load_stage(args.h5, stage, config.max_history, sorted(RAW_FIELDS)).fingerprint, "history_start": stage.start - __import__("pandas").Timedelta(days=config.max_history), "end": stage.end}, evaluate=lambda candidate, stage, _data, direction: replay({**candidate, "tree": _tree(candidate["ast"])}, stage, args.h5, run_dir, direction=direction), runtime_source_hashes=_runtime_hashes, permitted_history_start=STAGES["test"].start - __import__("pandas").Timedelta(days=config.max_history))
+    def evaluate(candidate: dict[str, Any], stage: Any, _data: Any, direction: int) -> dict[str, Any]:
+        outcome = replay(
+            {**candidate, "tree": _tree(candidate["ast"])},
+            stage,
+            args.h5,
+            run_dir,
+            direction=direction,
+            n_groups=config.n_groups,
+            render_reports=config.render_reports,
+        )
+        return {
+            "identifier": outcome["identifier"],
+            "expression_id": outcome["expression_id"],
+            "direction": direction,
+            "profile": asdict(outcome["profile"]),
+            "all_costs_metrics": outcome["metrics"],
+            "replay": outcome["artifact_path"],
+            "report_path": outcome["report_path"],
+        }
+
+    receipt = test_manifest(manifest, test_stage=STAGES["test"], run_dir=run_dir, training_fingerprint=frozen["stage_fingerprints"]["training"], validation_fingerprint=frozen["stage_fingerprints"]["validation"], load_test_data=lambda stage: {"fingerprint": load_stage(args.h5, stage, config.max_history, sorted(RAW_FIELDS)).fingerprint, "history_start": stage.start - __import__("pandas").Timedelta(days=config.max_history), "end": stage.end}, evaluate=evaluate, runtime_source_hashes=_runtime_hashes, permitted_history_start=STAGES["test"].start - __import__("pandas").Timedelta(days=config.max_history))
     outcomes = json.loads(receipt.read_text(encoding="utf-8"))["outcomes"]
     complete = sum(item["status"] == "complete" for item in outcomes)
     return {"status": "complete" if complete == len(outcomes) else ("partial" if complete else "failed"), "receipt": str(receipt)}

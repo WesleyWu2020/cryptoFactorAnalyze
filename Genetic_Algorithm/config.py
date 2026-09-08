@@ -62,6 +62,8 @@ class SearchConfig:
     min_overlap_days: int = 120
     validation_limit: int = 20
     frozen_limit: int = 5
+    n_groups: int = 10
+    render_reports: bool = True
     cache_bytes: int = 268435456
     enable_funding_features: bool = False
     max_attempts: int = 10000
@@ -88,7 +90,7 @@ class SearchConfig:
         integer_fields = {
             "seed", "population", "generations", "max_depth", "max_nodes",
             "max_history", "min_pairs", "min_quarter_days", "min_overlap_days",
-            "validation_limit", "frozen_limit", "cache_bytes", "max_attempts",
+            "validation_limit", "frozen_limit", "n_groups", "cache_bytes", "max_attempts",
             "tournament_size", "hold_days",
         }
         for name in integer_fields:
@@ -98,12 +100,14 @@ class SearchConfig:
 
         positive_fields = {
             "population", "generations", "max_nodes", "max_history", "min_pairs",
-            "min_quarter_days", "min_overlap_days", "validation_limit", "frozen_limit",
+            "min_quarter_days", "min_overlap_days", "validation_limit", "frozen_limit", "n_groups",
             "cache_bytes", "max_attempts", "tournament_size", "hold_days",
         }
         for name in positive_fields:
             if getattr(self, name) <= 0:
                 raise ValueError(f"{name} must be positive")
+        if self.n_groups < 2:
+            raise ValueError("n_groups must be at least 2")
         if self.seed < 0 or self.max_depth < 0:
             raise ValueError("seed and max_depth must be non-negative")
 
@@ -141,6 +145,8 @@ class SearchConfig:
             raise ValueError("min_all_costs_sharpe must be finite")
         if type(self.enable_funding_features) is not bool:
             raise TypeError("enable_funding_features must be a boolean")
+        if type(self.render_reports) is not bool:
+            raise TypeError("render_reports must be a boolean")
         if self.enable_funding_features:
             raise ValueError("Funding features are unsupported until their data contract is validated")
 

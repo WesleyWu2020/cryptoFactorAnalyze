@@ -5,7 +5,7 @@ the standard ``FactorManager`` evaluation with the manager knowledge cutoff
 pinned at ``stage.end`` and the signal window ``[stage.start,
 stage.signal_end]`` — the two-day execution tail lands exactly on the stage
 end, so no read can cross the stage boundary. The replay profile is the
-resolved ``perp_1d`` profile with ``rebalance_days=1``, ``n_groups=10``, the
+resolved ``perp_1d`` profile with ``rebalance_days=1``, configured ``n_groups``, the
 fixed training direction, fees 0.0005, slippage 0.001, strict funding, and
 unit gross exposure; the framework's 50/50 long-short weights and accounting
 are used unchanged.
@@ -41,7 +41,6 @@ class ReplayEvaluationError(RuntimeError):
 
 _REPLAY_OVERRIDES = {
     "rebalance_days": 1,
-    "n_groups": 10,
     "fee_rate": 0.0005,
     "slippage": 0.001,
     "include_funding": True,
@@ -67,6 +66,8 @@ def replay(
     run_dir: str | Path,
     *,
     direction: int,
+    n_groups: int = 10,
+    render_reports: bool = True,
     reports_dir: str | Path | None = None,
 ) -> dict[str, Any]:
     """Replay one candidate on one stage and return the replay outcome.
@@ -80,7 +81,15 @@ def replay(
     exported = export_factor(
         candidate, run_dir / "exported_factors", direction=direction
     )
-    overrides = {**_REPLAY_OVERRIDES, "factor_direction": direction}
+    if type(n_groups) is not int or n_groups < 2:
+        raise ValueError("n_groups must be an integer of at least 2")
+    if type(render_reports) is not bool:
+        raise TypeError("render_reports must be a boolean")
+    overrides = {
+        **_REPLAY_OVERRIDES,
+        "factor_direction": direction,
+        "n_groups": n_groups,
+    }
     profile = resolve_profile("perp_1d", overrides)
     if profile.gross_exposure != 1.0 or profile.funding_price_mode != "strict":
         raise ValueError(
@@ -147,10 +156,12 @@ def replay(
             "stage-wide all_costs metrics"
         )
 
-    report_name = f"{exported.identifier}_{stage.name}_{result['run_id']}.html"
-    report = manager.plot_result(
-        result, output_path=manager.reports_dir / report_name
-    )
+    report_path = None
+    if render_reports:
+        report_name = f"{exported.identifier}_{stage.name}_{result['run_id']}.html"
+        report_path = manager.plot_result(
+            result, output_path=manager.reports_dir / report_name
+        )["output_path"]
 
     artifact_path = write_artifact(
         run_dir / f"replay_{stage.name}_{exported.identifier}.json",
@@ -171,7 +182,7 @@ def replay(
             "h5_path": str(h5_path),
             "exported_factor_path": str(exported.path),
             "export_manifest_path": str(exported.manifest_path),
-            "report_path": report["output_path"],
+            "report_path": report_path,
             "factor_path": result["paths"]["factor_path"],
             "metadata_path": result["paths"]["metadata_path"],
             "evaluation_dir": result["paths"]["evaluation_dir"],
@@ -193,7 +204,7 @@ def replay(
         "export": exported,
         "run_id": result["run_id"],
         "evaluation_id": result["evaluation_id"],
-        "report_path": report["output_path"],
+        "report_path": report_path,
         "artifact_path": str(artifact_path),
     }
 

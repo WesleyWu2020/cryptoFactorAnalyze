@@ -19,6 +19,8 @@
   "min_overlap_days": 120,
   "validation_limit": 20,
   "frozen_limit": 5,
+  "n_groups": 10,
+  "render_reports": true,
   "cache_bytes": 268435456,
   "enable_funding_features": false,
   "max_attempts": 10000,

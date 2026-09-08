@@ -38,6 +38,8 @@ def test_default_search_config_values_are_frozen():
     assert config.max_attempts == 10000
     assert config.tournament_size == 2
     assert config.hold_days == 1
+    assert config.n_groups == 10
+    assert config.render_reports is True
     assert config.initial_trees == ()
     assert config.evaluate_candidate is None
     with pytest.raises((AttributeError, TypeError)):
@@ -134,3 +136,14 @@ def test_load_config_rejects_unsupported_funding_features(tmp_path):
     path.write_text(json.dumps({"enable_funding_features": True}))
     with pytest.raises(ValueError, match="Funding features are unsupported"):
         load_config(path)
+
+
+def test_replay_group_count_and_report_switch_are_validated():
+    config = SearchConfig(n_groups=5, render_reports=False)
+
+    assert config.n_groups == 5
+    assert config.render_reports is False
+    with pytest.raises(ValueError, match="n_groups"):
+        SearchConfig(n_groups=1)
+    with pytest.raises(TypeError, match="render_reports"):
+        SearchConfig(render_reports=1)

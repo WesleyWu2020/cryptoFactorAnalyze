@@ -246,6 +246,26 @@ def test_replay_non_complete_all_costs_is_a_failure_not_zero_return(
     assert not list(run_dir.glob("replay_*.json"))
 
 
+def test_replay_can_use_five_groups_without_rendering_html(complete_h5, tmp_path):
+    run_dir = tmp_path / "run"
+    outcome = replay(
+        _candidate(),
+        STAGE,
+        complete_h5,
+        run_dir,
+        direction=1,
+        n_groups=5,
+        render_reports=False,
+    )
+
+    assert outcome["profile"].n_groups == 5
+    assert outcome["report_path"] is None
+    artifact = json.loads(Path(outcome["artifact_path"]).read_text(encoding="utf-8"))
+    assert artifact["profile"]["n_groups"] == 5
+    assert artifact["report_path"] is None
+    assert not list((run_dir / "reports").glob("*.html"))
+
+
 def test_replay_beyond_available_data_fails_instead_of_zero_return(
     complete_h5, tmp_path
 ):
