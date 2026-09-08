@@ -94,6 +94,30 @@ def test_selection_order_and_limit_are_deterministic():
     assert [candidate.expression_id for candidate in result] == sorted(str(i) for i in range(25))[:20]
 
 
+def test_acceptance_order_pins_worst_mean_nodes_precedence():
+    candidates = [
+        _candidate("aaa-many-nodes", mean=0.70, worst=0.50, nodes=9),
+        _candidate("high-worst-low-mean", mean=0.10, worst=0.60, nodes=9),
+        _candidate("low-worst-high-mean", mean=0.80, worst=0.50, nodes=1),
+        _candidate("zzz-few-nodes", mean=0.70, worst=0.50, nodes=3),
+    ]
+    values = {
+        candidate.expression_id: _metadata(_values(seed))
+        for seed, candidate in enumerate(candidates)
+    }
+
+    result = deduplicate_training(
+        candidates, values, [], {"min_overlap_days": 120, "validation_limit": 20},
+    )
+
+    assert [candidate.expression_id for candidate in result] == [
+        "high-worst-low-mean",  # worst-quarter IC dominates mean IC
+        "low-worst-high-mean",  # mean IC dominates node count
+        "zzz-few-nodes",  # fewer nodes win full score ties regardless of expression_id
+        "aaa-many-nodes",
+    ]
+
+
 def test_selection_never_exceeds_absolute_validation_candidate_cap():
     values = {str(i): _metadata(_values(i)) for i in range(25)}
     candidates = [_candidate(str(i)) for i in range(25)]
