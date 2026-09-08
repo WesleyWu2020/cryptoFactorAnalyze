@@ -257,7 +257,12 @@ def test_manifest(
             outcomes.append({"expression_id": candidate["expression_id"], "status": "complete", "outcome": outcome})
         except Exception as exc:  # preserve individual evaluation failures
             outcomes.append({"expression_id": candidate["expression_id"], "status": "failed", "error": f"{type(exc).__name__}: {exc}"})
-    receipt = run_dir / f"test_receipt_{uuid4().hex}.json"
+    # Receipts live in their own append-only namespace.  This keeps the run
+    # root legible while preserving a distinct immutable record for every
+    # holdout access (including deliberate repeats).
+    receipts_dir = run_dir / "test_receipts"
+    receipts_dir.mkdir(parents=True, exist_ok=True)
+    receipt = receipts_dir / f"{uuid4().hex}.json"
     write_artifact(receipt, {
         "receipt_version": 1,
         "manifest_sha256": manifest["sha256"],
@@ -300,16 +305,36 @@ def require_test_access(run_dir: str | Path, frozen_manifest: str | Path) -> Pat
 
 def _immutable_access_record(manifest_path: Path, manifest_sha256: str) -> Path | None:
     """Find verified immutable evidence, preferring completed receipts."""
-    for pattern in ("test_receipt_*.json", "test_access_commitment_*.json"):
-        for record in sorted(manifest_path.parent.glob(pattern)):
-            try:
-                document = read_verified_manifest(record)
-            except (OSError, ValueError):
-                continue
-            if document.get("manifest_sha256") != manifest_sha256:
-                continue
-            if pattern.startswith("test_receipt") and not isinstance(document.get("access_commitment_sha256"), str):
-                continue
+    root = manifest_path.parent
+    # Completed Task 10 receipts live under a dedicated namespace; retain
+    # legacy root receipts while continuing to discover root commitments made
+    # before a loader can fail.
+    receipt_records = (*sorted((root / "test_receipts").glob("*.json")), *sorted(root.glob("test_receipt_*.json")))
+    for record in receipt_records:
+        try:
+            document = read_verified_manifest(record)
+        except (OSError, ValueError):
+            continue
+        commitment_hash = document.get("access_commitment_sha256")
+        commitments = sorted(root.glob("test_access_commitment_*.json"))
+        linked = False
+        if isinstance(commitment_hash, str):
+            for commitment in commitments:
+                try:
+                    commitment_document = read_verified_manifest(commitment)
+                except (OSError, ValueError):
+                    continue
+                if commitment_document.get("sha256") == commitment_hash and commitment_document.get("manifest_sha256") == manifest_sha256:
+                    linked = True
+                    break
+        if document.get("manifest_sha256") == manifest_sha256 and linked:
+            return record
+    for record in sorted(root.glob("test_access_commitment_*.json")):
+        try:
+            document = read_verified_manifest(record)
+        except (OSError, ValueError):
+            continue
+        if document.get("manifest_sha256") == manifest_sha256:
             return record
     return None
 

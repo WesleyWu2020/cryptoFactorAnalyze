@@ -172,7 +172,7 @@ _ARCHIVE_REQUIRED_ENTRY_KEYS = {
     "expression_id", "training_only", "ast", "training_fingerprint",
     "operator_version", "training_diagnostics",
 }
-_ARCHIVE_OPTIONAL_ENTRY_KEYS = {"value_artifact"}
+_ARCHIVE_OPTIONAL_ENTRY_KEYS = {"value_artifact", "training_direction"}
 _ARCHIVE_AST_KEYS = {"op", "field", "window", "children"}
 _ARCHIVE_FORBIDDEN_KEY_MARKERS = (
     "validation", "test", "future", "holdout", "out_of_sample", "oos",
@@ -235,6 +235,8 @@ def _validate_archive_entry(entry: Mapping[str, Any]) -> str:
         raise ValueError("training archive candidate expression_id is malformed")
     if entry["training_only"] is not True:
         raise ValueError("training archive candidate must be marked training_only")
+    if "training_direction" in entry and entry["training_direction"] not in (-1, 1):
+        raise ValueError("training archive candidate direction is malformed")
     for field in ("training_fingerprint", "operator_version"):
         if not isinstance(entry[field], str) or not entry[field]:
             raise ValueError(f"training archive candidate {field} is malformed")

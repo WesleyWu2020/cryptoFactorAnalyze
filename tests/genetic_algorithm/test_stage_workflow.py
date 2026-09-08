@@ -2,7 +2,7 @@ import json
 
 import pytest
 
-from Genetic_Algorithm.artifacts import freeze_candidates
+from Genetic_Algorithm.artifacts import freeze_candidates, read_verified_manifest, write_artifact
 from Genetic_Algorithm.config import SearchConfig, Stage
 from Genetic_Algorithm.expression import Node
 from Genetic_Algorithm.replay import require_test_access, test_manifest
@@ -192,7 +192,7 @@ def test_test_manifest_retains_failures_marks_repeat_and_records_access(tmp_path
     assert json.loads(first.read_text())['outcomes'][0]['status'] == 'complete'
     assert json.loads(first.read_text())['outcomes'][1]['status'] == 'failed'
     assert json.loads(second.read_text())['repeat'] is True
-    assert require_test_access(tmp_path, manifest).parent == tmp_path
+    assert require_test_access(tmp_path, manifest).parent == tmp_path / "test_receipts"
 
 
 def test_test_access_commitment_survives_loader_failure_and_ignores_alternate_ledger(tmp_path):
@@ -229,3 +229,34 @@ def test_new_search_cannot_claim_unseen_holdout_after_a_test_receipt(tmp_path):
             warmup_days=0, fields=(), search_stage=lambda _: pytest.fail("search must not run"),
             artifact_dir=tmp_path / "next", holdout_manifest=manifest, claim_unseen_holdout=True,
         )
+
+
+def test_nested_test_receipt_is_recognized_as_holdout_access(tmp_path):
+    manifest = _frozen(tmp_path)
+    frozen = read_verified_manifest(manifest)
+    commitment = write_artifact(tmp_path / "test_access_commitment_nested.json", {
+        "commitment_version": 1,
+        "manifest_sha256": frozen["sha256"],
+    }, immutable=True)
+    commitment_document = read_verified_manifest(commitment)
+    receipt = tmp_path / "test_receipts" / "receipt.json"
+    write_artifact(receipt, {
+        "receipt_version": 1,
+        "manifest_sha256": frozen["sha256"],
+        "access_commitment_sha256": commitment_document["sha256"],
+    }, immutable=True)
+
+    assert require_test_access(tmp_path, manifest) == receipt
+
+
+def test_nested_receipt_with_unlinked_commitment_is_not_holdout_access(tmp_path):
+    manifest = _frozen(tmp_path)
+    frozen = read_verified_manifest(manifest)
+    write_artifact(tmp_path / "test_receipts" / "receipt.json", {
+        "receipt_version": 1,
+        "manifest_sha256": frozen["sha256"],
+        "access_commitment_sha256": "not-a-real-commitment",
+    }, immutable=True)
+
+    with pytest.raises(ValueError, match="no recorded holdout access"):
+        require_test_access(tmp_path, manifest)

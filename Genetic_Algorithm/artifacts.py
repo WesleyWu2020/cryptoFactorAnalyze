@@ -537,6 +537,9 @@ def training_archive_entry(
         "operator_version": operator_version,
         "training_diagnostics": _json_safe(diagnostics),
     }
+    direction = getattr(candidate, "direction", None)
+    if direction in (-1, 1):
+        entry["training_direction"] = direction
     if value_artifact is not None:
         entry["value_artifact"] = _json_safe(value_artifact)
     return entry

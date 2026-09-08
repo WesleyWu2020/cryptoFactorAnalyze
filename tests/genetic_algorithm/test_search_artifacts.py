@@ -10,11 +10,15 @@ import pandas as pd
 import pytest
 
 from Genetic_Algorithm.evolution import Candidate, SearchResult
+from Genetic_Algorithm import evolution as evolution_module
+from Genetic_Algorithm import cli
+from Genetic_Algorithm.config import SearchConfig
+from Genetic_Algorithm.fitness import TrainingScore
 from Genetic_Algorithm.expression import Node
 from Genetic_Algorithm.config import STAGES
 from Genetic_Algorithm.evolution import search as evolution_search
 from Genetic_Algorithm import search as search_module
-from Genetic_Algorithm.artifacts import working_tree_patch_hash, write_artifact, write_value_artifact
+from Genetic_Algorithm.artifacts import training_archive_entry, working_tree_patch_hash, write_artifact, write_value_artifact
 from Genetic_Algorithm.search import _load_archive
 
 
@@ -49,6 +53,32 @@ def test_result_values_rejects_identifiers_colliding_after_string_normalization(
 
     with pytest.raises(ValueError, match="collide after string normalization.*1"):
         search_module._result_values(result)
+
+
+def test_training_archive_retains_negative_training_direction():
+    candidate = Candidate(Node("close"), "negative", (0.1, 0.1, -1), direction=-1)
+    entry = __import__("Genetic_Algorithm.artifacts", fromlist=["training_archive_entry"]).training_archive_entry(
+        candidate, training_fingerprint="train", operator_version="ops", diagnostics={"score": [0.1, 0.1, -1], "eligible": True, "reasons": []},
+    )
+
+    assert entry["training_direction"] == -1
+
+
+def test_evolution_fitness_direction_survives_archive_and_cli_reconstruction(tmp_path, monkeypatch):
+    dates = pd.date_range("2024-01-01", periods=3, freq="D")
+    panel = pd.DataFrame(1.0, index=dates, columns=["BTC", "ETH"])
+    stage_data = {"opens": panel, "features": {"close": panel}, "eligible": panel.astype(bool), "quality_eligible": panel.astype(bool)}
+    score = TrainingScore(-1, 0.1, 0.1, 1.0, {"Q1": 0.1, "Q2": 0.1, "Q3": 0.1, "Q4": 0.1}, 3, 1.0, 1.0, 1, True, ())
+    monkeypatch.setattr(evolution_module, "evaluate_tree", lambda *args, **kwargs: panel)
+    monkeypatch.setattr(evolution_module, "score_training", lambda *args, **kwargs: score)
+
+    result = evolution_search(stage_data, SearchConfig(population=1, generations=1, max_depth=0, max_nodes=1, initial_trees=(Node("close"),)))
+    candidate = result.candidates[0]
+    assert candidate.direction == -1
+    entry = training_archive_entry(candidate, training_fingerprint="train", operator_version="ops", diagnostics={"score": list(candidate.score), "eligible": True, "reasons": []})
+    write_artifact(tmp_path / "training_candidates.json", {"training_only": True, "candidates": [entry]}, immutable=True)
+
+    assert cli._archive_candidates(tmp_path)[0]["direction"] == -1
 
 
 def test_run_search_writes_training_artifacts_without_validation(tmp_path, monkeypatch):

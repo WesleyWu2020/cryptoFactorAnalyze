@@ -24,6 +24,7 @@ class Candidate:
     score: tuple[Any, ...]
     eligible: bool = True
     reasons: tuple[str, ...] = ()
+    direction: int | None = None
 
 
 @dataclass(frozen=True)
@@ -282,9 +283,9 @@ def _training_evaluate(
                 tuple(raw["score"]),
                 bool(raw.get("eligible", True)),
                 tuple(raw.get("reasons", ())),
-                values,
+                values, raw.get("direction"),
             )
-        return tuple(raw), True, (), None
+        return tuple(raw), True, (), None, None
     features = _value(stage_data, "features")
     eligible = _value(stage_data, "eligible")
     quality = _value(stage_data, "quality_eligible")
@@ -293,7 +294,7 @@ def _training_evaluate(
     score_config = dict(config) if isinstance(config, dict) else config.__dict__.copy()
     score_config["node_count"] = node_count(tree)
     score = score_training(values, labels, quality, score_config)
-    return tuple(score.objective_vector), score.eligible, score.reasons, values
+    return tuple(score.objective_vector), score.eligible, score.reasons, values, score.direction
 
 
 def search(stage_data: Any, config: Any) -> SearchResult:
@@ -308,7 +309,7 @@ def search(stage_data: Any, config: Any) -> SearchResult:
     population_size = int(_value(config, "population", 200))
     generations = int(_value(config, "generations", 20))
     max_attempts = min(config.max_attempts, population_size * 50)
-    cache: dict[str, tuple[tuple[Any, ...], bool, tuple[str, ...], Node, Any]] = {}
+    cache: dict[str, tuple[tuple[Any, ...], bool, tuple[str, ...], Node, Any, int | None]] = {}
     values_by_id: dict[str, Any] = {}
     evaluations = 0
     objective_width: int | None = None
@@ -335,18 +336,18 @@ def search(stage_data: Any, config: Any) -> SearchResult:
                 hits += 1
                 continue
             if identifier in cache:
-                score, eligible, failure_reasons, cached_tree, values = cache[identifier]
+                score, eligible, failure_reasons, cached_tree, values, direction = cache[identifier]
                 hits += 1
                 canonical = cached_tree
             else:
                 unique += 1
                 evaluations += 1
                 try:
-                    score, eligible, failure_reasons, values = _training_evaluate(canonical, stage_data, config)
+                    score, eligible, failure_reasons, values, direction = _training_evaluate(canonical, stage_data, config)
                 except CandidateInvalidError as exc:
                     reasons[type(exc).__name__ + ": " + str(exc)] += 1
                     continue
-                cache[identifier] = (score, eligible, tuple(failure_reasons), canonical, values)
+                cache[identifier] = (score, eligible, tuple(failure_reasons), canonical, values, direction)
             if values is not None:
                 values_by_id[identifier] = {"values": values}
             score = tuple(score)
@@ -362,7 +363,7 @@ def search(stage_data: Any, config: Any) -> SearchResult:
             for reason in failure_reasons:
                 reasons[str(reason)] += 1
             if score:
-                structural[identifier] = Candidate(canonical, identifier, score, bool(eligible), tuple(failure_reasons))
+                structural[identifier] = Candidate(canonical, identifier, score, bool(eligible), tuple(failure_reasons), direction)
         valid = [candidate for candidate in structural.values() if candidate.eligible]
         exploratory = list(structural.values())
         return valid, exploratory, {
