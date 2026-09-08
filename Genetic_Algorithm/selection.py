@@ -37,6 +37,22 @@ class DeduplicationResult(Sequence[Any]):
         return self.accepted[index]
 
 
+@dataclass(frozen=True)
+class ValidationSelectionResult(Sequence[Any]):
+    accepted: tuple[Any, ...]
+    rejected: tuple[Any, ...]
+    rejection_reasons: dict[str, tuple[str, ...]]
+
+    def __iter__(self):
+        return iter(self.accepted)
+
+    def __len__(self) -> int:
+        return len(self.accepted)
+
+    def __getitem__(self, index):
+        return self.accepted[index]
+
+
 def _value(config: Any, name: str, default: Any) -> Any:
     return config.get(name, default) if isinstance(config, Mapping) else getattr(config, name, default)
 
@@ -297,4 +313,71 @@ def deduplicate_training(
     return DeduplicationResult(tuple(accepted), tuple(rejected), reasons, tuple(comparisons), tuple(archive_entries))
 
 
-__all__ = ["Comparison", "DeduplicationResult", "deduplicate_training"]
+def select_validation(
+    training_candidates: Iterable[Any], validation_results: Mapping[str, Mapping[str, Any]], config: Any
+) -> ValidationSelectionResult:
+    """Freeze only candidates meeting predeclared validation evidence gates."""
+    accepted: list[tuple[Any, Mapping[str, Any]]] = []
+    rejected: list[Any] = []
+    reasons: dict[str, tuple[str, ...]] = {}
+    for candidate in training_candidates:
+        candidate_id = _candidate_id(candidate)
+        result = validation_results.get(candidate_id)
+        failures: list[str] = []
+        if not isinstance(result, Mapping):
+            failures.append("missing validation result")
+        else:
+            direction = (
+                candidate.get("training_direction", candidate.get("direction"))
+                if isinstance(candidate, Mapping)
+                else getattr(candidate, "training_direction", getattr(candidate, "direction", None))
+            )
+            if direction not in (-1, 1):
+                failures.append("candidate is missing a frozen training direction")
+            if result.get("direction") != direction:
+                failures.append("validation direction differs from frozen training direction")
+            for field, minimum in (
+                ("day_coverage", float(_value(config, "min_day_coverage", 0.8))),
+                ("cell_coverage", float(_value(config, "min_cell_coverage", 0.8))),
+            ):
+                value = _finite(result.get(field))
+                if value is None or value < minimum:
+                    failures.append(f"{field} below {minimum:.0%}")
+            quarter_days = result.get("quarter_valid_days", {})
+            if not isinstance(quarter_days, Mapping):
+                quarter_days = {}
+            for quarter in ("Q1", "Q2", "Q3", "Q4"):
+                days = quarter_days.get(quarter)
+                minimum_days = int(_value(config, "min_quarter_days", 45))
+                if not isinstance(days, (int, float)) or days < minimum_days:
+                    failures.append(f"{quarter} has fewer than {minimum_days} valid days")
+            if (_finite(result.get("mean_ic")) or 0.0) <= 0.0:
+                failures.append("mean IC is not positive")
+            quarters = result.get("quarter_means", {})
+            if not isinstance(quarters, Mapping):
+                quarters = {}
+            if sum(1 for value in quarters.values() if (_finite(value) or 0.0) > 0.0) < 3:
+                failures.append("fewer than 3 positive validation quarters")
+            if (_finite(result.get("all_costs_cumulative_return")) or 0.0) <= 0.0:
+                failures.append("all_costs cumulative return is not positive")
+            if _finite(result.get("net_sharpe")) is None:
+                failures.append("net Sharpe is not finite")
+        if failures:
+            rejected.append(candidate)
+            reasons[candidate_id] = (*reasons.get(candidate_id, ()), *failures)
+        else:
+            accepted.append((candidate, result))
+    accepted.sort(key=lambda pair: (
+        -float(pair[1]["net_sharpe"]), float(pair[1].get("turnover", float("inf"))),
+        int(pair[0].get("complexity", 0) if isinstance(pair[0], Mapping) else getattr(pair[0], "complexity", 0)),
+        _candidate_id(pair[0]),
+    ))
+    limit = min(5, int(_value(config, "frozen_limit", 5)))
+    for candidate, _ in accepted[limit:]:
+        rejected.append(candidate)
+        candidate_id = _candidate_id(candidate)
+        reasons[candidate_id] = (*reasons.get(candidate_id, ()), f"selection limit reached: {limit}")
+    return ValidationSelectionResult(tuple(candidate for candidate, _ in accepted[:limit]), tuple(rejected), reasons)
+
+
+__all__ = ["Comparison", "DeduplicationResult", "ValidationSelectionResult", "deduplicate_training", "select_validation"]

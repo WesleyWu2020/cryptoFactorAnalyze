@@ -20,15 +20,17 @@ failed evaluation (``ReplayEvaluationError``), never a zero return.
 from __future__ import annotations
 
 from dataclasses import asdict
+import json
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable, Mapping
+from uuid import uuid4
 
 import pandas as pd
 
 from factor_common.manager import FactorManager
 from factor_common.profiles import resolve_profile
 
-from .artifacts import write_artifact
+from .artifacts import read_verified_manifest, write_artifact
 from .config import Stage
 from .export import export_factor
 
@@ -196,4 +198,135 @@ def replay(
     }
 
 
-__all__ = ["ReplayEvaluationError", "replay"]
+def test_manifest(
+    frozen_manifest: str | Path,
+    *,
+    test_stage: Stage,
+    run_dir: str | Path,
+    training_fingerprint: str,
+    validation_fingerprint: str,
+    load_test_data: Callable[[Stage], Mapping[str, Any]],
+    evaluate: Callable[[Mapping[str, Any], Stage, Mapping[str, Any], int], Mapping[str, Any]],
+    runtime_source_hashes: Callable[[], Mapping[str, str]],
+    permitted_history_start: str | pd.Timestamp,
+) -> Path:
+    """Evaluate every frozen candidate once test access is explicitly recorded.
+
+    The injected loader is deliberately stage-bounded; production callers may
+    wrap :func:`replay`, while unit tests avoid market reads entirely.
+    """
+    manifest_path = Path(frozen_manifest)
+    manifest = read_verified_manifest(manifest_path)
+    if not isinstance(test_stage, Stage):
+        raise TypeError("test_stage must be a Genetic_Algorithm.config.Stage")
+    fingerprints = manifest.get("stage_fingerprints", {})
+    if fingerprints.get("training") != str(training_fingerprint):
+        raise ValueError("frozen training fingerprint does not match historical training data")
+    if fingerprints.get("validation") != str(validation_fingerprint):
+        raise ValueError("frozen validation fingerprint does not match historical validation data")
+    # The manifest owns the holdout ledger; a caller cannot redirect it to an
+    # empty run directory and thereby claim the holdout is unseen.
+    run_dir = manifest_path.parent
+    actual_hashes = dict(runtime_source_hashes())
+    if manifest.get("runtime_source_hashes") != actual_hashes:
+        raise ValueError("frozen runtime source hashes do not match actual runtime sources")
+    access_log = run_dir / "test_access_log.json"
+    prior = _access_entries(access_log)
+    repeated = _immutable_access_record(manifest_path, manifest["sha256"]) is not None
+    commitment = run_dir / f"test_access_commitment_{uuid4().hex}.json"
+    write_artifact(commitment, {
+        "commitment_version": 1,
+        "manifest_sha256": manifest["sha256"],
+        "repeat": repeated,
+        "test_stage": {"name": test_stage.name, "start": _iso(test_stage.start), "end": _iso(test_stage.end)},
+    }, immutable=True)
+    data = load_test_data(test_stage)
+    fingerprint = data.get("fingerprint")
+    if not fingerprint:
+        raise ValueError("bounded test data must provide a fingerprint")
+    history_start = data.get("history_start")
+    data_end = data.get("end")
+    if history_start is None or data_end is None:
+        raise ValueError("bounded test data must declare history_start and end")
+    if pd.Timestamp(history_start) < pd.Timestamp(permitted_history_start) or pd.Timestamp(data_end) > test_stage.end:
+        raise ValueError("bounded test data exceeds the permitted history or test stage")
+    outcomes = []
+    for candidate in manifest.get("candidates", []):
+        try:
+            outcome = evaluate(candidate, test_stage, data, candidate["direction"])
+            outcomes.append({"expression_id": candidate["expression_id"], "status": "complete", "outcome": outcome})
+        except Exception as exc:  # preserve individual evaluation failures
+            outcomes.append({"expression_id": candidate["expression_id"], "status": "failed", "error": f"{type(exc).__name__}: {exc}"})
+    receipt = run_dir / f"test_receipt_{uuid4().hex}.json"
+    write_artifact(receipt, {
+        "receipt_version": 1,
+        "manifest_sha256": manifest["sha256"],
+        "access_commitment_sha256": read_verified_manifest(commitment)["sha256"],
+        "repeat": repeated,
+        "test_stage": {"name": test_stage.name, "start": _iso(test_stage.start), "end": _iso(test_stage.end)},
+        "test_data_fingerprint": str(fingerprint),
+        "outcomes": outcomes,
+    }, immutable=True)
+    prior.append({"manifest_sha256": manifest["sha256"], "receipt": str(receipt), "test_data_fingerprint": str(fingerprint)})
+    write_artifact(access_log, {"accesses": prior}, immutable=False)
+    require_test_access(run_dir, manifest_path)
+    return receipt
+
+
+def _access_entries(access_log: Path) -> list[dict[str, Any]]:
+    if not access_log.exists():
+        return []
+    payload = json.loads(access_log.read_text(encoding="utf-8"))
+    entries = payload.get("accesses", [])
+    if not isinstance(entries, list):
+        raise ValueError("test access log is malformed")
+    return entries
+
+
+def require_test_access(run_dir: str | Path, frozen_manifest: str | Path) -> Path:
+    """Return immutable, manifest-bound proof of holdout access.
+
+    ``run_dir`` is retained for API compatibility but is deliberately not an
+    authority: records beside the frozen manifest are the sole ledger.
+    """
+    del run_dir
+    manifest_path = Path(frozen_manifest)
+    manifest = read_verified_manifest(manifest_path)
+    record = _immutable_access_record(manifest_path, manifest["sha256"])
+    if record is not None:
+        return record
+    raise ValueError("no recorded holdout access for frozen manifest")
+
+
+def _immutable_access_record(manifest_path: Path, manifest_sha256: str) -> Path | None:
+    """Find verified immutable evidence, preferring completed receipts."""
+    for pattern in ("test_receipt_*.json", "test_access_commitment_*.json"):
+        for record in sorted(manifest_path.parent.glob(pattern)):
+            try:
+                document = read_verified_manifest(record)
+            except (OSError, ValueError):
+                continue
+            if document.get("manifest_sha256") != manifest_sha256:
+                continue
+            if pattern.startswith("test_receipt") and not isinstance(document.get("access_commitment_sha256"), str):
+                continue
+            return record
+    return None
+
+
+def guard_unseen_holdout_claim(run_dir: str | Path, frozen_manifest: str | Path) -> None:
+    """Reject an experiment that claims a holdout is unseen after recorded access."""
+    try:
+        receipt = require_test_access(run_dir, frozen_manifest)
+    except ValueError as exc:
+        if "no recorded holdout access" in str(exc):
+            return
+        raise
+    raise ValueError(f"cannot claim unseen holdout after recorded test receipt: {receipt}")
+
+
+# This is a workflow API, not a pytest test despite its deliberately explicit name.
+test_manifest.__test__ = False
+
+
+__all__ = ["ReplayEvaluationError", "guard_unseen_holdout_claim", "replay", "require_test_access", "test_manifest"]

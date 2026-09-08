@@ -29,6 +29,7 @@ from .config import SearchConfig, Stage, load_config
 from .data import run_training_audit
 from .expression import Node, canonical_tree, node_count, validate_node_attributes
 from .selection import deduplicate_training
+from .replay import guard_unseen_holdout_claim
 from factor_common.profiles import resolve_profile
 
 
@@ -68,6 +69,9 @@ def run_search(
     validation_attempts: int = 0,
     validation_experiment_id: str | None = None,
     archive_path: str | Path | None = None,
+    holdout_manifest: str | Path | None = None,
+    holdout_run_dir: str | Path | None = None,
+    claim_unseen_holdout: bool = False,
 ) -> Result:
     """Persist the train audit before handing off to the future GP search.
 
@@ -75,6 +79,14 @@ def run_search(
     intentionally injected: this module does not implement GP search and it
     does not load validation or test rows.
     """
+    if claim_unseen_holdout:
+        if holdout_manifest is None:
+            raise ValueError("an unseen holdout claim requires its frozen manifest")
+        manifest_path = Path(holdout_manifest)
+        guard_unseen_holdout_claim(
+            holdout_run_dir if holdout_run_dir is not None else manifest_path.parent,
+            manifest_path,
+        )
     persisted_audit = run_training_audit(
         h5_path,
         audit_path,

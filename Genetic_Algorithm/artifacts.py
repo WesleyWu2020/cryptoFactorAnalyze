@@ -542,8 +542,73 @@ def training_archive_entry(
     return entry
 
 
+def freeze_candidates(
+    candidates: Iterable[Any],
+    *,
+    training_fingerprint: str,
+    validation_fingerprint: str,
+    config: Mapping[str, Any] | Any,
+    profile: Mapping[str, Any] | Any,
+    runtime_source_hashes: Mapping[str, str],
+    selection_results: Mapping[str, Any],
+    path: str | Path,
+) -> Path:
+    """Serialize frozen candidates and provenance without reading market data."""
+    records = []
+    candidate_ids: list[str] = []
+    for candidate in candidates:
+        if isinstance(candidate, Mapping):
+            candidate_id = str(candidate.get("expression_id", candidate.get("hash")))
+            tree = candidate.get("tree")
+            training_direction = candidate.get("training_direction")
+            direction = candidate.get("direction")
+            complexity = candidate.get("complexity")
+        else:
+            candidate_id = str(candidate.expression_id)
+            tree = candidate.tree
+            training_direction = getattr(candidate, "training_direction", None)
+            direction = getattr(candidate, "direction", None)
+            complexity = getattr(candidate, "complexity", None)
+        if training_direction is not None and direction is not None and training_direction != direction:
+            raise ValueError("frozen candidates have conflicting training_direction and direction")
+        direction = training_direction if training_direction is not None else direction
+        if tree is None or direction not in (-1, 1):
+            raise ValueError("frozen candidates require a full AST and direction of -1 or 1")
+        if not candidate_id or candidate_id == "None":
+            raise ValueError("frozen candidates require non-null expression IDs")
+        candidate_ids.append(candidate_id)
+        records.append({
+            "expression_id": candidate_id,
+            "ast": _tree_payload(tree),
+            "direction": direction,
+            "complexity": complexity,
+        })
+    if len(set(candidate_ids)) != len(candidate_ids):
+        raise ValueError("frozen candidates require unique expression IDs")
+    accepted = selection_results.get("accepted") if isinstance(selection_results, Mapping) else None
+    if not isinstance(accepted, (list, tuple)):
+        raise ValueError("selection results must include accepted candidate IDs")
+    accepted_ids = [str(item.get("expression_id")) if isinstance(item, Mapping) else str(item) for item in accepted]
+    if any(not identifier or identifier == "None" for identifier in accepted_ids) or len(set(accepted_ids)) != len(accepted_ids):
+        raise ValueError("selection accepted IDs must be unique and non-null")
+    if set(accepted_ids) != set(candidate_ids):
+        raise ValueError("frozen candidate set must match accepted validation selection IDs")
+    config_payload = dict(config) if isinstance(config, Mapping) else dict(vars(config))
+    profile_payload = dict(profile) if isinstance(profile, Mapping) else dict(vars(profile))
+    return write_artifact(path, {
+        "workflow_version": 1,
+        "stage_fingerprints": {"training": str(training_fingerprint), "validation": str(validation_fingerprint)},
+        "candidates": records,
+        "config": config_payload,
+        "profile": profile_payload,
+        "runtime_source_hashes": dict(sorted(runtime_source_hashes.items())),
+        "selection_results": _json_safe(selection_results),
+    }, immutable=True)
+
+
 __all__ = [
     "build_provenance",
+    "freeze_candidates",
     "read_verified_manifest",
     "read_verified_value_artifact",
     "training_archive_entry",
