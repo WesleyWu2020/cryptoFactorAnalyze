@@ -8,9 +8,11 @@ eligibility matrix injected by the loader contract (``context_eligible``).
 The module carries no runs-directory dependency and no training labels.
 
 Exports are immutable: an existing file is never overwritten. A name reuse is
-accepted only when the embedded full expression hash matches exactly, so
-prefix collisions between different expressions are detected against the full
-hashes. Alongside the module a manifest records the wrapper hash and the
+accepted only when the embedded full expression hash and the baked-in
+direction both match exactly, so prefix collisions between different
+expressions are detected against the full hashes and a flipped training
+direction can never silently reuse a module. Alongside the module a manifest
+records the wrapper hash and the
 content hashes of every transitive runtime module (``expression``,
 ``evaluator``, ``operators``, ``features``), because the wrapper source alone
 is not a complete fingerprint of the formula implementation.
@@ -37,6 +39,7 @@ from .expression import (
 
 _IDENTIFIER_PREFIX_CHARS = 16
 _HASH_MARKER_RE = re.compile(r'^_EXPRESSION_HASH = "([0-9a-f]{64})"$', re.MULTILINE)
+_DIRECTION_MARKER_RE = re.compile(r'"factor_direction": (-?1)\b')
 _AST_KEYS = {"op", "field", "window", "children"}
 # Transitive runtime closure of the exported calc_factor: evaluator imports
 # expression, operators, and features; features imports operators.
@@ -133,6 +136,12 @@ def _existing_expression_hash(target: Path) -> str | None:
     source = target.read_text(encoding="utf-8")
     match = _HASH_MARKER_RE.search(source)
     return match.group(1) if match else None
+
+
+def _existing_factor_direction(target: Path) -> int | None:
+    source = target.read_text(encoding="utf-8")
+    match = _DIRECTION_MARKER_RE.search(source)
+    return int(match.group(1)) if match else None
 
 
 def _render_module(
@@ -233,8 +242,9 @@ def export_factor(candidate: Any, destination: str | Path, *, direction: int) ->
 
     ``direction`` is the fixed training direction (1 or -1); it is baked into
     the module unchanged and never re-derived here. Existing exports are
-    reused only when the embedded full expression hash matches; a different
-    expression at the same path raises ``FileExistsError``.
+    reused only when the embedded full expression hash and the baked-in
+    direction both match; a different expression at the same path raises
+    ``FileExistsError`` and a direction mismatch raises ``ValueError``.
     """
     direction = _validate_direction(direction)
     tree = canonical_tree(_candidate_tree(candidate))
@@ -267,6 +277,20 @@ def export_factor(candidate: Any, destination: str | Path, *, direction: int) ->
                 f"export identifier collision at {target}: {identifier} is "
                 f"shared with a different expression {existing}"
             )
+        # The expression hash covers only the tree; direction is part of the
+        # reuse key, or a caller with the opposite direction would silently
+        # reuse a module with the wrong baked-in factor_direction.
+        existing_direction = _existing_factor_direction(target)
+        if existing_direction is None:
+            raise FileExistsError(
+                f"refusing to reuse an export without a direction marker: {target}"
+            )
+        if existing_direction != direction:
+            raise ValueError(
+                f"export direction mismatch at {target}: existing export "
+                f"fixes factor_direction={existing_direction}, requested "
+                f"{direction}"
+            )
         if manifest_path.exists():
             manifest = read_verified_manifest(manifest_path)
             if manifest.get("expression_hash") != full_hash:
@@ -274,6 +298,12 @@ def export_factor(candidate: Any, destination: str | Path, *, direction: int) ->
                     f"export manifest collision at {manifest_path}: recorded "
                     f"expression {manifest.get('expression_hash')} differs "
                     f"from {full_hash}"
+                )
+            if manifest.get("factor_direction") != direction:
+                raise ValueError(
+                    f"export manifest direction mismatch at {manifest_path}: "
+                    f"recorded factor_direction="
+                    f"{manifest.get('factor_direction')}, requested {direction}"
                 )
         else:
             _write_manifest(

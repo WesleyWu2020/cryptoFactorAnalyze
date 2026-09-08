@@ -131,6 +131,21 @@ def test_export_is_idempotent_for_the_same_expression(tmp_path):
     assert first.path.read_bytes() == content
 
 
+def test_export_reuse_rejects_direction_mismatch(tmp_path):
+    """The expression hash covers only the tree: reuse must also match the
+    baked-in direction, or a -1 caller would silently reuse a +1 module."""
+    candidate = _candidate()
+    exported = export_factor(candidate, tmp_path, direction=1)
+    with pytest.raises(ValueError, match="direction"):
+        export_factor(candidate, tmp_path, direction=-1)
+
+    # The baked-in direction is unchanged and the manifest is intact.
+    spec = load_factor(exported.path)
+    assert spec.setting["factor_direction"] == 1
+    manifest = read_verified_manifest(exported.manifest_path)
+    assert manifest["factor_direction"] == 1
+
+
 def test_export_refuses_overwrite_on_prefix_collision_with_different_hash(
     tmp_path, monkeypatch
 ):

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pandas as pd
 import pytest
@@ -220,6 +221,7 @@ def test_replay_stage_is_bounded_and_complete(complete_h5, tmp_path):
 
     # The replay artifact stores the resolved profile, stage bounds, stage
     # metrics, and discloses the framework's internal split.
+    assert outcome["identifier"] in outcome["artifact_path"]
     artifact = json.loads(open(outcome["artifact_path"], encoding="utf-8").read())
     assert artifact["stage"]["name"] == STAGE.name
     assert artifact["stage"]["end"] == "2024-01-24"
@@ -241,7 +243,7 @@ def test_replay_non_complete_all_costs_is_a_failure_not_zero_return(
     with pytest.raises(ReplayEvaluationError, match="all_costs"):
         replay(_candidate(), STAGE, unknown_h5, run_dir, direction=1)
     # No replay artifact is published for a failed evaluation.
-    assert not (run_dir / f"replay_{STAGE.name}.json").exists()
+    assert not list(run_dir.glob("replay_*.json"))
 
 
 def test_replay_beyond_available_data_fails_instead_of_zero_return(
@@ -278,3 +280,18 @@ def test_replay_uses_the_fixed_training_direction(complete_h5, tmp_path):
     pd.testing.assert_series_equal(
         first_day_weights(outcome["result"]), -1 * first_day_weights(base["result"])
     )
+
+
+def test_replay_artifacts_are_per_candidate(complete_h5, tmp_path):
+    """One run_dir hosts replays of multiple candidates on the same stage."""
+    other = Node("rank", (Node("delta", (Node("close"),), window=1),))
+    run_dir = tmp_path / "run"
+    first = replay(_candidate(), STAGE, complete_h5, run_dir, direction=1)
+    second = replay(_candidate(other), STAGE, complete_h5, run_dir, direction=1)
+
+    assert first["identifier"] != second["identifier"]
+    assert first["artifact_path"] != second["artifact_path"]
+    assert first["identifier"] in first["artifact_path"]
+    assert second["identifier"] in second["artifact_path"]
+    assert Path(first["artifact_path"]).is_file()
+    assert Path(second["artifact_path"]).is_file()

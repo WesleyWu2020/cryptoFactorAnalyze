@@ -151,7 +151,7 @@ def replay(
     )
 
     artifact_path = write_artifact(
-        run_dir / f"replay_{stage.name}.json",
+        run_dir / f"replay_{stage.name}_{exported.identifier}.json",
         {
             "replay_version": 1,
             "stage": {
