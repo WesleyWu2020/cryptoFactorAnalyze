@@ -198,11 +198,14 @@ class FactorManager:
     Defaults resolve against the project root (``data/crypto_quant.h5``,
     ``data/factor_results``, ``reports``); explicit absolute or relative
     paths are honored as given (relative paths resolve against the current
-    working directory).
+    working directory). The keyword-only ``as_of`` pins a point-in-time
+    knowledge cutoff for every provider read (including internal cutoff
+    replays); an explicitly requested signal end whose execution tail would
+    pass the cutoff is rejected.
     """
 
     def __init__(self, h5_path=None, base_dir=None, *, reports_dir=None,
-                 project_root=None, persist_evaluations=False):
+                 project_root=None, persist_evaluations=False, as_of=None):
         if project_root is not None:
             root = Path(project_root).resolve()
         else:
@@ -220,14 +223,20 @@ class FactorManager:
         if not isinstance(persist_evaluations, bool):
             raise TypeError("persist_evaluations must be a boolean")
         self.persist_evaluations = persist_evaluations
+        self._as_of = None if as_of is None else _signal_day(as_of, "as_of")
         self.storage = FactorStorage(self.base_dir, flat=True)
         self._dp: DataProvider | None = None
+
+    @property
+    def as_of(self) -> pd.Timestamp | None:
+        """Knowledge cutoff binding every provider read (None = unbounded)."""
+        return self._as_of
 
     @property
     def dp(self) -> DataProvider:
         """Point-in-time data provider over the configured H5 store."""
         if self._dp is None:
-            self._dp = DataProvider(self.h5_path)
+            self._dp = DataProvider(self.h5_path, as_of=self._as_of)
         return self._dp
 
     # ------------------------------------------------------------------
@@ -291,10 +300,21 @@ class FactorManager:
                 )
                 return matrix
             cutoff = pd.Timestamp(cutoff)
+            if self._as_of is not None and self._as_of < cutoff:
+                # The manager cutoff is the tighter bound: a replay must
+                # never see past it even if the internal candidate does.
+                cutoff = self._as_of
             truncated = DataProvider(self.h5_path, as_of=cutoff)
             matrix, _ = compute_factor(
                 spec, truncated, start=replay_start, end=min(end, cutoff)
             )
+            # Mixed input resolutions (e.g. an explicit string start beside a
+            # store-derived default end) can leave the replay on a different
+            # datetime unit than the full result; align the unit so the
+            # comparison checks dates, not representation.
+            if matrix.index.dtype != full_values.index.dtype:
+                matrix = matrix.copy()
+                matrix.index = matrix.index.astype(full_values.index.dtype)
             return matrix
 
         try:
@@ -524,6 +544,16 @@ class FactorManager:
         run_id = saved["run_id"]
 
         tail_end = end + pd.Timedelta(days=1 + profile.rebalance_days)
+        if self._as_of is not None:
+            if end_param is not None and tail_end > self._as_of:
+                raise ValueError(
+                    f"requested signal end {_iso(end)} implies an execution "
+                    f"tail through {_iso(tail_end)}, beyond the manager as_of "
+                    f"cutoff {_iso(self._as_of)}"
+                )
+            # A defaulted signal end degrades to a structured missing-tail
+            # result instead of reading past the cutoff.
+            tail_end = min(tail_end, self._as_of)
         tail_index = pd.date_range(start, tail_end, freq="D", name="date")
         bt_values = values.reindex(tail_index)
         opens = self.dp.get_single_data("open", start=start, end=tail_end)

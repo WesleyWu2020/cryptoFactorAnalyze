@@ -553,3 +553,108 @@ def test_create_template_never_overwrites(manager, tmp_path):
     assert path.name == "brand_new_factor.py"
     with pytest.raises(FileExistsError, match="overwrite"):
         manager.create_template("brand_new_factor", output_dir=target_dir)
+
+
+def _as_of_manager(tmp_path, h5_fixture, as_of):
+    return FactorManager(
+        h5_path=h5_fixture,
+        base_dir=tmp_path / "factor_results",
+        reports_dir=tmp_path / "reports",
+        as_of=as_of,
+    )
+
+
+def test_manager_without_as_of_preserves_default_behavior(manager):
+    assert manager.as_of is None
+
+
+def test_manager_as_of_rejects_explicit_tail_beyond_cutoff(tmp_path, h5_fixture, factor_file):
+    manager = _as_of_manager(tmp_path, h5_fixture, "2024-01-08")
+    assert manager.as_of == pd.Timestamp("2024-01-08")
+
+    # Signal end 2024-01-07 implies an execution tail through 2024-01-09,
+    # two days beyond the manager cutoff: rejected, not silently truncated.
+    with pytest.raises(ValueError, match="as_of"):
+        manager.evaluate(
+            str(factor_file), params={**BASE_PARAMS, "end": "2024-01-07"}, plot=False
+        )
+
+
+def test_manager_as_of_binds_all_reads_and_tail_reaches_stage_end(
+    tmp_path, h5_fixture, factor_file, monkeypatch
+):
+    """Signal end plus the two-day execution tail equals the stage end.
+
+    Every underlying provider read must honor the manager cutoff; the tail
+    read reaches exactly the cutoff, never beyond it.
+    """
+    as_of = pd.Timestamp("2024-01-08")
+    manager = _as_of_manager(tmp_path, h5_fixture, as_of)
+    read_ends = []
+    provider = manager.dp
+    for name in ("get_single_data", "get_universe", "get_funding", "get_quality"):
+        original = getattr(provider, name)
+
+        def recording(*args, _original=original, **kwargs):
+            read_ends.append(pd.Timestamp(kwargs["end"]))
+            return _original(*args, **kwargs)
+
+        monkeypatch.setattr(provider, name, recording)
+
+    result = manager.evaluate(
+        str(factor_file), params={**BASE_PARAMS, "end": "2024-01-06"}, plot=False
+    )
+
+    assert result["status"] == "complete"
+    assert read_ends
+    assert all(end <= as_of for end in read_ends)
+    assert max(read_ends) == as_of
+
+
+def test_manager_as_of_default_end_degrades_to_structured_incomplete(
+    tmp_path, h5_fixture, factor_file
+):
+    """Without an explicit end the cutoff truncates the tail; the run reports
+    a structured missing-tail incompleteness instead of reading future data."""
+    manager = _as_of_manager(tmp_path, h5_fixture, "2024-01-08")
+    params = {"start": "2024-01-06", "n_groups": 3, "include_funding": False}
+
+    result = manager.evaluate(str(factor_file), params=params, plot=False)
+
+    assert result["metadata"]["signal_end"] == "2024-01-08"
+    assert result["status"] == "incomplete"
+    all_costs = result["factor_result"]["scenarios"]["all_costs"]
+    assert all_costs["diagnostics"]["halt_reason"] == "missing_tail"
+
+
+def test_cutoff_check_uses_tighter_of_internal_and_manager_cutoffs(
+    tmp_path, h5_fixture, factor_file, monkeypatch
+):
+    """Internal cutoff replays must never see past the manager's as_of."""
+    from factor_common.loader import load_factor
+    from factor_common.value_engine import compute_factor
+    import factor_common.manager as manager_module
+
+    manager = _as_of_manager(tmp_path, h5_fixture, "2024-01-08")
+    spec = load_factor(factor_file)
+    full_values, _ = compute_factor(
+        spec, manager.dp, start=pd.Timestamp("2024-01-06"), end=pd.Timestamp("2024-01-08")
+    )
+
+    recorded = []
+    original_provider = manager_module.DataProvider
+
+    def recording_provider(path, as_of=None):
+        recorded.append(pd.Timestamp(as_of))
+        return original_provider(path, as_of=as_of)
+
+    monkeypatch.setattr(manager_module, "DataProvider", recording_provider)
+    # Deliberately evaluate cutoffs beyond the manager cutoff (end-1 = 01-09):
+    # the tightening must clamp every replay provider to 2024-01-08.
+    outcome = manager._cutoff_check(
+        spec, full_values, pd.Timestamp("2024-01-06"), pd.Timestamp("2024-01-10")
+    )
+
+    assert outcome["status"] == "verified"
+    assert recorded
+    assert all(day <= manager.as_of for day in recorded)
