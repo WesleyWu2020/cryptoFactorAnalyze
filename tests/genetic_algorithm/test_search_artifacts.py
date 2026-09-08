@@ -28,7 +28,7 @@ def _valid_archive_entry(identifier="candidate", **overrides):
         "ast": {"op": "close", "field": None, "window": None, "children": []},
         "training_fingerprint": "train-fingerprint",
         "operator_version": "ops-v1",
-        "training_diagnostics": {"score": [1.0], "eligible": True, "reasons": []},
+        "training_diagnostics": {"score": [1.0, 0.5, -1], "eligible": True, "reasons": []},
     }
     entry.update(overrides)
     return entry
@@ -322,6 +322,69 @@ def test_load_archive_rejects_nested_validation_or_test_data(tmp_path, entry):
 
     with pytest.raises(ValueError, match="non-training"):
         _load_archive(archive_path)
+
+
+@pytest.mark.parametrize(
+    "score",
+    [
+        [[1.0], 0.5, -1],
+        [None, 0.5, -1],
+        [float("nan"), 0.5, -1],
+        [float("inf"), 0.5, -1],
+        [1.0, 0.5],
+        [1.0, 0.5, -1, 0.0],
+        [True, 0.5, -1],
+        [1.0, 0.5, -1.5],
+    ],
+)
+def test_load_archive_rejects_malformed_training_score(tmp_path, score):
+    archive_path = tmp_path / "archive.json"
+    write_artifact(
+        archive_path,
+        {"training_only": True, "candidates": [
+            _valid_archive_entry(training_diagnostics={
+                "score": score, "eligible": True, "reasons": []
+            })
+        ]},
+        immutable=True,
+    )
+
+    with pytest.raises(ValueError, match="diagnostic score"):
+        _load_archive(archive_path)
+
+
+def test_load_archive_decodes_shared_value_artifact_once(tmp_path, monkeypatch):
+    values_path = tmp_path / "shared-values.json"
+    value_artifact = write_value_artifact(
+        values_path,
+        {
+            "first": pd.DataFrame([[1.0]], index=pd.date_range("2024-01-01", periods=1), columns=["S0"]),
+            "second": pd.DataFrame([[2.0]], index=pd.date_range("2024-01-01", periods=1), columns=["S0"]),
+        },
+    )
+    archive_path = tmp_path / "archive.json"
+    write_artifact(
+        archive_path,
+        {"training_only": True, "candidates": [
+            _valid_archive_entry("first", value_artifact={"path": values_path.name, "sha256": value_artifact.sha256}),
+            _valid_archive_entry("second", value_artifact={"path": f"./{values_path.name}", "sha256": value_artifact.sha256}),
+        ]},
+        immutable=True,
+    )
+    original = search_module.read_verified_value_artifact
+    decodes = 0
+
+    def count_decode(*args, **kwargs):
+        nonlocal decodes
+        decodes += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(search_module, "read_verified_value_artifact", count_decode)
+
+    _, values = _load_archive(archive_path)
+
+    assert set(values) == {"first", "second"}
+    assert decodes == 1
 
 
 def test_run_search_does_not_publish_partial_directory_when_commit_fails(tmp_path, monkeypatch):
@@ -818,6 +881,11 @@ def test_run_search_copies_shared_archive_artifact_once_and_preserves_all_refere
         immutable=True,
     )
     monkeypatch.setattr(search_module, "run_training_audit", lambda *args, **kwargs: audit_path)
+
+    def fail_read_bytes(self):
+        raise AssertionError(f"archive copying must stream file content: {self}")
+
+    monkeypatch.setattr(type(tmp_path), "read_bytes", fail_read_bytes)
 
     search_module.run_search(
         "unused.h5", audit_path, stage=STAGES["train"], warmup_days=0,

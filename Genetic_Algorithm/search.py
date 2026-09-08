@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import hashlib
 import inspect
+import math
 import os
 import re
 import shutil
@@ -224,7 +225,15 @@ def _validate_archive_entry(entry: Mapping[str, Any]) -> str:
     diagnostics = entry["training_diagnostics"]
     if not isinstance(diagnostics, Mapping) or set(diagnostics) != {"score", "eligible", "reasons"}:
         raise ValueError("training archive diagnostics contain non-training fields")
-    if not isinstance(diagnostics["score"], list):
+    score = diagnostics["score"]
+    numeric = (int, float)
+    if (
+        not isinstance(score, list)
+        or len(score) != 3
+        or any(isinstance(value, bool) or not isinstance(value, numeric) for value in score)
+        or any(not math.isfinite(float(value)) for value in score)
+        or type(score[2]) is not int
+    ):
         raise ValueError("training archive diagnostic score is malformed")
     if not isinstance(diagnostics["eligible"], bool):
         raise ValueError("training archive diagnostic eligibility is malformed")
@@ -259,6 +268,7 @@ def _load_archive(path: str | Path | None) -> tuple[list[dict[str, Any]], dict[s
     if not isinstance(entries, list):
         raise ValueError("training archive candidates must be a list")
     values: dict[str, Any] = {}
+    decoded_artifacts: dict[tuple[Path, str], dict[str, pd.DataFrame]] = {}
     seen_ids: set[str] = set()
     for entry in entries:
         if not isinstance(entry, Mapping):
@@ -283,7 +293,11 @@ def _load_archive(path: str | Path | None) -> tuple[list[dict[str, Any]], dict[s
         artifact_path = _confined_reference(
             archive_path.parent, relative, label="archive value artifact"
         )
-        panels = read_verified_value_artifact(artifact_path, expected_sha256=digest)
+        cache_key = (artifact_path, digest)
+        panels = decoded_artifacts.get(cache_key)
+        if panels is None:
+            panels = read_verified_value_artifact(artifact_path, expected_sha256=digest)
+            decoded_artifacts[cache_key] = panels
         if identifier not in panels:
             raise ValueError(
                 f"archive value artifact is missing panel for candidate {identifier}"
@@ -621,6 +635,19 @@ def _archive_key(entry: Mapping[str, Any]) -> str:
     return str(entry.get("expression_id", entry.get("hash", "archive")))
 
 
+def _files_equal(left: Path, right: Path, *, chunk_size: int = 1024 * 1024) -> bool:
+    if left.stat().st_size != right.stat().st_size:
+        return False
+    with left.open("rb") as left_handle, right.open("rb") as right_handle:
+        while True:
+            left_chunk = left_handle.read(chunk_size)
+            right_chunk = right_handle.read(chunk_size)
+            if left_chunk != right_chunk:
+                return False
+            if not left_chunk:
+                return True
+
+
 def _copy_archive_value_artifacts(
     archive_path: Path | None,
     archive_entries: Iterable[Mapping[str, Any]],
@@ -635,8 +662,8 @@ def _copy_archive_value_artifacts(
         "frozen.json", "generations.jsonl", "progress.json",
         _publish_journal_path(destination).name,
     }
-    references: list[tuple[Path, Path, bytes]] = []
-    targets: dict[Path, tuple[str, bytes]] = {}
+    references: list[tuple[Path, Path]] = []
+    targets: dict[Path, tuple[str, Path]] = {}
     for entry in archive_entries:
         reference = entry.get("value_artifact")
         if not isinstance(reference, Mapping):
@@ -656,7 +683,6 @@ def _copy_archive_value_artifacts(
             raise ValueError(f"archive value artifact path is reserved: {target.name}")
         if not source.is_file():
             raise ValueError(f"archive value artifact is missing: {source}")
-        content = source.read_bytes()
         declared = reference.get("sha256")
         if not isinstance(declared, str):
             raise ValueError(f"archive value artifact reference is malformed: {source}")
@@ -665,15 +691,17 @@ def _copy_archive_value_artifacts(
         except ValueError as exc:
             raise ValueError(f"archive value artifact hash does not match reference: {source}") from exc
         previous = targets.get(target)
-        if previous is not None and previous != (declared, content):
-            raise ValueError(f"archive value artifact path collision: {target}")
+        if previous is not None:
+            previous_digest, previous_source = previous
+            if previous_digest != declared or not _files_equal(previous_source, source):
+                raise ValueError(f"archive value artifact path collision: {target}")
         if previous is None:
-            targets[target] = (declared, content)
-            references.append((source, target, content))
-    for source, target, content in references:
+            targets[target] = (declared, source)
+            references.append((source, target))
+    for source, target in references:
         target.parent.mkdir(parents=True, exist_ok=True)
         if target.exists():
-            if target.is_symlink() or target.read_bytes() != content:
+            if target.is_symlink() or not _files_equal(target, source):
                 raise ValueError(f"archive value artifact path collision: {target}")
         else:
             shutil.copy2(source, target)

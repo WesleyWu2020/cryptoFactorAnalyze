@@ -106,6 +106,9 @@ def _value_payload(frame: pd.DataFrame) -> dict[str, Any]:
 
 
 def _value_document(panels: Mapping[str, Any]) -> dict[str, Any]:
+    identifiers = [str(identifier) for identifier in panels]
+    if len(identifiers) != len(set(identifiers)):
+        raise ValueError("training value panel identifier collision after string normalization")
     payload = {
         "artifact_version": _VALUE_ARTIFACT_VERSION,
         "training_only": True,

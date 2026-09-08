@@ -229,6 +229,15 @@ def test_value_artifact_verification_rejects_nonfinite_json_token_even_with_norm
         read_verified_value_artifact(path, expected_sha256=raw["sha256"])
 
 
+def test_value_artifact_rejects_panel_identifier_collision_after_string_normalization(tmp_path):
+    panel = pd.DataFrame(
+        [[1.0]], index=pd.date_range("2024-01-01", periods=1), columns=["A"]
+    )
+
+    with pytest.raises(ValueError, match="identifier collision"):
+        write_value_artifact(tmp_path / "training_values.json", {1: panel, "1": panel})
+
+
 @pytest.mark.parametrize(
     ("field", "value"),
     [
