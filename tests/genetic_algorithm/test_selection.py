@@ -171,6 +171,35 @@ def test_incompatible_archive_reference_is_skipped_before_correlation():
     assert "candidate" not in result.rejection_reasons
 
 
+def test_archive_reference_is_not_overwritten_by_same_id_current_candidate():
+    candidate_values = _values(1)
+    archive_values = _values(2)
+    result = deduplicate_training(
+        [_candidate("a"), _candidate("b", mean=0.4)],
+        {
+            "a": _metadata(candidate_values, fingerprint="archive-data"),
+            "b": _metadata(candidate_values, fingerprint="current-data"),
+        },
+        [{
+            "expression_id": "b",
+            "training_fingerprint": "archive-data",
+            "operator_version": "ops",
+            "values": archive_values,
+        }],
+        {"min_overlap_days": 120, "correlation_limit": 0.90, "validation_limit": 20},
+    )
+
+    assert [candidate.expression_id for candidate in result.accepted] == ["a"]
+    comparison = result.comparisons[0]
+    assert comparison.candidate_id == "a"
+    assert comparison.reference_id == "b"
+    assert comparison.compatible is True
+    assert comparison.common_days == 120
+    assert comparison.mean_abs_daily_spearman is not None
+    assert comparison.mean_abs_daily_spearman < 0.90
+    assert "a" not in result.rejection_reasons
+
+
 def test_matching_archive_expression_id_with_incompatible_provenance_is_rejected_as_conflict():
     values = _values()
     result = deduplicate_training(

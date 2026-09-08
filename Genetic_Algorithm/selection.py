@@ -200,13 +200,11 @@ def deduplicate_training(
         candidate_id = _candidate_id(candidate)
         left = _frame(values_by_id.get(candidate_id))
         candidate_reasons: list[str] = []
-        references: list[tuple[str, Any, Any, Any]] = []
+        references: list[tuple[str, str, Any, Any, Any]] = []
         candidate_fingerprint, candidate_operator = _metadata(candidate, values_by_id.get(candidate_id))
         for item in archive_items:
             reference_id = str(item.get("expression_id", item.get("hash", "archive")))
             right = _frame(item)
-            if right is None:
-                right = _frame(values_by_id.get(reference_id))
             reference_fingerprint, reference_operator = _metadata(item, right)
             reason = _compatibility_reason(
                 "archive",
@@ -228,9 +226,10 @@ def deduplicate_training(
                         f"conflicting expression_id in incompatible archive: {candidate_id}"
                     )
                 continue
-            references.append((reference_id, right, item, values_by_id.get(reference_id)))
+            references.append(("archive", reference_id, right, item, right))
         references.extend(
             (
+                "accepted",
                 _candidate_id(item),
                 _frame(values_by_id.get(_candidate_id(item))),
                 item,
@@ -239,13 +238,13 @@ def deduplicate_training(
             for item in accepted
         )
 
-        for reference_id, right, metadata, metadata_values in references:
+        for scope, reference_id, right, metadata, metadata_values in references:
             reference_fingerprint, reference_operator = _metadata(
                 metadata,
                 metadata_values if metadata_values is not None else right,
             )
             reason = _compatibility_reason(
-                "accepted",
+                scope,
                 reference_id,
                 candidate_fingerprint,
                 candidate_operator,
