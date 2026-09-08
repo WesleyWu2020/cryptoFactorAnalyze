@@ -225,16 +225,9 @@ def _validate_archive_entry(entry: Mapping[str, Any]) -> str:
     diagnostics = entry["training_diagnostics"]
     if not isinstance(diagnostics, Mapping) or set(diagnostics) != {"score", "eligible", "reasons"}:
         raise ValueError("training archive diagnostics contain non-training fields")
-    score = diagnostics["score"]
-    numeric = (int, float)
-    if (
-        not isinstance(score, list)
-        or len(score) != 3
-        or any(isinstance(value, bool) or not isinstance(value, numeric) for value in score)
-        or any(not math.isfinite(float(value)) for value in score)
-        or type(score[2]) is not int
-    ):
-        raise ValueError("training archive diagnostic score is malformed")
+    _validate_training_score(
+        diagnostics["score"], context="training archive diagnostic", serialized=True
+    )
     if not isinstance(diagnostics["eligible"], bool):
         raise ValueError("training archive diagnostic eligibility is malformed")
     if not isinstance(diagnostics["reasons"], list) or not all(
@@ -249,7 +242,30 @@ def _validate_archive_entry(entry: Mapping[str, Any]) -> str:
     return identifier
 
 
-def _load_archive(path: str | Path | None) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+def _validate_training_score(
+    score: Any, *, context: str, serialized: bool = False
+) -> tuple[int | float, int | float, int]:
+    if score is None:
+        raise ValueError(f"{context} score is missing")
+    sequence_type = list if serialized else (list, tuple)
+    numeric = (int, float)
+    if (
+        not isinstance(score, sequence_type)
+        or len(score) != 3
+        or any(isinstance(value, bool) or not isinstance(value, numeric) for value in score)
+        or any(not math.isfinite(float(value)) for value in score)
+    ):
+        raise ValueError(f"{context} score must contain exactly three finite numeric values")
+    if type(score[2]) is not int:
+        raise ValueError(f"{context} score must use an integer node-count objective")
+    return score[0], score[1], score[2]
+
+
+def _load_archive(
+    path: str | Path | None,
+    *,
+    verified_artifacts: dict[tuple[Path, str], dict[str, pd.DataFrame]] | None = None,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     if path is None:
         return [], {}
     archive_path = Path(path)
@@ -268,7 +284,7 @@ def _load_archive(path: str | Path | None) -> tuple[list[dict[str, Any]], dict[s
     if not isinstance(entries, list):
         raise ValueError("training archive candidates must be a list")
     values: dict[str, Any] = {}
-    decoded_artifacts: dict[tuple[Path, str], dict[str, pd.DataFrame]] = {}
+    decoded_artifacts = verified_artifacts if verified_artifacts is not None else {}
     seen_ids: set[str] = set()
     for entry in entries:
         if not isinstance(entry, Mapping):
@@ -652,6 +668,7 @@ def _copy_archive_value_artifacts(
     archive_path: Path | None,
     archive_entries: Iterable[Mapping[str, Any]],
     destination: Path,
+    verified_artifacts: Mapping[tuple[Path, str], Mapping[str, pd.DataFrame]],
 ) -> None:
     if archive_path is None:
         return
@@ -686,10 +703,8 @@ def _copy_archive_value_artifacts(
         declared = reference.get("sha256")
         if not isinstance(declared, str):
             raise ValueError(f"archive value artifact reference is malformed: {source}")
-        try:
-            read_verified_value_artifact(source, expected_sha256=declared)
-        except ValueError as exc:
-            raise ValueError(f"archive value artifact hash does not match reference: {source}") from exc
+        if (source, declared) not in verified_artifacts:
+            raise ValueError(f"archive value artifact was not verified during loading: {source}")
         previous = targets.get(target)
         if previous is not None:
             previous_digest, previous_source = previous
@@ -731,7 +746,17 @@ def _write_training_artifacts(
     backtest_profile = _resolve_backtest_profile(backtest_profile)
     candidates = tuple(getattr(result, "candidates", ()))
     current_values = _result_values(result)
-    archive_entries, archive_values = _load_archive(archive_path)
+    verified_archive_artifacts: dict[
+        tuple[Path, str], dict[str, pd.DataFrame]
+    ] = {}
+    archive_entries, archive_values = _load_archive(
+        archive_path, verified_artifacts=verified_archive_artifacts
+    )
+    for candidate in candidates:
+        identifier = str(getattr(candidate, "expression_id", "<unknown>"))
+        _validate_training_score(
+            getattr(candidate, "score", None), context=f"candidate {identifier} training diagnostic"
+        )
     for identifier, value in list(current_values.items()):
         metadata = dict(value) if isinstance(value, Mapping) else {}
         frame = _frame(value)
@@ -785,7 +810,12 @@ def _write_training_artifacts(
             for candidate in selected
             if _frame(current_values.get(candidate.expression_id)) is not None
         }
-        _copy_archive_value_artifacts(archive_path, archive_entries, staging)
+        _copy_archive_value_artifacts(
+            Path(archive_path) if archive_path is not None else None,
+            archive_entries,
+            staging,
+            verified_archive_artifacts,
+        )
         value_artifact_path = staging / "training_values_archive.json"
         if value_artifact_path.exists():
             value_artifact_path = staging / "training_values.new.json"

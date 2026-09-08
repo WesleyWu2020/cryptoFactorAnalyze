@@ -881,6 +881,15 @@ def test_run_search_copies_shared_archive_artifact_once_and_preserves_all_refere
         immutable=True,
     )
     monkeypatch.setattr(search_module, "run_training_audit", lambda *args, **kwargs: audit_path)
+    original_decode = search_module.read_verified_value_artifact
+    decodes = 0
+
+    def count_decode(*args, **kwargs):
+        nonlocal decodes
+        decodes += 1
+        return original_decode(*args, **kwargs)
+
+    monkeypatch.setattr(search_module, "read_verified_value_artifact", count_decode)
 
     def fail_read_bytes(self):
         raise AssertionError(f"archive copying must stream file content: {self}")
@@ -898,6 +907,70 @@ def test_run_search_copies_shared_archive_artifact_once_and_preserves_all_refere
     assert [entry["expression_id"] for entry in document["candidates"]] == ["first", "second"]
     assert document["candidates"][0]["value_artifact"] == document["candidates"][1]["value_artifact"]
     assert len(list((tmp_path / "run").glob("shared-values.json"))) == 1
+    assert decodes == 1
+
+
+@pytest.mark.parametrize(
+    ("score", "detail"),
+    [
+        (None, "missing"),
+        ([[1.0], 0.5, -1], "exactly three finite numeric values"),
+        ((None, 0.5, -1), "exactly three finite numeric values"),
+        ((float("nan"), 0.5, -1), "exactly three finite numeric values"),
+        ((float("inf"), 0.5, -1), "exactly three finite numeric values"),
+        ((1.0, 0.5), "exactly three finite numeric values"),
+        ((1.0, 0.5, -1, 0.0), "exactly three finite numeric values"),
+        ((True, 0.5, -1), "exactly three finite numeric values"),
+        ((1.0, 0.5, -1.5), "integer node-count objective"),
+    ],
+)
+def test_run_search_rejects_malformed_current_candidate_score_before_publication(
+    tmp_path, monkeypatch, score, detail
+):
+    audit_path = tmp_path / "audit_train.json"
+    audit_path.write_text(
+        json.dumps({"training_only": True, "fingerprint": "train-fingerprint", "stage": {"name": "train"}}),
+        encoding="utf-8",
+    )
+    candidate = Candidate(Node("close"), "bad-score", score)
+    result = SearchResult((candidate,), (), 1)
+    monkeypatch.setattr(search_module, "run_training_audit", lambda *args, **kwargs: audit_path)
+
+    with pytest.raises(ValueError, match=rf"candidate bad-score.*score.*{detail}"):
+        search_module.run_search(
+            "unused.h5", audit_path, stage=STAGES["train"], warmup_days=0,
+            fields=["close"], search_stage=lambda path: result,
+            artifact_dir=tmp_path / "run", repository_root=REPOSITORY_ROOT,
+        )
+
+    assert not (tmp_path / "run").exists()
+
+
+def test_run_search_published_candidate_reloads_with_strict_score_validation(tmp_path, monkeypatch):
+    audit_path = tmp_path / "audit_train.json"
+    audit_path.write_text(
+        json.dumps({"training_only": True, "fingerprint": "train-fingerprint", "stage": {"name": "train"}}),
+        encoding="utf-8",
+    )
+    values = pd.DataFrame(
+        [[1.0]], index=pd.date_range("2024-01-01", periods=1), columns=["S0"]
+    )
+    candidate = Candidate(Node("close"), "reloadable", (1, 0.5, -1))
+    result = SearchResult(
+        (candidate,), (), 1, values_by_id={"reloadable": {"values": values}}
+    )
+    monkeypatch.setattr(search_module, "run_training_audit", lambda *args, **kwargs: audit_path)
+
+    search_module.run_search(
+        "unused.h5", audit_path, stage=STAGES["train"], warmup_days=0,
+        fields=["close"], search_stage=lambda path: result,
+        artifact_dir=tmp_path / "run", repository_root=REPOSITORY_ROOT,
+        operator_version="ops-v1",
+    )
+
+    entries, loaded_values = _load_archive(tmp_path / "run" / "training_candidates.json")
+    assert entries[0]["training_diagnostics"]["score"] == [1, 0.5, -1]
+    pd.testing.assert_frame_equal(loaded_values["reloadable"]["values"], values)
 
 
 def test_run_search_rejects_selected_candidate_without_value_panel(tmp_path, monkeypatch):
