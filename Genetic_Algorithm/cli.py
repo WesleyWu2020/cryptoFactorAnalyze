@@ -133,7 +133,14 @@ def _validate(args: argparse.Namespace) -> dict[str, Any]:
     config_document = _verified(run_dir / "config.json", "configuration")
     candidates = _archive_candidates(run_dir)
     if not candidates:
-        _write_json(run_dir / "validation.json", {"status": "no_candidates", "accepted": [], "rejected": [], "results": {}, "training_archive_sha256": archive["sha256"], "provenance_sha256": provenance["sha256"], "config_sha256": config_document["sha256"], "validation_fingerprint": None}, immutable=True)
+        # A zero-candidate validation still binds the terminal workflow to
+        # point-in-time validation data.  This permits an auditable empty
+        # freeze/test/export path without inventing a sentinel fingerprint.
+        config = _load_run_config(run_dir / "config.json")
+        validation_data = load_stage(
+            args.h5, STAGES["validation"], config.max_history, sorted(RAW_FIELDS)
+        )
+        _write_json(run_dir / "validation.json", {"status": "no_candidates", "accepted": [], "rejected": [], "results": {}, "training_archive_sha256": archive["sha256"], "provenance_sha256": provenance["sha256"], "config_sha256": config_document["sha256"], "validation_fingerprint": validation_data.fingerprint}, immutable=True)
         return {"status": "no_candidates", "artifact": str(run_dir / "validation.json")}
     config = _load_run_config(run_dir / "config.json")
     stage_data = load_stage(args.h5, STAGES["validation"], config.max_history, sorted(RAW_FIELDS))

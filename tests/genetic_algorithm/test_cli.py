@@ -59,18 +59,19 @@ def test_audit_rejects_non_training_stage(tmp_path):
     assert "train" in result.stderr.lower()
 
 
-def test_validate_empty_training_archive_is_a_successful_no_candidate_outcome(tmp_path):
+def test_validate_empty_training_archive_is_a_successful_no_candidate_outcome(tmp_path, gp_h5):
     run_dir = tmp_path / "run"
     run_dir.mkdir()
     write_artifact(run_dir / "training_candidates.json", {"training_only": True, "candidates": []}, immutable=True)
     write_artifact(run_dir / "provenance.json", {"backtest_profile": {}}, immutable=True)
     write_artifact(run_dir / "config.json", json.loads((ROOT / "Genetic_Algorithm/configs/smoke.json").read_text()), immutable=True)
 
-    result = _cli("validate", "--run-dir", str(run_dir), "--h5", "missing.h5")
+    result = _cli("validate", "--run-dir", str(run_dir), "--h5", str(gp_h5))
 
     assert result.returncode == 0, result.stderr
     assert "no_candidates" in result.stdout
     assert (run_dir / "validation.json").is_file()
+    assert json.loads((run_dir / "validation.json").read_text())["validation_fingerprint"]
 
 
 @pytest.mark.parametrize("status", ["partial", "failed"])

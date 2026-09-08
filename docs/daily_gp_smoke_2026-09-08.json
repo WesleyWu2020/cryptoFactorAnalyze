@@ -1,0 +1,27 @@
+{
+  "attempted_at_local": "2026-09-08",
+  "command": "./.venv/bin/python -m Genetic_Algorithm search --config Genetic_Algorithm/configs/smoke.json --h5 data/crypto_quant.h5 --run-dir /private/tmp/daily_gp_real_smoke_20260908",
+  "run_dir": "/private/tmp/daily_gp_real_smoke_20260908",
+  "outcome": "search completed asynchronously after the terminal response window: configuration, provenance, training archive, value archive, deduplication evidence, and generation log are present",
+  "audit": {
+    "path": "/private/tmp/daily_gp_real_smoke_20260908/audit_train.json",
+    "train_content_fingerprint": "546f1e6343d9927792fdde8db4d17e6e711763df57cc28d27c3f9b84d664f2ad",
+    "missing_fields_per_raw_field": 5102
+  },
+  "search_artifacts": [
+    "config.json",
+    "provenance.json",
+    "training_candidates.json",
+    "training_values_archive.json",
+    "deduplication.json",
+    "generations.jsonl"
+  ],
+  "training_candidate_count": 10,
+  "training_candidates_manifest_sha256_prefix": "788ff0033a96",
+  "follow_up_validate": {
+    "command": "./.venv/bin/python -m Genetic_Algorithm validate --run-dir /private/tmp/daily_gp_real_smoke_20260908 --h5 data/crypto_quant.h5",
+    "outcome": "attempted after training artifacts appeared; terminal response window elapsed after 30 seconds with no stdout and no validation.json written",
+    "validation_artifact_present": false
+  },
+  "gates_changed": false
+}
