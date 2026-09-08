@@ -121,4 +121,11 @@ def history_days(node: Node) -> int:
     return _stats(node)[2]
 
 
-__all__ = ["Node", "validate_tree", "canonical_tree", "expression_hash", "required_fields", "history_days"]
+def node_count(node: Node) -> int:
+    return _stats(node)[1]
+
+
+__all__ = [
+    "Node", "validate_tree", "canonical_tree", "expression_hash", "required_fields",
+    "history_days", "node_count",
+]

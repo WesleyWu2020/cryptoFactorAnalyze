@@ -44,6 +44,13 @@ def _repack_archive_with_safe_value_name(source, destination):
     write_artifact(destination, document, immutable=True)
 
 
+def test_result_values_rejects_identifiers_colliding_after_string_normalization():
+    result = SearchResult((), (), 0, values_by_id={1: "integer", "1": "string"})
+
+    with pytest.raises(ValueError, match="collide after string normalization.*1"):
+        search_module._result_values(result)
+
+
 def test_run_search_writes_training_artifacts_without_validation(tmp_path, monkeypatch):
     audit_path = tmp_path / "audit_train.json"
     audit_path.write_text(
@@ -350,6 +357,31 @@ def test_load_archive_rejects_malformed_training_score(tmp_path, score):
     )
 
     with pytest.raises(ValueError, match="diagnostic score"):
+        _load_archive(archive_path)
+
+
+@pytest.mark.parametrize("complexity", [0, 1, -2, -4, True, -3.0])
+def test_load_archive_requires_complexity_to_match_negative_ast_node_count(
+    tmp_path, complexity
+):
+    archive_path = tmp_path / "archive.json"
+    entry = _valid_archive_entry(
+        ast={
+            "op": "safe_div", "field": None, "window": None,
+            "children": [
+                {"op": "close", "field": None, "window": None, "children": []},
+                {"op": "open", "field": None, "window": None, "children": []},
+            ],
+        },
+        training_diagnostics={
+            "score": [1.0, 0.5, complexity], "eligible": True, "reasons": []
+        },
+    )
+    write_artifact(
+        archive_path, {"training_only": True, "candidates": [entry]}, immutable=True
+    )
+
+    with pytest.raises(ValueError, match="complexity objective.*-3"):
         _load_archive(archive_path)
 
 
@@ -921,7 +953,7 @@ def test_run_search_copies_shared_archive_artifact_once_and_preserves_all_refere
         ((1.0, 0.5), "exactly three finite numeric values"),
         ((1.0, 0.5, -1, 0.0), "exactly three finite numeric values"),
         ((True, 0.5, -1), "exactly three finite numeric values"),
-        ((1.0, 0.5, -1.5), "integer node-count objective"),
+        ((1.0, 0.5, -1.5), "complexity objective"),
     ],
 )
 def test_run_search_rejects_malformed_current_candidate_score_before_publication(
@@ -971,6 +1003,27 @@ def test_run_search_published_candidate_reloads_with_strict_score_validation(tmp
     entries, loaded_values = _load_archive(tmp_path / "run" / "training_candidates.json")
     assert entries[0]["training_diagnostics"]["score"] == [1, 0.5, -1]
     pd.testing.assert_frame_equal(loaded_values["reloadable"]["values"], values)
+
+
+@pytest.mark.parametrize("complexity", [0, 1, -2, -4, True, -3.0])
+def test_run_search_requires_complexity_to_match_negative_current_ast_node_count(
+    tmp_path, monkeypatch, complexity
+):
+    audit_path = tmp_path / "audit_train.json"
+    audit_path.write_text(
+        json.dumps({"training_only": True, "fingerprint": "train-fingerprint", "stage": {"name": "train"}}),
+        encoding="utf-8",
+    )
+    tree = Node("safe_div", (Node("close"), Node("open")))
+    result = SearchResult((Candidate(tree, "bad-complexity", (1.0, 0.5, complexity)),), (), 1)
+    monkeypatch.setattr(search_module, "run_training_audit", lambda *args, **kwargs: audit_path)
+
+    with pytest.raises(ValueError, match="complexity objective.*-3"):
+        search_module.run_search(
+            "unused.h5", audit_path, stage=STAGES["train"], warmup_days=0,
+            fields=["close"], search_stage=lambda path: result,
+            artifact_dir=tmp_path / "run", repository_root=REPOSITORY_ROOT,
+        )
 
 
 def test_run_search_rejects_selected_candidate_without_value_panel(tmp_path, monkeypatch):

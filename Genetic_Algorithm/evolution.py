@@ -11,7 +11,7 @@ import numpy as np
 from factor_common.labels import make_labels
 
 from .evaluator import evaluate_tree
-from .expression import Node, canonical_tree, expression_hash, validate_tree
+from .expression import Node, canonical_tree, expression_hash, node_count, validate_tree
 from .features import TERMINAL_FIELDS
 from .fitness import score_training
 from .operators import OPERATOR_ARITY, WINDOW_OPERATORS
@@ -89,7 +89,7 @@ def _dominates(left: Sequence[float], right: Sequence[float]) -> bool:
 
 def nondominated_sort(candidates: Iterable[Candidate]) -> tuple[tuple[Candidate, ...], ...]:
     """Return Pareto fronts for maximization objectives in deterministic order."""
-    items = sorted(tuple(candidates), key=lambda item: (item.expression_id, _tree_size(item.tree)))
+    items = sorted(tuple(candidates), key=lambda item: (item.expression_id, node_count(item.tree)))
     _validate_objective_vectors(items, "nondominated sort")
     dominates: dict[int, list[int]] = {i: [] for i in range(len(items))}
     dominated_by = [0] * len(items)
@@ -106,7 +106,7 @@ def nondominated_sort(candidates: Iterable[Candidate]) -> tuple[tuple[Candidate,
     while current:
         front = tuple(sorted(
             (items[i] for i in current),
-            key=lambda item: (_tree_size(item.tree), item.expression_id),
+            key=lambda item: (node_count(item.tree), item.expression_id),
         ))
         fronts.append(front)
         next_front: list[int] = []
@@ -163,7 +163,7 @@ def select_population(candidates: Iterable[Candidate], limit: int) -> tuple[Cand
         remaining = limit - len(chosen)
         chosen.extend(sorted(
             front,
-            key=lambda item: (-distances[item.expression_id], _tree_size(item.tree), item.expression_id),
+            key=lambda item: (-distances[item.expression_id], node_count(item.tree), item.expression_id),
         )[:remaining])
         break
     return tuple(chosen)
@@ -174,7 +174,7 @@ def _exploratory_key(candidate: Candidate) -> tuple[Any, ...]:
     objective_key = tuple(
         (value is None, -_objective_value(value)) for value in candidate.score
     )
-    return (objective_key, _tree_size(candidate.tree), candidate.expression_id, candidate.reasons)
+    return (objective_key, node_count(candidate.tree), candidate.expression_id, candidate.reasons)
 
 
 def select_exploratory(candidates: Iterable[Candidate], limit: int) -> tuple[Candidate, ...]:
@@ -199,14 +199,10 @@ def _tournament(pool: Sequence[Candidate], rng: np.random.Generator, config: Any
         key=lambda candidate: (
             ranks[candidate.expression_id],
             -distances[candidate.expression_id],
-            _tree_size(candidate.tree),
+            node_count(candidate.tree),
             candidate.expression_id,
         ),
     )
-
-
-def _tree_size(node: Node) -> int:
-    return 1 + sum(_tree_size(child) for child in node.children)
 
 
 def _paths(node: Node, prefix: tuple[int, ...] = ()) -> list[tuple[int, ...]]:
@@ -295,7 +291,7 @@ def _training_evaluate(
     values = evaluate_tree(tree, features, eligible, cache=_value(config, "cache"), cache_bytes=int(_value(config, "cache_bytes", 268435456)))
     values = values.loc[opens.index]
     score_config = dict(config) if isinstance(config, dict) else config.__dict__.copy()
-    score_config["node_count"] = _tree_size(tree)
+    score_config["node_count"] = node_count(tree)
     score = score_training(values, labels, quality, score_config)
     return tuple(score.objective_vector), score.eligible, score.reasons, values
 

@@ -27,7 +27,7 @@ from .artifacts import (
 )
 from .config import SearchConfig, Stage, load_config
 from .data import run_training_audit
-from .expression import Node, canonical_tree, validate_node_attributes
+from .expression import Node, canonical_tree, node_count, validate_node_attributes
 from .selection import deduplicate_training
 from factor_common.profiles import resolve_profile
 
@@ -118,12 +118,17 @@ def _frame(value: Any) -> pd.DataFrame | None:
 
 
 def _result_values(result: Any) -> dict[str, Any]:
-    values = getattr(result, "values_by_id", None)
-    if isinstance(values, Mapping):
-        return {str(identifier): value for identifier, value in values.items()}
-    values = getattr(result, "training_values", None)
-    if isinstance(values, Mapping):
-        return {str(identifier): value for identifier, value in values.items()}
+    for attribute in ("values_by_id", "training_values"):
+        values = getattr(result, attribute, None)
+        if isinstance(values, Mapping):
+            normalized = [str(identifier) for identifier in values]
+            if len(normalized) != len(set(normalized)):
+                duplicates = sorted({item for item in normalized if normalized.count(item) > 1})
+                raise ValueError(
+                    "result value identifiers collide after string normalization: "
+                    + ", ".join(duplicates)
+                )
+            return dict(zip(normalized, values.values()))
     return {}
 
 
@@ -221,12 +226,13 @@ def _validate_archive_entry(entry: Mapping[str, Any]) -> str:
     for field in ("training_fingerprint", "operator_version"):
         if not isinstance(entry[field], str) or not entry[field]:
             raise ValueError(f"training archive candidate {field} is malformed")
-    _load_archive_ast(entry["ast"], identifier=identifier)
+    tree = _load_archive_ast(entry["ast"], identifier=identifier)
     diagnostics = entry["training_diagnostics"]
     if not isinstance(diagnostics, Mapping) or set(diagnostics) != {"score", "eligible", "reasons"}:
         raise ValueError("training archive diagnostics contain non-training fields")
     _validate_training_score(
-        diagnostics["score"], context="training archive diagnostic", serialized=True
+        diagnostics["score"], context="training archive diagnostic", serialized=True,
+        expected_nodes=node_count(tree),
     )
     if not isinstance(diagnostics["eligible"], bool):
         raise ValueError("training archive diagnostic eligibility is malformed")
@@ -243,7 +249,7 @@ def _validate_archive_entry(entry: Mapping[str, Any]) -> str:
 
 
 def _validate_training_score(
-    score: Any, *, context: str, serialized: bool = False
+    score: Any, *, context: str, expected_nodes: int, serialized: bool = False
 ) -> tuple[int | float, int | float, int]:
     if score is None:
         raise ValueError(f"{context} score is missing")
@@ -252,12 +258,16 @@ def _validate_training_score(
     if (
         not isinstance(score, sequence_type)
         or len(score) != 3
-        or any(isinstance(value, bool) or not isinstance(value, numeric) for value in score)
-        or any(not math.isfinite(float(value)) for value in score)
+        or any(isinstance(value, bool) or not isinstance(value, numeric) for value in score[:2])
+        or any(not math.isfinite(float(value)) for value in score[:2])
     ):
         raise ValueError(f"{context} score must contain exactly three finite numeric values")
-    if type(score[2]) is not int:
-        raise ValueError(f"{context} score must use an integer node-count objective")
+    expected = -expected_nodes
+    if type(score[2]) is not int or score[2] != expected:
+        raise ValueError(
+            f"{context} score complexity objective must be the negative integer "
+            f"AST node count {expected}"
+        )
     return score[0], score[1], score[2]
 
 
@@ -755,7 +765,9 @@ def _write_training_artifacts(
     for candidate in candidates:
         identifier = str(getattr(candidate, "expression_id", "<unknown>"))
         _validate_training_score(
-            getattr(candidate, "score", None), context=f"candidate {identifier} training diagnostic"
+            getattr(candidate, "score", None),
+            context=f"candidate {identifier} training diagnostic",
+            expected_nodes=node_count(candidate.tree),
         )
     for identifier, value in list(current_values.items()):
         metadata = dict(value) if isinstance(value, Mapping) else {}

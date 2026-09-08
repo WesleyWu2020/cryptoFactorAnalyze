@@ -45,6 +45,16 @@ def _candidate_id(candidate: Any) -> str:
     return str(candidate.get("expression_id", candidate.get("hash")) if isinstance(candidate, Mapping) else candidate.expression_id)
 
 
+def _candidate_eligible(candidate: Any) -> bool:
+    value = candidate.get("eligible") if isinstance(candidate, Mapping) else candidate.eligible
+    return value is True
+
+
+def _candidate_reasons(candidate: Any) -> tuple[str, ...]:
+    value = candidate.get("reasons", ()) if isinstance(candidate, Mapping) else candidate.reasons
+    return tuple(str(reason) for reason in value)
+
+
 def _candidate_score(candidate: Any) -> tuple[float, float, int, str]:
     if isinstance(candidate, Mapping):
         score = candidate.get("score", ())
@@ -155,11 +165,16 @@ def deduplicate_training(
         for candidate_id in candidate_ids
         if candidate_ids.count(candidate_id) > 1
     }
+    ineligible_ids = {
+        candidate_id
+        for candidate, candidate_id in zip(candidate_items, candidate_ids)
+        if candidate_id not in duplicate_ids and not _candidate_eligible(candidate)
+    }
     ordered = sorted(
         (
             candidate
             for candidate, candidate_id in zip(candidate_items, candidate_ids)
-            if candidate_id not in duplicate_ids
+            if candidate_id not in duplicate_ids and candidate_id not in ineligible_ids
         ),
         key=_candidate_score,
     )
@@ -168,12 +183,16 @@ def deduplicate_training(
     rejected: list[Any] = [
         candidate
         for candidate, candidate_id in zip(candidate_items, candidate_ids)
-        if candidate_id in duplicate_ids
+        if candidate_id in duplicate_ids or candidate_id in ineligible_ids
     ]
     reasons: dict[str, tuple[str, ...]] = {
         candidate_id: (f"duplicate expression_id candidate: {candidate_id}",)
         for candidate_id in duplicate_ids
     }
+    for candidate, candidate_id in zip(candidate_items, candidate_ids):
+        if candidate_id in ineligible_ids:
+            detail = "; ".join(_candidate_reasons(candidate)) or "no reason provided"
+            reasons[candidate_id] = (f"candidate eligible is not True: {detail}",)
     comparisons: list[Comparison] = []
     archive_entries: list[dict[str, Any]] = []
 

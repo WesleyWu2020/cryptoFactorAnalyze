@@ -121,6 +121,32 @@ def test_duplicate_expression_ids_are_rejected_before_selection():
     assert result.archive_entries == ()
 
 
+def test_ineligible_candidate_is_rejected_before_ranking_and_archive_comparison():
+    candidate = Candidate(
+        Node("close"), "ineligible", ("not-rankable",), eligible=False,
+        reasons=("fitness gate failed",),
+    )
+    result = deduplicate_training(
+        [candidate],
+        {"ineligible": _metadata(_values())},
+        [{
+            "expression_id": "old",
+            "training_fingerprint": "train",
+            "operator_version": "ops",
+            "values": _values(),
+        }],
+        {"min_overlap_days": 120, "correlation_limit": 0.90, "validation_limit": 20},
+    )
+
+    assert result.accepted == ()
+    assert result.rejected == (candidate,)
+    assert result.rejection_reasons["ineligible"] == (
+        "candidate eligible is not True: fitness gate failed",
+    )
+    assert result.comparisons == ()
+    assert result.archive_entries == ()
+
+
 def test_incompatible_archive_reference_rejects_candidate_before_correlation():
     values = _values()
     result = deduplicate_training(
