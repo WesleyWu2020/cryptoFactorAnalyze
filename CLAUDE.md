@@ -13,10 +13,9 @@ data/                        # 数据获取与预处理
   crypto_quant.h5            # CryptoQuant 生成数据
 
 factor_analyse/              # 因子分析主流程
-  main.py                    # 报告生成入口：python factor_analyse/main.py <factor_type>
-  factor_config.py           # 所有因子注册表（必须在此注册才能运行）
+  main.py                    # 报告生成入口：python factor_analyse/main.py <factor_path>（因子文件完整路径）
   factor_analyse_custom.py   # factor_miner 核心类
-  factor_mining/             # 规则因子脚本（复用 util_factor.py + operator_utils.py）
+  factor_mining/             # 规则因子脚本（factor_common loader 契约模块）
   ML_factor_mining/          # ML 因子脚本（XGBoost / LightGBM / GRU）
   Alpha101/                  # WorldQuant Alpha101 因子实现
   Genetic_Algorithm/         # 遗传算法因子挖掘模块
@@ -33,9 +32,8 @@ daily_feishu_scheduler.py    # 每日 08:00 BJT 自动运行 + 飞书推送
 # 使用项目 venv（必须，避免解释器路径问题）
 ./.venv/bin/python data/update_crypto_quant.py update  # 更新 CryptoQuant 数据
 ./.venv/bin/python data/update_crypto_quant.py validate # 校验数据存储
-./.venv/bin/python factor_analyse/main.py --list      # 查看所有已注册因子
-./.venv/bin/python factor_analyse/<factor_script>.py  # Step 3: 生成因子数据
-./.venv/bin/python factor_analyse/main.py <factor_type>  # Step 4: 生成分析报告
+./.venv/bin/python factor_analyse/main.py --list      # 查看 factor_mining/ 下的因子模块
+./.venv/bin/python factor_analyse/main.py <factor_path>  # 生成分析报告（factor_path 为因子 .py 完整路径）
 
 # 安装依赖
 pip install -r requirements.txt
@@ -47,11 +45,10 @@ pip install -r requirements.txt
 
 ## 新增因子的固定流程（严格顺序，不跳步）
 
-1. 在 `factor_analyse/factor_mining/` 新建因子脚本，复用 `util_factor.py` 与 `operator_utils.py`
-2. 在 `factor_analyse/factor_config.py` 注册配置，必须包含：`file_prefix`、`factor_name`、`factor_direction`、`factor_desc`、`rebalance_period`
-3. 运行因子脚本，生成 CSV 到 `data/factor_data/`（格式：`date` / `instrument` / `factor` 三列，date 为 `yyyy-mm-dd`）
-4. 运行 `python factor_analyse/main.py <factor_type>` 生成 HTML 报告到 `reports/`
-5. 返回结果必须包含：变更文件列表、执行命令、核心输出路径、**未来函数检查结论**
+1. 在 `factor_analyse/factor_mining/` 新建因子脚本，遵循 `factor_common` loader 契约（`TYPE`/`META`/`SETTING`/`calc_factor`，`META.factor_name` 等于文件名）
+2. 无需注册表（`factor_config.py` 已移除）：直接以文件完整路径加载
+3. 运行 `./.venv/bin/python factor_analyse/main.py <factor_path>` 生成 HTML 报告到 `reports/`
+4. 返回结果必须包含：变更文件列表、执行命令、核心输出路径、**未来函数检查结论**
 
 ## 未来函数（Look-ahead Bias）强制规则
 

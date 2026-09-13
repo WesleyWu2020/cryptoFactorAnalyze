@@ -2,13 +2,16 @@
 
 用法:
     python factor_analyse/main.py --list
-    python factor_analyse/main.py <factor_type> [rebalance_days] [--start ...]
+    python factor_analyse/main.py <factor_path> [rebalance_days] [--start ...]
         [--end ...] [--h5-path ...] [--output-dir ...] [--no-plot]
         [--funding-price-mode strict|daily_open_approx]
 
-位置参数 rebalance_days 显式覆盖 factor_config 中的注册默认值。
-未迁移因子（无 module_path）报告迁移状态并以非零码退出，不再静默搜索
-已删除的 CSV 因子目录。
+``factor_path`` 是因子模块文件的完整路径（满足 factor_common loader 契约的
+.py 文件），不再使用 factor_config 注册表。因子的方向、预热窗口等元信息
+由模块自身的 SETTING 提供。例如:
+
+    python factor_analyse/main.py \
+        factor_analyse/factor_mining/Volume_Stability_Factor.py 1
 """
 
 import argparse
@@ -22,41 +25,41 @@ for _path in (str(_PROJECT_ROOT), str(_FACTOR_ANALYSE_DIR)):
     if _path not in sys.path:
         sys.path.insert(0, _path)
 
-from factor_config import FACTOR_CONFIG, get_factor_config, list_all_factors  # noqa: E402
-
-
-def _migration_state(factor_id):
-    """返回 (module_path 或 None, 迁移状态描述)。"""
-    config = get_factor_config(factor_id) or {}
-    module_path = config.get("module_path")
-    if not module_path:
-        return None, "not migrated (无 module_path; 旧 CSV 管线已移除)"
-    path = _PROJECT_ROOT / module_path
-    if not path.is_file():
-        return None, f"not runnable (module_path 文件不存在: {module_path})"
-    return path, "migrated (common framework)"
+_NON_FACTOR_MODULES = {"util_factor", "operator_utils"}
 
 
 def _cmd_list():
-    print(f"{'factor_type':<45} {'rebalance':>9}  migration")
-    for factor_id in list_all_factors():
-        config = FACTOR_CONFIG[factor_id]
-        _, state = _migration_state(factor_id)
-        rebalance = config.get("rebalance_period", "-")
-        print(f"{factor_id:<45} {rebalance:>9}  {state}")
+    """列出 factor_mining/ 下所有可加载的因子模块及其 SETTING 摘要。"""
+    from factor_common.loader import load_factor
+
+    factor_dir = _PROJECT_ROOT / "factor_analyse" / "factor_mining"
+    print(f"{'factor file':<50} {'direction':>9}  description")
+    for path in sorted(factor_dir.glob("*.py")):
+        if path.stem in _NON_FACTOR_MODULES:
+            continue
+        try:
+            spec = load_factor(path)
+        except Exception as exc:
+            print(f"{path.name:<50} {'-':>9}  unloadable: {exc}")
+            continue
+        direction = spec.setting["factor_direction"]
+        print(f"{path.name:<50} {direction:>9}  {spec.meta['description']}")
     return 0
 
 
 def build_parser():
     parser = argparse.ArgumentParser(
-        description="因子分析入口（common 框架适配器）",
+        description="因子分析入口（common 框架适配器，直接传因子文件路径）",
     )
-    parser.add_argument("factor_type", nargs="?", help="factor_config 中的因子类型")
+    parser.add_argument(
+        "factor_path", nargs="?",
+        help="因子模块 .py 文件的完整路径（相对路径基于当前工作目录解析）",
+    )
     parser.add_argument(
         "rebalance_days", nargs="?", type=int, default=None,
-        help="调仓周期（天），显式指定时覆盖注册默认值",
+        help="调仓周期（天），缺省为 1",
     )
-    parser.add_argument("--list", "-l", action="store_true", help="列出所有因子及迁移状态")
+    parser.add_argument("--list", "-l", action="store_true", help="列出 factor_mining/ 下的因子模块")
     parser.add_argument("--start", default=None, help="信号开始日期 YYYY-MM-DD")
     parser.add_argument("--end", default=None, help="信号结束日期 YYYY-MM-DD")
     parser.add_argument("--h5-path", default=None, help="CryptoQuant H5 数据文件路径")
@@ -79,29 +82,27 @@ def main(argv=None):
     if args.list:
         return _cmd_list()
 
-    if not args.factor_type:
-        print("错误: 缺少 factor_type（或使用 --list 查看支持的因子）", file=sys.stderr)
+    if not args.factor_path:
+        print("错误: 缺少 factor_path（或使用 --list 查看可用因子模块）", file=sys.stderr)
         return 2
 
-    config = get_factor_config(args.factor_type)
-    if config is None:
-        print(f"错误: 不支持的因子类型 '{args.factor_type}'", file=sys.stderr)
-        print(f"支持的因子类型: {', '.join(list_all_factors())}", file=sys.stderr)
+    factor_path = Path(args.factor_path).expanduser()
+    if not factor_path.is_absolute():
+        factor_path = (Path.cwd() / factor_path).resolve()
+    if not factor_path.is_file():
+        print(f"错误: 因子文件不存在: {factor_path}", file=sys.stderr)
         return 2
-
-    module_path, state = _migration_state(args.factor_type)
-    if module_path is None:
-        print(f"因子 '{args.factor_type}' 迁移状态: {state}", file=sys.stderr)
-        print(
-            "请先将其迁移为 factor_common 模块（loader 契约），并在 "
-            "factor_config.py 中注册 module_path。",
-            file=sys.stderr,
-        )
-        return 3
 
     from factor_common import FactorManager
+    from factor_common.loader import load_factor
 
-    rebalance_days = args.rebalance_days or config.get("rebalance_period") or 1
+    try:
+        spec = load_factor(factor_path)
+    except Exception as exc:
+        print(f"错误: 因子文件不满足 loader 契约: {exc}", file=sys.stderr)
+        return 3
+
+    rebalance_days = args.rebalance_days or 1
     output_dir = Path(args.output_dir) if args.output_dir else None
     manager = FactorManager(
         h5_path=args.h5_path,
@@ -111,7 +112,6 @@ def main(argv=None):
     params = {
         "rebalance_days": rebalance_days,
         "n_groups": 10,
-        "factor_direction": config["factor_direction"],
         "out_of_sample_days": 180,
     }
     if args.start:
@@ -122,13 +122,12 @@ def main(argv=None):
         params["funding_price_mode"] = args.funding_price_mode
 
     print(
-        f"开始分析 {config['factor_desc']} ({args.factor_type}) - "
-        f"{rebalance_days}天调仓 [{state}]"
+        f"开始分析 {spec.meta['description']} ({spec.factor_id}) - "
+        f"{rebalance_days}天调仓 direction={spec.setting['factor_direction']}"
     )
     try:
         result = manager.evaluate(
-            str(module_path),
-            factor_name=config["factor_name"],
+            str(factor_path),
             params=params,
             plot=not args.no_plot,
         )
@@ -147,7 +146,7 @@ def main(argv=None):
         # 保留旧的 web 目录复制行为，仅在该目录已配置存在时生效
         web_dir = _PROJECT_ROOT / "web"
         if web_dir.is_dir():
-            target = web_dir / f"{args.factor_type}_rebalance{rebalance_days}d_latest.html"
+            target = web_dir / f"{spec.factor_id}_rebalance{rebalance_days}d_latest.html"
             shutil.copy2(report_path, target)
             print(f"✅ 报告已复制到web目录: {target}")
     return 0

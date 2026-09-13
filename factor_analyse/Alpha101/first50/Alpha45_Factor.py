@@ -1,168 +1,93 @@
-# factor_analyse/Alpha101/Alpha45_Factor.py
+"""Alpha101 Alpha#45 因子（factor_common 契约版）。
+
+原始定义:
+    Alpha#45 = (-1 * ((rank((sum(delay(close, 5), 20) / 20)) * correlation(close, volume, 2))
+               * rank(correlation(sum(close, 5), sum(close, 20), 2))))
+
+本实现保留原脚本“币圈7×24h优化版”的实际计算逻辑:
+    price_base = mean(close, 20)（min_periods=1）
+    norm_close = close / price_base
+    mid_term_avg = mean(delay(norm_close, delay_days), mid_window)
+    vol_norm = volume / mean(volume, 20)（min_periods=1）
+    price_vol_corr = correlation(norm_close, vol_norm, short_corr_window)
+    short_sum = sum(norm_close, short_sum_window); mid_sum = sum(norm_close, mid_window)
+    period_corr = correlation(short_sum, mid_sum, short_corr_window)
+    factor = -rank(mid_term_avg) * price_vol_corr * rank(period_corr)
+其中 rank 为横截面 pct rank（axis=1）。
+偏离说明: 旧脚本对 period_corr 先 dropna 再在压缩后的序列上滑窗（窗口可跨越日历缺口），
+本实现直接在原始日历轴上做 rolling corr，更贴近标准语义且无前视。
+参数取原脚本 __main__ 实际调用值: delay=5, mid=20, short_corr=2, short_sum=5。
+旧脚本 rebalance_period 仅用于旧版 future_ret，已丢弃。
+
+计算只使用当日及历史数据，无未来函数。FactorManager 只调用下面的标准模块接口。
+横截面去极值与秩归一化由框架 preprocessing="mad_rank" 完成，这里输出原始因子值。
+"""
+
+from __future__ import annotations
+
 import pandas as pd
-import numpy as np
-import os
-from datetime import datetime
-from tqdm import tqdm
 
-# 路径以便导入 util_factor
-current_dir = os.path.dirname(os.path.abspath(__file__))
-factor_mining_dir = os.path.join(current_dir, '..', 'factor_mining')
-import sys
-sys.path.insert(0, factor_mining_dir)
 
-from util_factor import (
-    load_historical_marketcap, build_available_tokens_by_date, load_kline_df,
-    filter_group_by_availability, group_apply_with_progress, winsorize_by_date,
-    rank_to_unit_by_date, save_factor_df, future_return, print_availability_sample,
-    print_factor_summary
-)
+TYPE = "regular"
 
-def create_alpha45_factor(delay_days=5, mid_window=20, short_corr_window=2, 
-                         short_sum_window=5, rebalance_period=5, availability_lookback_days=90):
-    """
-    Alpha 45 因子 (币圈7×24h优化版)
-    
-    原始定义:
-    Alpha#45 = (-1 * ((rank((sum(delay(close, 5), 20) / 20)) * correlation(close, volume, 2)) * 
-               rank(correlation(sum(close, 5), sum(close, 20), 2))))
-    
-    思路:
-    1. 中期价格趋势基准: 从5天前开始的20天收盘价均值，横截面排名
-    2. 短期量价相关性: 过去2天收盘价与交易量的相关性
-    3. 多周期价格相关性: 5天与20天收盘价总和的相关性，横截面排名
-    4. 信号合成: 三者相乘，取负值
-    
-    - 平均持有期: 3-7天
-    """
-    print(f"开始构建 Alpha 45 因子...")
-    print(f"参数: delay_days={delay_days}, mid_window={mid_window}, short_corr_window={short_corr_window}, "
-          f"short_sum_window={short_sum_window}, rebalance_period={rebalance_period}")
+META = {
+    "factor_name": "Alpha45_Factor",
+    "author": "local",
+    "level": "daily",
+    "category": "alpha101",
+    "description": "Alpha101 #45: -rank(mean(delay(close,N),N)) * corr(close, volume, N) * rank(corr(sum(close,N), sum(close,N), N))",
+}
 
-    # 可用性池
-    historical_df = load_historical_marketcap()
-    available_tokens_by_date = build_available_tokens_by_date(
-        historical_df, lookback_days=availability_lookback_days, mode="window"
+SETTING = {
+    "data_needed": ["close", "volume"],
+    "universe": "historical_top50",
+    "warmup_bars": 30,
+    "preprocessing": "mad_rank",
+    "params": {
+        "delay_days": 5,
+        "mid_window": 20,
+        "short_corr_window": 2,
+        "short_sum_window": 5,
+    },
+    "factor_direction": 1,
+}
+
+_EPSILON = 1e-8
+
+
+def calc_factor(data_ctx: dict[str, pd.DataFrame]) -> pd.DataFrame:
+    """Return the raw daily Alpha#45 matrix (date x instrument)."""
+
+    delay_days = SETTING["params"]["delay_days"]
+    mid_window = SETTING["params"]["mid_window"]
+    short_corr_window = SETTING["params"]["short_corr_window"]
+    short_sum_window = SETTING["params"]["short_sum_window"]
+
+    close = data_ctx["close"].astype("float64")
+    volume = data_ctx["volume"].astype("float64")
+
+    # 价格归一化（适应币圈价格差异），与原脚本一致 min_periods=1
+    price_base = close.rolling(window=20, min_periods=1).mean()
+    norm_close = close / (price_base + _EPSILON)
+
+    # 中期价格趋势基准: 从 delay_days 天前开始的 mid_window 天收盘价均值
+    delay_close = norm_close.shift(delay_days)
+    mid_term_avg = delay_close.rolling(window=mid_window, min_periods=mid_window).mean()
+
+    # 短期量价相关性: 过去 short_corr_window 天收盘价与归一化交易量的相关性
+    vol_norm = volume / (volume.rolling(window=20, min_periods=1).mean() + _EPSILON)
+    price_vol_corr = norm_close.rolling(window=short_corr_window, min_periods=short_corr_window).corr(
+        vol_norm
     )
-    print("🔍 生成各日期可用token列表（避免未来函数）...")
-    print_availability_sample(available_tokens_by_date, n=3)
 
-    # K线数据
-    df = load_kline_df()
+    # 多周期价格相关性: 短期与中期收盘价总和的相关性
+    short_sum = norm_close.rolling(window=short_sum_window, min_periods=short_sum_window).sum()
+    mid_sum = norm_close.rolling(window=mid_window, min_periods=mid_window).sum()
+    period_corr = short_sum.rolling(window=short_corr_window, min_periods=short_corr_window).corr(
+        mid_sum
+    )
 
-    def compute_one(group: pd.DataFrame, symbol: str) -> pd.DataFrame:
-        if len(group) < max(delay_days + mid_window, short_corr_window, short_sum_window + mid_window) + rebalance_period + 2:
-            return pd.DataFrame()
-        gp = group.copy()
-
-        # === 7×24h币圈特殊处理 ===
-        
-        # 1. 价格归一化处理（适应币圈价格差异）
-        gp['price_base'] = gp['close'].rolling(window=20, min_periods=1).mean()
-        gp['norm_close'] = gp['close'] / (gp['price_base'] + 1e-8)
-        
-        # 2. 计算因子组件
-        
-        # 2.1 中期价格趋势基准: 从5天前开始的20天收盘价均值
-        gp['delay_close'] = gp['norm_close'].shift(delay_days)
-        gp['mid_term_avg'] = gp['delay_close'].rolling(window=mid_window, min_periods=mid_window).mean()
-        
-        # 2.2 短期量价相关性: 过去2天收盘价与交易量的相关性
-        gp['vol_norm'] = gp['volume'] / gp['volume'].rolling(window=20, min_periods=1).mean()
-        gp['price_vol_corr'] = gp['norm_close'].rolling(window=short_corr_window, min_periods=short_corr_window).corr(gp['vol_norm'])
-        
-        # 2.3 多周期价格相关性: 5天与20天收盘价总和的相关性
-        # 计算短期和中期收盘价总和
-        gp['short_sum'] = gp['norm_close'].rolling(window=short_sum_window, min_periods=short_sum_window).sum()
-        gp['mid_sum'] = gp['norm_close'].rolling(window=mid_window, min_periods=mid_window).sum()
-        
-        # 计算两个周期总和的相关性
-        # 这里需要特殊处理，因为我们需要计算两个时间序列的相关性
-        # 使用rolling apply来实现
-        def rolling_corr(x):
-            if len(x) < short_corr_window or x.isna().any():
-                return np.nan
-            # 取最后short_corr_window个值计算相关性
-            return np.corrcoef(x[-short_corr_window:, 0], x[-short_corr_window:, 1])[0, 1]
-        
-        # 准备数据用于rolling apply
-        corr_data = pd.DataFrame({
-            'short': gp['short_sum'],
-            'mid': gp['mid_sum']
-        }).dropna()
-        
-        if len(corr_data) >= short_corr_window:
-            # 计算相关性
-            corr_values = []
-            for i in range(short_corr_window, len(corr_data) + 1):
-                window_data = corr_data.iloc[i-short_corr_window:i]
-                if len(window_data) == short_corr_window:
-                    try:
-                        corr = np.corrcoef(window_data['short'], window_data['mid'])[0, 1]
-                        corr_values.append(corr)
-                    except:
-                        corr_values.append(np.nan)
-                else:
-                    corr_values.append(np.nan)
-            
-            # 将相关性结果添加回原始数据
-            corr_index = corr_data.index[short_corr_window-1:]
-            if len(corr_index) == len(corr_values):
-                corr_series = pd.Series(corr_values, index=corr_index)
-                gp.loc[corr_series.index, 'period_corr'] = corr_series
-        
-        # 未来收益
-        gp['future_ret'] = future_return(gp['close'], rebalance_period, method="log")
-
-        # 可用性过滤
-        gp = filter_group_by_availability(gp, symbol, available_tokens_by_date)
-
-        return gp[['date', 'symbol', 'mid_term_avg', 'price_vol_corr', 'period_corr', 'future_ret']].dropna()
-
-    print("计算 Alpha 45 因子基础数据（考虑token可用性）...")
-    result_dfs = group_apply_with_progress(df, 'symbol', compute_one)
-    if not result_dfs:
-        print("警告: 没有足够的数据计算因子")
-        return pd.DataFrame()
-
-    factor_df = pd.concat(result_dfs, ignore_index=True)
-    
-    # 按日期计算横截面排名和因子值
-    def calculate_alpha45_by_date(df_date):
-        df_date = df_date.copy()
-        
-        # 对中期价格趋势和多周期相关性进行横截面排名
-        df_date['rank_mid_term_avg'] = df_date['mid_term_avg'].rank(pct=True)
-        df_date['rank_period_corr'] = df_date['period_corr'].rank(pct=True)
-        
-        # 计算因子值：三者相乘，取负值
-        df_date['alpha45_raw'] = -1 * (
-            df_date['rank_mid_term_avg'] * 
-            df_date['price_vol_corr'] * 
-            df_date['rank_period_corr']
-        )
-        
-        return df_date
-
-    factor_df = factor_df.groupby('date', group_keys=False).apply(calculate_alpha45_by_date)
-    factor_df = factor_df.dropna(subset=['alpha45_raw'])
-    
-    # 去极值与归一化
-    factor_df = winsorize_by_date(factor_df, col='alpha45_raw', n_std=3.0)
-    factor_df = rank_to_unit_by_date(factor_df, col='alpha45_raw', out_col='factor')
-
-    # 输出
-    factor_df = factor_df.rename(columns={'symbol': 'instrument'})[['date', 'instrument', 'factor', 'future_ret']]
-    out_path = save_factor_df(factor_df, file_prefix=f"alpha45_multi_dimension_")
-
-    print_factor_summary(factor_df, out_path)
-    return factor_df
-
-if __name__ == "__main__":
-    # 标准参数 (多维度因子)
-    create_alpha45_factor(delay_days=5, mid_window=20, short_corr_window=2, 
-                         short_sum_window=5, rebalance_period=5)
-    
-    # 可选：更短的窗口，适应加密货币高波动特性
-    # create_alpha45_factor(delay_days=3, mid_window=10, short_corr_window=2, 
-    #                      short_sum_window=3, rebalance_period=3)
+    # 横截面排名合成，取负
+    rank_mid_term_avg = mid_term_avg.rank(axis=1, pct=True)
+    rank_period_corr = period_corr.rank(axis=1, pct=True)
+    return -1.0 * rank_mid_term_avg * price_vol_corr * rank_period_corr

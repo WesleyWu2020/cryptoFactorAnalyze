@@ -82,6 +82,11 @@ def test_direction_reversal_selects_top_or_bottom_group():
     down = target_weights(values, resolve_profile("perp_1d", {"n_groups": 2, "factor_direction": -1}))
     pd.testing.assert_frame_equal(up["directional_long"], up["group_2"])
     pd.testing.assert_frame_equal(down["directional_long"], down["group_1"])
+    # The traded long-short portfolio must follow the factor direction too:
+    # direction -1 swaps the legs (long bottom group, short top group).
+    pd.testing.assert_frame_equal(up["long_short"], -down["long_short"])
+    assert down["long_short"].iloc[0]["A"] == pytest.approx(0.25)
+    assert down["long_short"].iloc[0]["C"] == pytest.approx(-0.25)
 
 
 def test_long_short_is_fifty_fifty_top_vs_bottom_group():

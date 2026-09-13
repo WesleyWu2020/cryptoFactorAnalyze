@@ -1,144 +1,104 @@
-import pandas as pd
+"""主动买入占比-收益差因子（W-Cutting 逻辑变种）。
+
+公式（与旧版 compute_one 逐点等价）：
+
+    ret        = log(close / close.shift(1))
+    buy_ratio  = taker_buy_quote_volume / (quote_volume + 1e-8)
+
+对任意交易日 t，取过去 window 天（不含当日 t，即 [t-window, t)）的
+(ret, buy_ratio) 序列，按 buy_ratio 升序排序后对半切：
+
+    m_high = 买入占比最高的一半日子的 ret 之和（多头主导日累计涨幅）
+    m_low  = 买入占比最低的一半日子的 ret 之和（空头主导日累计涨幅）
+    factor = m_high - m_low
+
+含义：因子值越大，说明该币在"多头主动进攻"的日子里涨得好、在"空头砸盘"
+的日子里抗跌，用于衡量上涨质量。窗口内存在 NaN、或 m_low == 0、或结果
+非有限值时输出 NaN（与旧版 skip 行为一致）。
+
+计算只使用当日及历史数据，无未来函数。FactorManager 只调用下面的标准模块接口。
+"""
+
+from __future__ import annotations
+
 import numpy as np
+import pandas as pd
+from numpy.lib.stride_tricks import sliding_window_view
 
-from util_factor import (
-    load_kline_df,
-    build_available_tokens_by_date_from_kline,
-    filter_group_by_availability, group_apply_with_progress, winsorize_by_date,
-    rank_to_unit_by_date, save_factor_df, future_return, print_availability_sample,
-    print_factor_summary, print_latest_date_inference
-)
 
-def create_return_taker_ratio_diff_factor(window=20, rebalance_period=10, top_n=50):
+TYPE = "regular"
+
+META = {
+    "factor_name": "Return_Taker_Ratio_Diff",
+    "author": "local",
+    "level": "daily",
+    "category": "order_flow",
+    "description": "Sum of returns on high taker-buy-ratio days minus low-ratio days (W-Cutting)",
+}
+
+SETTING = {
+    "data_needed": ["close", "quote_volume", "taker_buy_quote_volume"],
+    "universe": "historical_top50",
+    "warmup_bars": 12,
+    "preprocessing": "mad_rank",
+    "params": {"window": 10, "rebalance_period": 5},
+    "factor_direction": 1,
+}
+
+_EPSILON = 1e-8
+
+
+def calc_factor(data_ctx: dict[str, pd.DataFrame]) -> pd.DataFrame:
+    """Return the raw daily taker-ratio return-diff matrix.
+
+    The trailing window of length ``window`` ends at ``t - 1`` (excludes the
+    current day), matching the old loop over ``[i - window, i)``. ``rolling``
+    style operations run along the daily index only.
     """
-    改进版：主动买入占比-收益差因子 (W-Cutting 逻辑变种)
-    
-    逻辑改进：
-    1. 排序指标：使用 taker_buy_quote / quote_volume (主动买入占比)。
-       - 相比绝对金额，占比能剥离行情冷热的影响，纯粹衡量多空力量对比。
-    2. 合成方式：使用 Subtraction (做差)。
-       - Factor = Sum(Ret_High_Ratio) - Sum(Ret_Low_Ratio)
-    
-    含义：
-    - 因子值越大，说明该币种在“多头主动进攻”的日子里涨得好，且在“空头砸盘”的日子里跌得少（抗跌）。
-    - 这是一个衡量“上涨质量”的因子。
-    """
-    print(f"开始构建主动买入占比-收益差因子")
-    print(f"参数: window={window}, rebalance_period={rebalance_period}, top_n={top_n}")
 
-    # 加载数据
-    df = load_kline_df()
-    
-    # 筛选前50
-    available_tokens_by_date = build_available_tokens_by_date_from_kline(
-        kline_df=df, top_n=top_n, ranking_method='quote_volume',
-        rebalance_period=rebalance_period, lookback_buffer=20, strict_top_n=True
+    window = SETTING["params"]["window"]
+    if isinstance(window, bool) or not isinstance(window, int) or window < 2:
+        raise ValueError("SETTING.params.window must be an integer >= 2")
+
+    close = data_ctx["close"].astype("float64")
+    quote_volume = data_ctx["quote_volume"].astype("float64")
+    taker_buy_quote_volume = data_ctx["taker_buy_quote_volume"].astype("float64")
+
+    ret = np.log(close / close.shift(1))
+    buy_ratio = taker_buy_quote_volume / (quote_volume + _EPSILON)
+
+    # Trailing window [t - window, t): shift by 1 so the window excludes day t.
+    ret_past = ret.shift(1).to_numpy()
+    ratio_past = buy_ratio.shift(1).to_numpy()
+
+    n_rows, n_cols = ret_past.shape
+    out = np.full((n_rows, n_cols), np.nan)
+    if n_rows < window + 1:
+        return pd.DataFrame(out, index=close.index, columns=close.columns)
+
+    # Sliding windows over rows; window k covers rows [k, k + window).
+    ret_w = sliding_window_view(ret_past, window, axis=0)
+    ratio_w = sliding_window_view(ratio_past, window, axis=0)
+
+    valid = ~(np.isnan(ret_w).any(axis=-1) | np.isnan(ratio_w).any(axis=-1))
+
+    # Sort each window by buy_ratio ascending and split in half (W-Cutting).
+    sorted_idx = np.argsort(ratio_w, axis=-1)
+    sorted_ret = np.take_along_axis(ret_w, sorted_idx, axis=-1)
+    n_split = window // 2
+    m_low = np.nansum(sorted_ret[..., :n_split], axis=-1)
+    m_high = np.nansum(sorted_ret[..., n_split:], axis=-1)
+
+    factor = m_high - m_low
+    factor = np.where(
+        valid & (m_low != 0) & np.isfinite(m_high) & np.isfinite(m_low),
+        factor,
+        np.nan,
     )
 
-    def compute_one(group: pd.DataFrame, symbol: str) -> pd.DataFrame:
-        if len(group) < window + rebalance_period + 2:
-            return pd.DataFrame()
-        gp = group.copy()
-        
-        # 1. 基础指标计算
-        gp['ret'] = np.log(gp['close'] / gp['close'].shift(1))
-        
-        # 核心改进A: 使用占比而不是绝对值
-        # taker_buy_ratio 越高，说明当日主动买入意愿越强
-        if 'taker_buy_quote' in gp.columns and 'quote_volume' in gp.columns:
-            gp['buy_ratio'] = gp['taker_buy_quote'] / (gp['quote_volume'] + 1e-8)
-        else:
-            return pd.DataFrame()
-
-        # 预先计算未来收益（提高效率）
-        gp['future_ret'] = future_return(gp['close'], rebalance_period, method="log")
-        
-        vals, dates, fwd = [], [], []
-        
-        # 提取 numpy array 加速
-        ret_arr = gp['ret'].values
-        ratio_arr = gp['buy_ratio'].values
-        dates_arr = gp['date'].values
-        future_ret_arr = gp['future_ret'].values
-        
-        # 2. 滚动窗口计算 (W-Cutting 风格)
-        # 从 window 开始（而不是 window - 1），确保有完整的窗口数据
-        for i in range(window, len(gp) - rebalance_period):
-            # 获取窗口数据 [i - window : i]（不包含当前日）
-            window_ret = ret_arr[i - window : i]
-            window_ratio = ratio_arr[i - window : i]
-            
-            # 检查窗口数据完整性
-            if np.isnan(window_ret).any() or np.isnan(window_ratio).any():
-                continue
-            
-            # 按买入占比排序
-            # argsort 从小到大排序
-            sorted_idx = np.argsort(window_ratio)
-            
-            # 切割：取两头
-            # 20天窗口，取头尾各5天或10天（这里取一半对半切，或者 Top/Bottom 5）
-            # 研报中是取两头各10天(总共20天)，也就是全覆盖。我们也取各10天。
-            n_split = window // 2
-            
-            low_ratio_idx = sorted_idx[:n_split]   # 买入占比最低的10天 (空头主导/散户抛售)
-            high_ratio_idx = sorted_idx[n_split:]  # 买入占比最高的10天 (多头主导/大户吸筹)
-            
-            # 核心改进B: 使用差值 (Subtraction)
-            # M_high: 多头主导日的累计涨幅
-            # M_low:  空头主导日的累计涨幅
-            m_high = np.sum(window_ret[high_ratio_idx])
-            m_low = np.sum(window_ret[low_ratio_idx])
-            
-            # 因子 = 多头日涨幅 / 空头日涨幅
-            # 避免除零和无效值
-            if m_low == 0 or np.isnan(m_high) or np.isnan(m_low):
-                continue
-            
-            factor_val = m_high - m_low
-            
-            # 检查因子值有效性
-            if np.isnan(factor_val) or np.isinf(factor_val):
-                continue
-            
-            vals.append(factor_val)
-            dates.append(dates_arr[i])
-            fwd.append(future_ret_arr[i])
-
-        if not vals:
-            return pd.DataFrame()
-
-        res = pd.DataFrame({
-            'date': dates, 
-            'symbol': symbol, 
-            'factor_raw': vals, 
-            'future_ret': fwd
-        })
-        
-        res = filter_group_by_availability(res, symbol, available_tokens_by_date)
-        return res
-
-    print("计算因子中...")
-    result_dfs = group_apply_with_progress(df, 'symbol', compute_one)
-    
-    if not result_dfs:
-        return pd.DataFrame()
-
-    factor_df = pd.concat(result_dfs, ignore_index=True)
-
-    # 去极值与标准化
-    factor_df = winsorize_by_date(factor_df, col='factor_raw', n_std=3.0)
-    factor_df = rank_to_unit_by_date(factor_df, col='factor_raw', out_col='factor')
-
-    # 输出
-    factor_df = factor_df.rename(columns={'symbol': 'instrument'})[['date', 'instrument', 'factor', 'future_ret']]
-    out_path = save_factor_df(factor_df, file_prefix=f"return_taker_ratio_diff_{window}d_rebalance{rebalance_period}d_")
-
-    print_factor_summary(factor_df, out_path)
-    latest_date = factor_df['date'].max()
-    print_latest_date_inference(factor_df, latest_date, groups=5)
-    
-    return factor_df
-
-if __name__ == "__main__":
-    create_return_taker_ratio_diff_factor(window=10, rebalance_period=5)
+    # Sliding window k covers rows [k, k + window) of the shifted series and
+    # ends at row k + window - 1, so its value belongs to date t = k + window - 1
+    # (i.e. ret days [t - window, t)). First valid t = window + 1, since
+    # ret[0] is NaN — same as the old loop starting at i = window.
+    out[window - 1:] = factor
+    return pd.DataFrame(out, index=close.index, columns=close.columns)

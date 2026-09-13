@@ -12,7 +12,7 @@ from factor_common.labels import make_labels
 
 from .evaluator import evaluate_tree
 from .expression import Node, canonical_tree, expression_hash, node_count, validate_tree
-from .features import TERMINAL_FIELDS
+from .features import TERMINAL_FIELDS, FEATURE_FAMILIES, expression_families
 from .fitness import score_training
 from .operators import OPERATOR_ARITY, WINDOW_OPERATORS
 
@@ -33,6 +33,7 @@ class SearchResult:
     generation_log: tuple[dict[str, Any], ...]
     evaluations: int
     values_by_id: dict[str, Any] = field(default_factory=dict)
+    fitness_diagnostics: dict[str, Any] = field(default_factory=dict)
 
 
 class SearchFormationError(RuntimeError):
@@ -185,6 +186,9 @@ def select_exploratory(candidates: Iterable[Candidate], limit: int) -> tuple[Can
 
 def _tournament(pool: Sequence[Candidate], rng: np.random.Generator, config: Any) -> Candidate:
     """Pick a parent by nondominated rank, crowding, complexity, and hash."""
+    if _value(config, "fitness_mode") == "all_costs_sharpe":
+        contenders = [pool[int(i)] for i in rng.integers(0, len(pool), size=max(2, config.tournament_size))]
+        return min(contenders, key=_cost_key)
     fronts = nondominated_sort(pool)
     ranks = {candidate.expression_id: rank for rank, front in enumerate(fronts) for candidate in front}
     distances = {
@@ -204,6 +208,11 @@ def _tournament(pool: Sequence[Candidate], rng: np.random.Generator, config: Any
             candidate.expression_id,
         ),
     )
+
+
+def _cost_key(candidate):
+    return (not candidate.eligible, -_objective_value(candidate.score[0]),
+            -_objective_value(candidate.score[1]), node_count(candidate.tree), candidate.expression_id)
 
 
 def _paths(node: Node, prefix: tuple[int, ...] = ()) -> list[tuple[int, ...]]:
@@ -228,14 +237,16 @@ def _replace(node: Node, path: tuple[int, ...], replacement: Node) -> Node:
     return Node(node.op, tuple(children), node.field, node.window)
 
 
-def _random_tree(rng: np.random.Generator, config: Any, depth: int = 0) -> Node:
-    terminals = sorted(TERMINAL_FIELDS)
+def _random_tree(rng: np.random.Generator, config: Any, depth: int = 0, family=None) -> Node:
+    if family is None and _value(config, "family_diversity", False):
+        family = str(rng.choice(sorted(FEATURE_FAMILIES)))
+    terminals = sorted(FEATURE_FAMILIES[family] if family else TERMINAL_FIELDS)
     max_depth = int(_value(config, "max_depth", 4))
     if depth >= max_depth or (depth > 0 and rng.random() < 0.35):
         return Node(str(rng.choice(terminals)))
     operators = sorted(OPERATOR_ARITY)
     op = str(rng.choice(operators))
-    children = tuple(_random_tree(rng, config, depth + 1) for _ in range(OPERATOR_ARITY[op]))
+    children = tuple(_random_tree(rng, config, depth + 1, family) for _ in range(OPERATOR_ARITY[op]))
     window = None
     if op in WINDOW_OPERATORS:
         values = tuple(_value(config, "windows", (3, 5, 10, 20, 40, 60)))
@@ -243,6 +254,28 @@ def _random_tree(rng: np.random.Generator, config: Any, depth: int = 0) -> Node:
             values = tuple(_value(config, "lags", values))
         window = int(rng.choice(values))
     return Node(op, children, window=window)
+
+
+def _select_cost_population(candidates, size, config):
+    ordered = sorted(candidates, key=_cost_key)
+    if not _value(config, "family_diversity", False):
+        return ordered[:size]
+    buckets = {}
+    for candidate in ordered:
+        families = expression_families(candidate.tree)
+        bucket = next(iter(families)) if len(families) == 1 else "mixed"
+        buckets.setdefault(bucket, []).append(candidate)
+    selected = []
+    # Reserve exploration across available families; eligibility remains a
+    # hard requirement when candidates leave search for validation.
+    while len(selected) < size and buckets:
+        for bucket in sorted(tuple(buckets)):
+            selected.append(buckets[bucket].pop(0))
+            if not buckets[bucket]:
+                del buckets[bucket]
+            if len(selected) == size:
+                break
+    return selected
 
 
 def _variation(parent_a: Node, parent_b: Node, rng: np.random.Generator, config: Any) -> Node:
@@ -270,6 +303,12 @@ def _training_evaluate(
 ) -> tuple[tuple[float, ...], bool, tuple[str, ...], Any]:
     """Evaluate one tree; forward labels are created only within this function."""
     custom = _value(config, "evaluate_candidate")
+    stage = _value(stage_data, "stage")
+    if stage is not None:
+        from .config import STAGES
+        walk_forward_train = stage.name == "walk_forward_train" and config.fitness_mode == "all_costs_sharpe"
+        if stage != STAGES["train"] and not walk_forward_train:
+            raise ValueError("search fitness requires the configured training stage")
     opens = _value(stage_data, "opens")
     labels = make_labels(opens, int(_value(config, "hold_days", 1))) if opens is not None else None
     if callable(custom):
@@ -291,8 +330,17 @@ def _training_evaluate(
     quality = _value(stage_data, "quality_eligible")
     values = evaluate_tree(tree, features, eligible, cache=_value(config, "cache"), cache_bytes=int(_value(config, "cache_bytes", 268435456)))
     values = values.loc[opens.index]
+    if config.fitness_mode == "all_costs_sharpe":
+        from .cost_fitness import score_all_costs
+        score, accepted, reasons, direction, diagnostics = score_all_costs(
+            values, labels, stage_data, config, node_count(tree),
+        )
+        stage_data.fitness_diagnostics[expression_hash(tree)] = diagnostics
+        return score, accepted, reasons, values, direction
     score_config = dict(config) if isinstance(config, dict) else config.__dict__.copy()
     score_config["node_count"] = node_count(tree)
+    if stage is not None:
+        score_config["stage"] = stage
     score = score_training(values, labels, quality, score_config)
     return tuple(score.objective_vector), score.eligible, score.reasons, values, score.direction
 
@@ -307,6 +355,7 @@ def search(stage_data: Any, config: Any) -> SearchResult:
         raise TypeError("search config must be a SearchConfig or mapping")
     rng = np.random.default_rng(int(_value(config, "seed", 42)))
     population_size = int(_value(config, "population", 200))
+    cost_mode = config.fitness_mode == "all_costs_sharpe"
     generations = int(_value(config, "generations", 20))
     max_attempts = min(config.max_attempts, population_size * 50)
     cache: dict[str, tuple[tuple[Any, ...], bool, tuple[str, ...], Node, Any, int | None]] = {}
@@ -381,10 +430,12 @@ def search(stage_data: Any, config: Any) -> SearchResult:
         all_exploratory: dict[str, Candidate] = {}
         aggregate = {"generation": generation, "attempted_trees": 0, "unique_evaluations": 0, "cache_hits": 0, "invalid_reasons": Counter(), "eligible_population": 0}
         pending = list(trees)
-        while attempts < max_attempts and (
-            len(all_valid) < population_size
-            and (all_valid or len(all_exploratory) < population_size)
-        ):
+        def needs_more():
+            if cost_mode:
+                return len(all_exploratory) < population_size
+            return len(all_valid) < population_size and (all_valid or len(all_exploratory) < population_size)
+
+        while attempts < max_attempts and needs_more():
             if not pending:
                 pending.append(_random_tree(rng, config))
             valid, exploratory, log = evaluate_pool(pending[:1], generation)
@@ -400,7 +451,7 @@ def search(stage_data: Any, config: Any) -> SearchResult:
             aggregate["invalid_reasons"].update(log["invalid_reasons"])
         aggregate["eligible_population"] = len(all_valid)
         aggregate["invalid_reasons"] = dict(sorted(aggregate["invalid_reasons"].items()))
-        if len(all_valid) < population_size and (all_valid or len(all_exploratory) < population_size):
+        if needs_more():
             raise SearchFormationError(
                 f"could not form population: unique exploratory candidates "
                 f"{len(all_exploratory)}/{population_size} after {attempts}/{max_attempts} attempts; "
@@ -410,9 +461,11 @@ def search(stage_data: Any, config: Any) -> SearchResult:
         return list(all_valid.values()), list(all_exploratory.values()), aggregate
 
     valid, exploratory, log = fill(supplied, 0)
-    current = select_population(valid, population_size)
+    current = _select_cost_population(exploratory, population_size, config) if cost_mode else select_population(valid, population_size)
     exploratory_current = select_exploratory(exploratory, population_size)
     logs.append(log)
+    if cost_mode:
+        print(f"generation 0: evaluations={evaluations}, eligible={sum(c.eligible for c in current)}/{population_size}", flush=True)
     for generation in range(1, generations):
         parents = current if current else exploratory_current
         offspring: list[Node] = []
@@ -421,17 +474,28 @@ def search(stage_data: Any, config: Any) -> SearchResult:
             parent_b = _tournament(parents, rng, config)
             offspring.append(_variation(parent_a.tree, parent_b.tree, rng, config))
         offspring_valid, offspring_exploratory, log = fill(offspring, generation)
-        merged_valid = select_population(tuple(current) + tuple(offspring_valid), population_size)
+        if cost_mode:
+            merged = {c.expression_id: c for c in (*current, *offspring_exploratory)}
+            merged_valid = tuple(_select_cost_population(merged.values(), population_size, config))
+        else:
+            merged_valid = select_population(tuple(current) + tuple(offspring_valid), population_size)
         merged_exploratory = select_exploratory(tuple(exploratory_current) + tuple(offspring_exploratory), population_size)
         current = merged_valid
+        if cost_mode and _value(config, "family_diversity", False):
+            log["family_population"] = dict(Counter(
+                "+".join(sorted(expression_families(c.tree))) for c in current))
         exploratory_current = merged_exploratory
         logs.append(log)
+        if cost_mode:
+            print(f"generation {generation}: evaluations={evaluations}, eligible={sum(c.eligible for c in current)}/{population_size}", flush=True)
+    current = tuple(c for c in current if c.eligible)
     retained_values = {
         candidate.expression_id: values_by_id[candidate.expression_id]
         for candidate in current
         if candidate.expression_id in values_by_id
     }
-    return SearchResult(tuple(current), tuple(logs), evaluations, retained_values)
+    return SearchResult(tuple(current), tuple(logs), evaluations, retained_values,
+                        dict(_value(stage_data, "fitness_diagnostics", {})))
 
 
 __all__ = [

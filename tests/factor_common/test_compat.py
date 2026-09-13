@@ -292,22 +292,6 @@ def test_legacy_module_exports_adapter():
     assert "import binance" not in text
 
 
-def test_factor_config_registers_example_with_module_path():
-    sys.path.insert(0, str(REPO_ROOT / "factor_analyse"))
-    try:
-        import factor_config
-    finally:
-        sys.path.remove(str(REPO_ROOT / "factor_analyse"))
-    config = factor_config.get_factor_config("example_momentum")
-    for key in (
-        "file_prefix", "factor_name", "factor_direction", "factor_desc",
-        "rebalance_period", "module_path",
-    ):
-        assert key in config
-    assert config["factor_name"] == "example_momentum"
-    assert (REPO_ROOT / config["module_path"]).is_file()
-
-
 def _run_cli(*args):
     return subprocess.run(
         [sys.executable, "factor_analyse/main.py", *args],
@@ -315,24 +299,26 @@ def _run_cli(*args):
     )
 
 
-def test_cli_list_shows_existing_names_and_migration_state():
+def test_cli_list_shows_factor_mining_modules():
     proc = _run_cli("--list")
     assert proc.returncode == 0, proc.stderr
-    assert "price_momentum_60d" in proc.stdout
-    assert "example_momentum" in proc.stdout
-    # Migration state is explicit in both directions.
-    migrated_line = next(
+    # Registry is gone: --list scans factor_mining/ and shows loader metadata.
+    assert "example_momentum.py" in proc.stdout
+    assert "Price_Momentum_60d.py" in proc.stdout
+    example_line = next(
         line for line in proc.stdout.splitlines() if "example_momentum" in line
     )
-    assert "migrated" in migrated_line
-    legacy_line = next(
-        line for line in proc.stdout.splitlines() if "price_momentum_60d" in line
-    )
-    assert "not migrated" in legacy_line
+    assert "1" in example_line  # factor_direction from the module SETTING
 
 
-def test_cli_unmigrated_factor_reports_status_and_exits_nonzero():
-    proc = _run_cli("price_momentum_60d")
+def test_cli_missing_factor_path_exits_nonzero():
+    proc = _run_cli("factor_analyse/factor_mining/does_not_exist.py")
+    assert proc.returncode != 0
+    assert "不存在" in proc.stderr
+
+
+def test_cli_non_contract_module_exits_nonzero():
+    proc = _run_cli("factor_analyse/factor_mining/util_factor.py")
     assert proc.returncode != 0
     output = proc.stdout + proc.stderr
-    assert "not migrated" in output
+    assert "loader" in output

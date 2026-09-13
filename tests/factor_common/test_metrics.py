@@ -155,6 +155,7 @@ def test_result_structure_nests_samples_and_scenarios():
             "rank_ic_autocorr",
             "rank_ic_half_life",
             "coverage",
+            "rebalance_aligned",
         }
 
 
@@ -389,3 +390,24 @@ def test_evaluate_metrics_autocorr_respects_missing_cross_section_date():
             assert got is None, f"lag {lag}"
         else:
             assert got == pytest.approx(expected), f"lag {lag}"
+
+
+def test_rebalance_aligned_rank_ic_uses_profile_rebalance_interval():
+    dates = pd.date_range("2024-01-01", periods=15, freq="D")
+    values = _values(dates, seed=31)
+    labels = values + _values(dates, seed=32) * 0.2
+    profile = resolve_profile(
+        "perp_1d", {"rebalance_days": 3, "split_date": "2024-01-10"}
+    )
+
+    result = evaluate_metrics(
+        values, labels, _accounting(_ledger_frame([0.0] * 15)), profile
+    )
+
+    aligned = result["samples"]["full"]["rebalance_aligned"]
+    assert [row["date"] for row in aligned["ic"]["daily"]] == [
+        "2024-01-03", "2024-01-06", "2024-01-09", "2024-01-12", "2024-01-15"
+    ]
+    assert aligned["rebalance_days"] == 3
+    assert aligned["periods_per_year"] == pytest.approx(365 / 3)
+    assert len(aligned["rank_ic_autocorr"]) == 20

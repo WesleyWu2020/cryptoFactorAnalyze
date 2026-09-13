@@ -473,6 +473,27 @@ def test_render_complete_report(tmp_path, complete_result):
         assert label in html_text
 
 
+def test_report_renders_rebalance_aligned_rank_ic_autocorrelation(tmp_path):
+    result = build_result()
+    aligned_dates = DATES[2::3]
+    result["factor_performance"]["samples"]["full"]["rebalance_aligned"] = {
+        "rebalance_days": 3,
+        "periods_per_year": 365 / 3,
+        "ic": _ic_block(aligned_dates),
+        "rank_ic_autocorr": [
+            {"lag": lag, "autocorr": 0.5 - 0.05 * lag}
+            for lag in range(1, 21)
+        ],
+    }
+
+    out = tmp_path / "report.html"
+    render_result(result, out)
+    html_text = out.read_text(encoding="utf-8")
+
+    assert "Rebalance-aligned RankIC autocorrelation" in html_text
+    assert "lag (rebalances)" in html_text
+
+
 def test_html_escaping_of_labels(tmp_path):
     evil = 'bad"><script>alert("x")</script>&amp;'
     result = build_result(factor_name=evil)

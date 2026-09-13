@@ -1,103 +1,61 @@
-# factor_analyse/Alpha101/first50/Alpha12_Factor.py
-import pandas as pd
+"""Alpha101 Alpha#12 因子（factor_common 契约版）。
+
+原始定义:
+    Alpha#12 = sign(delta(volume, 1)) * (-1 * delta(close, 1))
+
+本实现保留原脚本“币圈7×24h优化版”的实际计算逻辑（以代码为准）:
+    原脚本将 volume 替换为主动买入金额 taker_buy_quote（即 taker_buy_quote_volume）:
+    factor = sign(delta(taker_buy_quote_volume, 30)) * (-1 * delta(close, 30))
+混合策略: 主动买入增加时做价格反转，主动买入减少时做价格动量。
+参数取原脚本 __main__ 实际调用值: delta_window=30
+（rebalance_period 仅用于旧版 future_ret，已丢弃）。
+与经典公式的差异: volume -> taker_buy_quote_volume，窗口由 1 改为 30。
+
+计算只使用当日及历史数据，无未来函数。FactorManager 只调用下面的标准模块接口。
+横截面去极值与秩归一化由框架 preprocessing="mad_rank" 完成，这里输出原始因子值。
+"""
+
+from __future__ import annotations
+
 import numpy as np
-import os
-from datetime import datetime
-from tqdm import tqdm
+import pandas as pd
 
-# 路径以便导入 util_factor
-current_dir = os.path.dirname(os.path.abspath(__file__))
-factor_mining_dir = os.path.join(current_dir, '..', '..', 'factor_mining')
-import sys
-sys.path.insert(0, factor_mining_dir)
 
-from util_factor import (
-    load_historical_marketcap, build_available_tokens_by_date, load_kline_df,
-    filter_group_by_availability, group_apply_with_progress, winsorize_by_date,
-    rank_to_unit_by_date, save_factor_df, future_return, print_availability_sample,
-    print_factor_summary
-)
+TYPE = "regular"
 
-def create_alpha12_factor(delta_window=1, rebalance_period=2, availability_lookback_days=90):
-    """
-    Alpha 12 因子 (币圈7×24h优化版)
-    
-    原始定义:
-    Alpha 12 = (sign(delta(taker_buy_quote, 1)) * (-1 * delta(close, 1)))
-    
-    核心步骤:
-    1. 主动买入金额变化方向：计算主动买入金额1日变化的符号
-    2. 价格变化：计算收盘价1日变化
-    3. 混合策略：
-       - 主动买入增加时：采用反转策略（价格涨则看跌，价格跌则看涨）
-       - 主动买入减少时：采用动量策略（价格涨则看涨，价格跌则看跌）
-    
-    - 平均持有期: 2-5天
-    """
-    print(f"开始构建 Alpha 12 因子...")
-    print(f"参数: delta_window={delta_window}, rebalance_period={rebalance_period}")
+META = {
+    "factor_name": "Alpha12_Factor",
+    "author": "local",
+    "level": "daily",
+    "category": "alpha101",
+    "description": "Alpha101 #12: sign(delta(taker_buy_quote_volume,N)) * (-delta(close,N))",
+}
 
-    # 可用性池
-    historical_df = load_historical_marketcap()
-    available_tokens_by_date = build_available_tokens_by_date(
-        historical_df, lookback_days=availability_lookback_days, mode="window"
-    )
-    print("🔍 生成各日期可用token列表（避免未来函数）...")
-    print_availability_sample(available_tokens_by_date, n=3)
+SETTING = {
+    "data_needed": ["close", "taker_buy_quote_volume"],
+    "universe": "historical_top50",
+    "warmup_bars": 35,
+    "preprocessing": "mad_rank",
+    "params": {"delta_window": 30},
+    "factor_direction": 1,
+}
 
-    # K线数据
-    df = load_kline_df()
 
-    # 单symbol计算
-    def compute_one(group: pd.DataFrame, symbol: str) -> pd.DataFrame:
-        if len(group) < delta_window + rebalance_period + 2:
-            return pd.DataFrame()
-        gp = group.copy()
+def calc_factor(data_ctx: dict[str, pd.DataFrame]) -> pd.DataFrame:
+    """Return the raw daily Alpha#12 matrix (date x instrument)."""
 
-        # === Alpha 12 因子计算 ===
-        
-        # 1. 计算主动买入金额变化 (delta(taker_buy_quote, 1))
-        gp['taker_buy_delta'] = gp['taker_buy_quote'] - gp['taker_buy_quote'].shift(delta_window)
-        
-        # 2. 计算价格变化 (delta(close, 1))
-        gp['price_delta'] = gp['close'] - gp['close'].shift(delta_window)
-        
-        # 3. 计算主动买入金额变化符号 (sign(delta(taker_buy_quote, 1)))
-        gp['taker_buy_sign'] = np.sign(gp['taker_buy_delta'])
-        
-        # 4. 计算 Alpha 12 因子: (sign(delta(taker_buy_quote, 1)) * (-1 * delta(close, 1)))
-        gp['alpha12_raw'] = gp['taker_buy_sign'] * (-1 * gp['price_delta'])
-        
-        # 5. 未来收益
-        gp['future_ret'] = future_return(gp['close'], rebalance_period, method="pct")
+    delta_window = SETTING["params"]["delta_window"]
+    if isinstance(delta_window, bool) or not isinstance(delta_window, int) or delta_window < 1:
+        raise ValueError("SETTING.params.delta_window must be an integer >= 1")
 
-        # 可用性过滤
-        gp = filter_group_by_availability(gp, symbol, available_tokens_by_date)
+    close = data_ctx["close"].astype("float64")
+    taker_buy_quote = data_ctx["taker_buy_quote_volume"].astype("float64")
 
-        return gp[["date", "symbol", "alpha12_raw", "future_ret"]].dropna()
+    # 步骤1: 主动买入金额变化符号 sign(delta(taker_buy_quote, N))
+    taker_buy_sign = np.sign(taker_buy_quote - taker_buy_quote.shift(delta_window))
 
-    print("计算因子并进行可用性过滤...")
-    result_dfs = group_apply_with_progress(df, "symbol", compute_one)
-    if not result_dfs:
-        print("警告: 没有足够的数据计算因子")
-        return pd.DataFrame()
+    # 步骤2: 价格变化 delta(close, N)
+    price_delta = close - close.shift(delta_window)
 
-    factor_df = pd.concat(result_dfs, ignore_index=True)
-
-    # 去极值与按日秩归一化到[-1,1]
-    factor_df = winsorize_by_date(factor_df, col="alpha12_raw", n_std=3.0)
-    factor_df = rank_to_unit_by_date(factor_df, col="alpha12_raw", out_col="factor")
-
-    # 输出
-    factor_df = factor_df.rename(columns={"symbol": "instrument"})[["date", "instrument", "factor", "future_ret"]]
-    out_path = save_factor_df(factor_df, file_prefix=f"alpha12_taker_buy_price_mixed_delta{delta_window}d_")
-
-    print_factor_summary(factor_df, out_path)
-    return factor_df
-
-if __name__ == "__main__":
-    # 标准参数
-    create_alpha12_factor(delta_window=30, rebalance_period=10)
-    
-    # 可选：更短的窗口，适应加密货币市场的更快节奏
-    # create_alpha12_factor(delta_window=1, rebalance_period=1)
+    # 步骤3: 复合信号（反转/动量混合）
+    return taker_buy_sign * (-1.0 * price_delta)

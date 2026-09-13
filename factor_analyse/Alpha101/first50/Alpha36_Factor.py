@@ -1,233 +1,159 @@
-# factor_analyse/Alpha101/Alpha36_Factor.py
-import pandas as pd
+"""Alpha101 Alpha#36 因子（factor_common 契约版）。
+
+原始定义:
+    Alpha#36 = ((((2.21 * rank(correlation((close - open), delay(volume, 1), 15)))
+        + (0.7 * rank((open - close))))
+        + (0.73 * rank(Ts_Rank(delay((-1 * returns), 6), 5))))
+        + rank(abs(correlation(vwap, adv20, 6))))
+        + (0.6 * rank((((sum(close, 200) / 200) - open) * (close - open))))
+
+本实现保留原脚本“币圈7×24h优化版”的实际计算逻辑（与经典公式差异较大，
+以代码实现为准；参数取旧脚本 __main__ 策略1 实际调用值:
+corr_window=10, ts_rank_window=5, delay_lag=5, vwap_adv_corr=5, long_ma_window=50）:
+
+    1. 自适应价格基准: 按 20 日波动率(=std/mean)在 20/60/120 日均线间选择
+       (>0.1 高波动用短期 20 日基准, <0.05 低波动用长期 120 日基准, 否则 60 日;
+       NaN 时用 60 日基准)，对 open/close/vwap 做归一化。
+    2. 自适应成交量基准: 同一波动率规则在 10/30/60 日均量间选择，归一化 volume。
+    3. vwap 按旧脚本显式定义为 (high + low + close) / 3（不用 quote_volume/volume）。
+    4. 收益率用对数形式: log_returns = log(norm_close / delay(norm_close,1)),
+       log_intraday_ret = log(norm_close / norm_open)。
+    5. 五个组件（各自做横截面 pct rank 后按权重 2.21/0.7/0.73/1.0/0.6 相加）:
+       - corr(log_intraday_ret, delay(normalized_volume, 1), corr_window)
+       - -log_intraday_ret（日内反转）
+       - Ts_Rank(delay(-log_returns, delay_lag), ts_rank_window)
+       - abs(corr(normalized_vwap, adv20(normalized_volume), vwap_adv_corr))
+       - (mean(norm_close, long_ma_window) - norm_open) * (norm_close - norm_open)
+    价格/成交量基准均线均用 min_periods=1（与旧脚本一致），组件窗口用完整窗口。
+
+计算只使用当日及历史数据，无未来函数。FactorManager 只调用下面的标准模块接口。
+横截面去极值与秩归一化由框架 preprocessing="mad_rank" 完成。
+"""
+
+from __future__ import annotations
+
 import numpy as np
-import os
-from datetime import datetime, timedelta
-from tqdm import tqdm
+import pandas as pd
 
-# 获取当前脚本所在目录
-current_dir = os.path.dirname(os.path.abspath(__file__))
-# 添加 factor_mining 目录到 Python 路径
-factor_mining_dir = os.path.join(current_dir, '..', 'factor_mining')
-import sys
-sys.path.insert(0, factor_mining_dir)
 
-from util_factor import (
-    load_historical_marketcap, build_available_tokens_by_date, load_kline_df,
-    filter_group_by_availability, group_apply_with_progress, winsorize_by_date,
-    rank_to_unit_by_date, save_factor_df, future_return, print_availability_sample
-)
+TYPE = "regular"
 
-def create_alpha36_factor(corr_window=15, ts_rank_window=5, delay_lag=6, vwap_adv_corr=6, 
-                         long_ma_window=200, rebalance_period=10, availability_lookback_days=90):
-    """
-    Alpha 36 因子 (币圈7×24h优化版)
-    严格避免未来函数，只使用上一期已出现的token
-    
-    原始定义:
-    (((((2.21 * rank(correlation((close - open), delay(volume, 1), 15))) + 
-        (0.7 * rank((open - close)))) + 
-        (0.73 * rank(Ts_Rank(delay((-1 * returns), 6), 5)))) + 
-        rank(abs(correlation(vwap, adv20, 6)))) + 
-        (0.6 * rank((((sum(close, 200) / 200) - open) * (close - open))))
-    
-    权重分配: 2.21, 0.7, 0.73, 1.0, 0.6
-    
-    币圈7×24h特殊设计:
-    1. 相对价格归一化：适应币圈巨大的价格差异
-    2. 成交量标准化：处理不同币种的成交量量级差异
-    3. 多维度信号：结合日内、短期、中期和长期信号
-    4. 🔥 关键：结合历史市值排名，确保只使用上一期已出现的token
-    
-    该因子适用于多因素选股，平均持有期约5-15天
-    """
-    print(f"开始构建 Alpha 36 因子 (币圈7×24h优化版)...")
-    print(f"参数: corr_window={corr_window}, ts_rank_window={ts_rank_window}, delay_lag={delay_lag}")
-    print(f"vwap_adv_corr={vwap_adv_corr}, long_ma_window={long_ma_window}, rebalance_period={rebalance_period}")
+META = {
+    "factor_name": "Alpha36_Factor",
+    "author": "local",
+    "level": "daily",
+    "category": "alpha101",
+    "description": "Alpha101 #36 (7x24 优化版): 自适应归一化多组件加权 rank 复合因子",
+}
 
-    # 可用性池
-    historical_df = load_historical_marketcap()
-    available_tokens_by_date = build_available_tokens_by_date(
-        historical_df, lookback_days=availability_lookback_days, mode="window"
+SETTING = {
+    "data_needed": ["open", "high", "low", "close", "volume"],
+    "universe": "historical_top50",
+    "warmup_bars": 60,
+    "preprocessing": "mad_rank",
+    "params": {
+        "corr_window": 10,
+        "ts_rank_window": 5,
+        "delay_lag": 5,
+        "vwap_adv_corr": 5,
+        "long_ma_window": 50,
+    },
+    "factor_direction": 1,
+}
+
+_EPSILON = 1e-8
+# 自适应基准内部参数（旧脚本硬编码）
+_VOL_WINDOW = 20
+_VOL_HIGH = 0.1
+_VOL_LOW = 0.05
+
+
+def _ts_rank(x: pd.DataFrame, window: int) -> pd.DataFrame:
+    """Rolling time-series percentile rank of the current value within the window."""
+    return x.rolling(window=window, min_periods=window).apply(
+        lambda arr: pd.Series(arr).rank(pct=True).iloc[-1], raw=False
     )
-    print("🔍 生成各日期可用token列表（避免未来函数）...")
-    print_availability_sample(available_tokens_by_date, n=3)
 
-    # K线数据
-    df = load_kline_df()
 
-    # 单symbol计算
-    def compute_one(group: pd.DataFrame, symbol: str) -> pd.DataFrame:
-        if len(group) < max(corr_window, ts_rank_window, delay_lag, vwap_adv_corr, long_ma_window) + rebalance_period + 2:
-            return pd.DataFrame()
-        gp = group.copy()
+def _adaptive_base(
+    base_short: pd.DataFrame,
+    base_medium: pd.DataFrame,
+    base_long: pd.DataFrame,
+    volatility: pd.DataFrame,
+) -> pd.DataFrame:
+    """Select base by volatility: high vol -> short, low vol -> long, else medium."""
+    base = base_medium.mask(volatility > _VOL_HIGH, base_short)
+    return base.mask(volatility < _VOL_LOW, base_long)
 
-        # === 增强的7×24h币圈价格归一化处理 ===
-        
-        # 1. 多层次价格归一化（适应币圈巨大价格差异）
-        # 短期基准：20日移动平均
-        gp['price_base_short'] = gp['close'].rolling(window=20, min_periods=1).mean()
-        # 中期基准：60日移动平均
-        gp['price_base_medium'] = gp['close'].rolling(window=60, min_periods=1).mean()
-        # 长期基准：120日移动平均
-        gp['price_base_long'] = gp['close'].rolling(window=120, min_periods=1).mean()
-        
-        # 2. 自适应价格基准选择
-        # 根据价格波动性选择最合适的基准
-        gp['price_volatility'] = gp['close'].rolling(window=20).std() / gp['close'].rolling(window=20).mean()
-        
-        # 高波动币种使用短期基准，低波动币种使用长期基准
-        def select_price_base(row):
-            if pd.isna(row['price_volatility']):
-                return row['price_base_medium']
-            elif row['price_volatility'] > 0.1:  # 高波动
-                return row['price_base_short']
-            elif row['price_volatility'] < 0.05:  # 低波动
-                return row['price_base_long']
-            else:  # 中等波动
-                return row['price_base_medium']
-        
-        gp['price_base'] = gp.apply(select_price_base, axis=1)
-        
-        # 3. 增强的价格归一化
-        gp['normalized_open'] = gp['open'] / (gp['price_base'] + 1e-8)
-        gp['normalized_close'] = gp['close'] / (gp['price_base'] + 1e-8)
-        gp['vwap'] = (gp['high'] + gp['low'] + gp['close']) / 3
-        gp['normalized_vwap'] = gp['vwap'] / (gp['price_base'] + 1e-8)
-        
-        # 4. 成交量标准化增强（处理不同币种成交量量级差异）
-        # 使用相对成交量而非绝对成交量
-        gp['volume_ma_short'] = gp['volume'].rolling(window=10, min_periods=1).mean()
-        gp['volume_ma_medium'] = gp['volume'].rolling(window=30, min_periods=1).mean()
-        gp['volume_ma_long'] = gp['volume'].rolling(window=60, min_periods=1).mean()
-        
-        # 自适应成交量基准
-        def select_volume_base(row):
-            if pd.isna(row['price_volatility']):
-                return row['volume_ma_medium']
-            elif row['price_volatility'] > 0.1:  # 高波动用短期
-                return row['volume_ma_short']
-            elif row['price_volatility'] < 0.05:  # 低波动用长期
-                return row['volume_ma_long']
-            else:  # 中等波动
-                return row['volume_ma_medium']
-        
-        gp['volume_base'] = gp.apply(select_volume_base, axis=1)
-        gp['normalized_volume'] = gp['volume'] / (gp['volume_base'] + 1e-8)
-        
-        # 5. 价格变化率标准化（避免绝对价格差异影响）
-        # 使用对数收益率而非绝对价格差
-        gp['log_returns'] = np.log(gp['normalized_close'] / gp['normalized_close'].shift(1))
-        gp['log_intraday_ret'] = np.log(gp['normalized_close'] / gp['normalized_open'])
-        
-        # 6. 计算因子组件（使用标准化后的数据）
-        
-        # 组件1: 日内模式与交易量关系 (权重: 2.21)
-        # 使用对数收益率替代绝对价格差
-        gp['intraday_ret'] = gp['log_intraday_ret']
-        gp['volume_delay'] = gp['normalized_volume'].shift(1)
-        gp['corr_intraday_volume'] = gp['intraday_ret'].rolling(window=corr_window).corr(gp['volume_delay'])
-        
-        # 组件2: 日内反转 (权重: 0.7)
-        # 使用对数收益率
-        gp['intraday_reversal'] = -gp['log_intraday_ret']  # 反转信号
-        
-        # 组件3: 历史收益影响 (权重: 0.73)
-        # 使用对数收益率
-        gp['returns'] = gp['log_returns']
-        gp['neg_returns_delay'] = (-1 * gp['returns']).shift(delay_lag)
-        
-        # 计算Ts_Rank (时序排名)
-        def ts_rank(series, window):
-            if len(series) < window:
-                return np.nan
-            recent_data = series.iloc[-window:]
-            rank_pct = recent_data.rank(pct=True).iloc[-1]
-            return rank_pct
-        
-        gp['ts_rank_neg_returns'] = gp['neg_returns_delay'].rolling(window=ts_rank_window).apply(
-            lambda x: ts_rank(x, ts_rank_window), raw=False
-        )
-        
-        # 组件4: 流动性分析 (权重: 1.0)
-        gp['adv20'] = gp['normalized_volume'].rolling(window=20).mean()
-        gp['corr_vwap_adv20'] = gp['normalized_vwap'].rolling(window=vwap_adv_corr).corr(gp['adv20'])
-        gp['abs_corr_vwap_adv20'] = np.abs(gp['corr_vwap_adv20'])
-        
-        # 组件5: 长期趋势与日内结合 (权重: 0.6)
-        # 使用相对价格变化
-        gp['long_ma'] = gp['normalized_close'].rolling(window=long_ma_window).mean()
-        gp['trend_intraday'] = (gp['long_ma'] - gp['normalized_open']) * (gp['normalized_close'] - gp['normalized_open'])
-        
-        # 未来收益
-        gp['future_ret'] = future_return(gp['close'], rebalance_period, method="log")
 
-        # 可用性过滤
-        gp = filter_group_by_availability(gp, symbol, available_tokens_by_date)
+def calc_factor(data_ctx: dict[str, pd.DataFrame]) -> pd.DataFrame:
+    """Return the raw daily Alpha#36 matrix (date x instrument)."""
 
-        return gp[['date', 'symbol', 'corr_intraday_volume', 'intraday_reversal', 
-                  'ts_rank_neg_returns', 'abs_corr_vwap_adv20', 'trend_intraday', 'future_ret']].dropna()
+    corr_window = SETTING["params"]["corr_window"]
+    ts_rank_window = SETTING["params"]["ts_rank_window"]
+    delay_lag = SETTING["params"]["delay_lag"]
+    vwap_adv_corr = SETTING["params"]["vwap_adv_corr"]
+    long_ma_window = SETTING["params"]["long_ma_window"]
 
-    print("计算 Alpha 36 因子基础数据（考虑token可用性）...")
-    result_dfs = group_apply_with_progress(df, 'symbol', compute_one)
-    if not result_dfs:
-        print("警告: 没有足够的数据计算因子")
-        return pd.DataFrame()
+    open_ = data_ctx["open"].astype("float64")
+    high = data_ctx["high"].astype("float64")
+    low = data_ctx["low"].astype("float64")
+    close = data_ctx["close"].astype("float64")
+    volume = data_ctx["volume"].astype("float64")
 
-    factor_df = pd.concat(result_dfs, ignore_index=True)
+    # 1. 自适应价格基准（20/60/120 日均线，按 20 日相对波动率选择）
+    price_base_short = close.rolling(window=20, min_periods=1).mean()
+    price_base_medium = close.rolling(window=60, min_periods=1).mean()
+    price_base_long = close.rolling(window=120, min_periods=1).mean()
+    price_volatility = close.rolling(window=_VOL_WINDOW).std() / close.rolling(window=_VOL_WINDOW).mean()
+    price_base = _adaptive_base(price_base_short, price_base_medium, price_base_long, price_volatility)
 
-    print("计算横截面排名和因子值...")
-    
-    # 按日期计算Alpha 36因子
-    def calculate_alpha36_by_date(df_date):
-        df_date = df_date.copy()
-        
-        # 对各个组件进行排名
-        df_date['corr_intraday_volume_rank'] = df_date['corr_intraday_volume'].rank(pct=True)
-        df_date['intraday_reversal_rank'] = df_date['intraday_reversal'].rank(pct=True)
-        df_date['ts_rank_neg_returns_rank'] = df_date['ts_rank_neg_returns'].rank(pct=True)
-        df_date['abs_corr_vwap_adv20_rank'] = df_date['abs_corr_vwap_adv20'].rank(pct=True)
-        df_date['trend_intraday_rank'] = df_date['trend_intraday'].rank(pct=True)
-        
-        # 按权重组合因子
-        df_date['alpha36_raw'] = (
-            2.21 * df_date['corr_intraday_volume_rank'] +
-            0.7 * df_date['intraday_reversal_rank'] +
-            0.73 * df_date['ts_rank_neg_returns_rank'] +
-            1.0 * df_date['abs_corr_vwap_adv20_rank'] +
-            0.6 * df_date['trend_intraday_rank']
-        )
-        
-        return df_date
+    normalized_open = open_ / (price_base + _EPSILON)
+    normalized_close = close / (price_base + _EPSILON)
+    # 旧脚本显式定义 vwap = (high + low + close) / 3
+    vwap = (high + low + close) / 3.0
+    normalized_vwap = vwap / (price_base + _EPSILON)
 
-    factor_df = factor_df.groupby('date', group_keys=False).apply(calculate_alpha36_by_date)
-    factor_df = factor_df.dropna(subset=['alpha36_raw'])
+    # 2. 自适应成交量基准（10/30/60 日均量，同一波动率规则）
+    volume_ma_short = volume.rolling(window=10, min_periods=1).mean()
+    volume_ma_medium = volume.rolling(window=30, min_periods=1).mean()
+    volume_ma_long = volume.rolling(window=60, min_periods=1).mean()
+    volume_base = _adaptive_base(volume_ma_short, volume_ma_medium, volume_ma_long, price_volatility)
+    normalized_volume = volume / (volume_base + _EPSILON)
 
-    # 去极值与归一化
-    factor_df = winsorize_by_date(factor_df, col='alpha36_raw', n_std=3.0)
-    factor_df = rank_to_unit_by_date(factor_df, col='alpha36_raw', out_col='factor')
+    # 3. 对数收益率
+    log_returns = np.log(normalized_close / normalized_close.shift(1))
+    log_intraday_ret = np.log(normalized_close / normalized_open)
 
-    # 输出
-    factor_df = factor_df.rename(columns={'symbol': 'instrument'})[['date', 'instrument', 'factor', 'future_ret']]
-    out_path = save_factor_df(factor_df, file_prefix=f"alpha36_multi_factor_")
+    # 4. 五个组件
+    # 组件1: corr(日内对数收益, delay(归一化成交量, 1), corr_window)，权重 2.21
+    volume_delay = normalized_volume.shift(1)
+    corr_intraday_volume = log_intraday_ret.rolling(
+        window=corr_window, min_periods=corr_window
+    ).corr(volume_delay)
 
-    print(f"✅ 无未来函数的因子数据已保存至: {out_path}")
-    print(f"总计生成 {len(factor_df)} 条因子记录")
-    print("\n因子统计信息:")
-    print(factor_df['factor'].describe())
-    return factor_df
+    # 组件2: 日内反转 -log_intraday_ret，权重 0.7
+    intraday_reversal = -log_intraday_ret
 
-if __name__ == "__main__":
-    # === Alpha 36 因子测试 (币圈7×24h优化版) ===
-    
-    # 策略1: 标准参数 (推荐)
-    create_alpha36_factor(corr_window=10, ts_rank_window=5, delay_lag=5, 
-                         vwap_adv_corr=5, long_ma_window=50, rebalance_period=3)
-    
-    # 策略2: 缩短窗口 (适应币圈高频特性)
-    # create_alpha36_factor(corr_window=10, ts_rank_window=3, delay_lag=3, 
-    #                      vwap_adv_corr=5, long_ma_window=100, rebalance_period=5)
-    
-    # 策略3: 极短窗口 (适应7×24h快速变化)
-    # create_alpha36_factor(corr_window=7, ts_rank_window=3, delay_lag=2, 
-    #                      vwap_adv_corr=3, long_ma_window=50, rebalance_period=3)
+    # 组件3: Ts_Rank(delay(-log_returns, delay_lag), ts_rank_window)，权重 0.73
+    neg_returns_delay = (-log_returns).shift(delay_lag)
+    ts_rank_neg_returns = _ts_rank(neg_returns_delay, ts_rank_window)
+
+    # 组件4: abs(corr(normalized_vwap, adv20(normalized_volume), vwap_adv_corr))，权重 1.0
+    adv20 = normalized_volume.rolling(window=20, min_periods=20).mean()
+    abs_corr_vwap_adv20 = normalized_vwap.rolling(
+        window=vwap_adv_corr, min_periods=vwap_adv_corr
+    ).corr(adv20).abs()
+
+    # 组件5: (mean(norm_close, long_ma) - norm_open) * (norm_close - norm_open)，权重 0.6
+    long_ma = normalized_close.rolling(window=long_ma_window, min_periods=long_ma_window).mean()
+    trend_intraday = (long_ma - normalized_open) * (normalized_close - normalized_open)
+
+    # 5. 公式内部横截面 rank 后按权重组合
+    return (
+        2.21 * corr_intraday_volume.rank(axis=1, pct=True)
+        + 0.7 * intraday_reversal.rank(axis=1, pct=True)
+        + 0.73 * ts_rank_neg_returns.rank(axis=1, pct=True)
+        + 1.0 * abs_corr_vwap_adv20.rank(axis=1, pct=True)
+        + 0.6 * trend_intraday.rank(axis=1, pct=True)
+    )

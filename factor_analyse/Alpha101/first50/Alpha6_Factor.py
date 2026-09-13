@@ -1,132 +1,72 @@
-# factor_analyse/Alpha101/first50/Alpha6_Factor.py
+"""Alpha101 Alpha#6 因子（factor_common 契约版，币圈7×24h优化版）。
+
+原始定义:
+    Alpha#6 = -1 * correlation(open, volume, 10)
+
+本实现保留原脚本“币圈7×24h优化版”的实际计算逻辑（以代码为准，与经典公式不同）:
+    factor = -1 * correlation(high - close, taker_buy_quote_volume, correlation_window)
+即最高价与收盘价之差（上影线压力代理）与主动买入金额的时序相关性，取反捕捉
+量价背离的反转机会。窗口内任一序列近似常数（std <= 1e-10）时相关性定义为 0
+（与原脚本守卫一致），数据不足窗口期为 NaN。
+
+参数取原脚本 ``__main__`` 实际调用值: correlation_window=20
+（rebalance_period 仅用于旧版 future_ret，已丢弃；可用性池过滤由框架
+universe="historical_top50" 承担）。
+
+计算只使用当日及历史数据，无未来函数。FactorManager 只调用下面的标准模块接口。
+横截面去极值与秩归一化由框架 preprocessing="mad_rank" 完成，这里输出原始因子值。
+"""
+
+from __future__ import annotations
+
 import pandas as pd
-import numpy as np
-import os
-from datetime import datetime
-from tqdm import tqdm
 
-# 路径以便导入 util_factor
-current_dir = os.path.dirname(os.path.abspath(__file__))
-factor_mining_dir = os.path.join(current_dir, '..', '..', 'factor_mining')
-import sys
-sys.path.insert(0, factor_mining_dir)
 
-from util_factor import (
-    load_historical_marketcap, build_available_tokens_by_date, load_kline_df,
-    filter_group_by_availability, group_apply_with_progress, winsorize_by_date,
-    rank_to_unit_by_date, save_factor_df, future_return, print_availability_sample,
-    print_factor_summary
-)
+TYPE = "regular"
 
-def create_alpha6_factor(correlation_window=10, rebalance_period=3, availability_lookback_days=90):
-    """
-    Alpha 6 因子 (币圈7×24h优化版)
-    
-    原始定义:
-    Alpha 6 = (-1 * correlation(high, taker_buy_quote, 10))
-    
-    思路:
-    1. 价量关系：分析最高价与主动买入金额的相关性
-    2. 信号反转：负相关表示价量背离，可能存在反转机会
-    3. 主动买入：使用taker_buy_quote反映真实的买入压力
-    
-    - 平均持有期: 3-7天
-    """
-    print(f"开始构建 Alpha 6 因子...")
-    print(f"参数: correlation_window={correlation_window}, rebalance_period={rebalance_period}")
+META = {
+    "factor_name": "Alpha6_Factor",
+    "author": "local",
+    "level": "daily",
+    "category": "alpha101",
+    "description": "Alpha101 #6 (crypto): -1 * correlation(high - close, taker_buy_quote_volume, 20)",
+}
 
-    # 可用性池
-    historical_df = load_historical_marketcap()
-    available_tokens_by_date = build_available_tokens_by_date(
-        historical_df, lookback_days=availability_lookback_days, mode="window"
-    )
-    print("🔍 生成各日期可用token列表（避免未来函数）...")
-    print_availability_sample(available_tokens_by_date, n=3)
+SETTING = {
+    "data_needed": ["high", "close", "taker_buy_quote_volume"],
+    "universe": "historical_top50",
+    "warmup_bars": 25,
+    "preprocessing": "mad_rank",
+    "params": {"correlation_window": 20},
+    "factor_direction": 1,
+}
 
-    # K线数据
-    df = load_kline_df()
+_CONST_EPS = 1e-10
 
-    # 单symbol计算
-    def compute_one(group: pd.DataFrame, symbol: str) -> pd.DataFrame:
-        if len(group) < correlation_window + rebalance_period + 2:
-            return pd.DataFrame()
-        gp = group.copy()
 
-        # === 7×24h币圈特殊处理 ===
-        
-        # 1. 计算因子组件
-        # 计算 (high - close) 与 taker_buy_quote 的相关性
-        gp['high_close_diff'] = gp['high'] - gp['close']  # 最高价与收盘价的差异
-        gp['taker_buy_quote'] = gp['taker_buy_quote']
-        
-        # 2. 计算滚动相关性
-        def rolling_correlation(x, y, window):
-            """计算滚动相关性"""
-            if len(x) < window:
-                return pd.Series([np.nan] * len(x), index=x.index)
-            
-            corr_values = []
-            for i in range(len(x)):
-                if i < window - 1:
-                    corr_values.append(np.nan)
-                else:
-                    # 取过去window天的数据
-                    x_window = x.iloc[i-window+1:i+1]
-                    y_window = y.iloc[i-window+1:i+1]
-                    
-                    # 计算相关系数
-                    if len(x_window) == window and len(y_window) == window:
-                        # 检查数据是否有变化（避免常数列）
-                        if x_window.std() > 1e-10 and y_window.std() > 1e-10:
-                            corr = x_window.corr(y_window)
-                            corr_values.append(corr if not np.isnan(corr) else 0)
-                        else:
-                            corr_values.append(0)  # 如果数据无变化，相关性为0
-                    else:
-                        corr_values.append(np.nan)
-            
-            return pd.Series(corr_values, index=x.index)
-        
-        # 计算过去correlation_window天的相关性
-        correlation = rolling_correlation(
-            gp['high_close_diff'],  # (high - close)
-            gp['taker_buy_quote'], 
-            correlation_window
-        )
-        
-        # 3. 计算Alpha 6因子值: (-1 * correlation)
-        gp['alpha6_raw'] = -1 * correlation
-        
-        # 4. 未来收益
-        gp['future_ret'] = future_return(gp['close'], rebalance_period, method="pct")
+def calc_factor(data_ctx: dict[str, pd.DataFrame]) -> pd.DataFrame:
+    """Return the raw daily Alpha#6 matrix (date x instrument)."""
 
-        # 可用性过滤
-        gp = filter_group_by_availability(gp, symbol, available_tokens_by_date)
+    window = SETTING["params"]["correlation_window"]
+    if isinstance(window, bool) or not isinstance(window, int) or window < 2:
+        raise ValueError("SETTING.params.correlation_window must be an integer >= 2")
 
-        return gp[["date", "symbol", "alpha6_raw", "future_ret"]].dropna()
+    high = data_ctx["high"].astype("float64")
+    close = data_ctx["close"].astype("float64")
+    taker_buy_quote = data_ctx["taker_buy_quote_volume"].astype("float64")
 
-    print("计算因子并进行可用性过滤...")
-    result_dfs = group_apply_with_progress(df, "symbol", compute_one)
-    if not result_dfs:
-        print("警告: 没有足够的数据计算因子")
-        return pd.DataFrame()
+    # 上影线压力代理: high - close（原脚本以代码实现为准，替代经典公式 rank(open)）
+    high_close_diff = high - close
 
-    factor_df = pd.concat(result_dfs, ignore_index=True)
+    rolling = high_close_diff.rolling(window=window, min_periods=window)
+    correlation = rolling.corr(taker_buy_quote)
 
-    # 去极值与按日秩归一化到[-1,1]
-    factor_df = winsorize_by_date(factor_df, col="alpha6_raw", n_std=3.0)
-    factor_df = rank_to_unit_by_date(factor_df, col="alpha6_raw", out_col="factor")
+    # 常数窗口守卫: 任一序列窗口内 std <= 1e-10 时相关性定义为 0（与原脚本一致）；
+    # 数据不足的窗口期保持 NaN
+    x_std = high_close_diff.rolling(window=window, min_periods=window).std()
+    y_std = taker_buy_quote.rolling(window=window, min_periods=window).std()
+    both_vary = (x_std > _CONST_EPS) & (y_std > _CONST_EPS)
+    valid_window = x_std.notna() & y_std.notna()
+    correlation = correlation.where(both_vary, 0.0).where(valid_window)
 
-    # 输出
-    factor_df = factor_df.rename(columns={"symbol": "instrument"})[["date", "instrument", "factor", "future_ret"]]
-    out_path = save_factor_df(factor_df, file_prefix=f"alpha6_high_close_taker_buy_corr_{correlation_window}d_")
-
-    print_factor_summary(factor_df, out_path)
-    return factor_df
-
-if __name__ == "__main__":
-    # 标准参数
-    create_alpha6_factor(correlation_window=20, rebalance_period=5)
-    
-    # 可选：更短的窗口，适应加密货币市场的更快节奏
-    # create_alpha6_factor(correlation_window=5, rebalance_period=2)
+    return -1.0 * correlation

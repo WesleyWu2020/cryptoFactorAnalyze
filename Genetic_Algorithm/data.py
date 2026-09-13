@@ -8,7 +8,7 @@ import os
 import platform
 import tempfile
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -42,6 +42,10 @@ class StageData:
     opens: pd.DataFrame
     fingerprint: str
     audit: dict[str, Any]
+    funding_events: pd.DataFrame | None = None
+    accounting_quality: pd.DataFrame | None = None
+    fitness_diagnostics: dict[str, Any] = field(default_factory=dict)
+    reference_evidence: dict = field(default_factory=dict, compare=False, repr=False)
 
 
 def _day(value: Any) -> pd.Timestamp:
@@ -177,6 +181,8 @@ def load_stage(
     stage: Stage,
     warmup_days: int,
     fields: Iterable[str],
+    *,
+    include_accounting: bool = False,
 ) -> StageData:
     """Load one point-in-time stage and its required feature history.
 
@@ -289,6 +295,18 @@ def load_stage(
             "operator_version": _OPERATOR_VERSION,
         },
     }
+    funding_events = None
+    accounting_quality = None
+    if include_accounting:
+        funding_events = provider.get_funding(start=start, end=end, symbols=list(columns))
+        accounting_quality = provider.get_quality(
+            start=start - pd.Timedelta(days=1), end=end, symbols=list(columns),
+        )
+        digest = hashlib.sha256(content_fingerprint.encode())
+        for frame in (funding_events, accounting_quality):
+            digest.update(frame.to_json(orient="split", date_format="iso", double_precision=15).encode())
+        audit["accounting_included"] = True
+        audit["accounting_fingerprint"] = digest.hexdigest()
     return StageData(
         stage=stage,
         features=features,
@@ -297,6 +315,8 @@ def load_stage(
         opens=opens,
         fingerprint=content_fingerprint,
         audit=audit,
+        funding_events=funding_events,
+        accounting_quality=accounting_quality,
     )
 
 

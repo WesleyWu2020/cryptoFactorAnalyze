@@ -8,12 +8,17 @@ a temporary kernel registered for the current interpreter, and writes
 ``acceptance.json`` under ``--output-dir`` together with every generated run
 artifact and report.
 
-A correctly diagnosed incomplete real-data evaluation is recorded as
-``real_data_status="incomplete"`` with ``verified_complete_net_performance``
-false — it is not a contract failure and is never reported as a complete
-performance result. Contract failures (H5 mutation, reload mismatch, failed
-synthetic accounting, cutoff drift beyond 1e-12, static-scan findings,
-notebook errors, unexpected statuses) exit nonzero.
+On real data, ``status="complete"`` is recorded with
+``verified_complete_net_performance=True`` when every funding-coverage day is
+accepted (the production store currently derives its settlement schedule via
+``build_funding_schedule`` — data-derived, weaker than an exchange-published
+schedule; see docs/factor_common.md). A correctly diagnosed incomplete
+evaluation is recorded as ``real_data_status="incomplete"`` with
+``verified_complete_net_performance`` false — it is not a contract failure and
+is never reported as a complete performance result. Contract failures (H5
+mutation, reload mismatch, failed synthetic accounting, cutoff drift beyond
+1e-12, static-scan findings, notebook errors, unexpected statuses) exit
+nonzero.
 """
 
 from __future__ import annotations

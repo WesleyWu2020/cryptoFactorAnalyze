@@ -68,6 +68,41 @@ def test_normalize_table_requires_columns_and_sorts_by_primary_key():
         normalize_table("cmc100_daily", frame.drop(columns=["index_value"]))
 
 
+def test_normalize_table_forces_hdf_date_columns_to_nanoseconds():
+    frame = pd.DataFrame(
+        {
+            "decision_date": pd.Series(["2024-03-01"], dtype="datetime64[s]"),
+            "effective_date": pd.Series(["2024-03-02"], dtype="datetime64[us]"),
+            "effective_end_date": pd.Series(["2024-04-01"], dtype="datetime64[ns]"),
+            "cmc_id": [1],
+            "cmc_symbol": ["AR"],
+            "binance_symbol": ["ARUSDT"],
+            "market_cap_rank": [50],
+            "cmc_weight": [0.01],
+        }
+    )
+
+    normalized = normalize_table("universe_monthly", frame)
+
+    for column in ("decision_date", "effective_date", "effective_end_date"):
+        assert normalized[column].dtype == "datetime64[ns]"
+
+
+def test_normalize_table_forces_hdf_timestamp_columns_to_utc_nanoseconds():
+    frame = _cmc_row()
+    frame["source_update_time"] = frame["source_update_time"].astype(
+        "datetime64[s, UTC]"
+    )
+    frame["fetched_at_utc"] = frame["fetched_at_utc"].astype(
+        "datetime64[us, UTC]"
+    )
+
+    normalized = normalize_table("cmc100_daily", frame)
+
+    assert str(normalized["source_update_time"].dtype) == "datetime64[ns, UTC]"
+    assert str(normalized["fetched_at_utc"].dtype) == "datetime64[ns, UTC]"
+
+
 def test_normalize_table_rejects_null_and_conflicting_duplicate_keys():
     null_key = _cmc_row().assign(date=pd.NaT)
     with pytest.raises(ValueError, match="null primary-key"):

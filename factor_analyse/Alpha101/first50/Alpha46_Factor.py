@@ -1,125 +1,93 @@
-# factor_analyse/Alpha101/Alpha46_Factor.py
+"""Alpha101 Alpha#46 因子（factor_common 契约版）。
+
+原始定义:
+    Alpha#46 = ((0.25 < (((delay(close, 20) - delay(close, 10)) / 10)
+                - ((delay(close, 10) - close) / 10))) ? (-1 * 1)
+                : (((((delay(close, 20) - delay(close, 10)) / 10)
+                - ((delay(close, 10) - close) / 10)) < 0) ? 1
+                : ((-1 * 1) * (close - delay(close, 1)))))
+
+本实现保留原脚本“币圈7×24h优化版”的实际计算逻辑:
+    price_base = mean(close, 20)（min_periods=1，滚动归一化基准）
+    norm_close = close / price_base
+    far_change_rate    = (delay(norm_close, 20) - delay(norm_close, 10)) / 10
+    recent_change_rate = (delay(norm_close, 10) - norm_close) / 10
+    trend_change = far_change_rate - recent_change_rate
+    factor = -1                if trend_change > 0.25   （加速下跌）
+             1                 if trend_change < 0      （加速上涨）
+             -delta(norm_close, 1)  otherwise             （昨日归一化收益取负）
+参数取原脚本 __main__ 实际调用值 long_delay=20, mid_delay=10；旧版
+rebalance_period 仅用于 future_ret，不属于因子值计算，已丢弃。
+
+计算只使用当日及历史数据，无未来函数。FactorManager 只调用下面的标准模块接口。
+横截面去极值与秩归一化由框架 preprocessing="mad_rank" 完成，这里输出原始因子值。
+"""
+
+from __future__ import annotations
+
 import pandas as pd
-import numpy as np
-import os
-from datetime import datetime
-from tqdm import tqdm
 
-# 路径以便导入 util_factor
-current_dir = os.path.dirname(os.path.abspath(__file__))
-factor_mining_dir = os.path.join(current_dir, '..', 'factor_mining')
-import sys
-sys.path.insert(0, factor_mining_dir)
 
-from util_factor import (
-    load_historical_marketcap, build_available_tokens_by_date, load_kline_df,
-    filter_group_by_availability, group_apply_with_progress, winsorize_by_date,
-    rank_to_unit_by_date, save_factor_df, future_return, print_availability_sample,
-    print_factor_summary
-)
+TYPE = "regular"
 
-def create_alpha46_factor(long_delay=20, mid_delay=10, rebalance_period=7, availability_lookback_days=90):
-    """
-    Alpha 46 因子 (币圈7×24h优化版)
-    
-    原始定义:
-    ((0.25 < (((delay(close, 20) - delay(close, 10)) / 10) - ((delay(close, 10) - close) / 10))) ? 
-      (-1 * 1) : (((((delay(close, 20) - delay(close, 10)) / 10) - ((delay(close, 10) - close) / 10)) < 0) ? 
-      1 : ((-1 * 1) * (close - delay(close, 1)))))
-    
-    思路:
-    1. 计算两个时间段的日均价格变化率
-       - 远期变化率: (20天前到10天前的价格变化)/10天
-       - 近期变化率: (10天前到现在的价格变化)/10天
-    2. 计算趋势变化 = 远期变化率 - 近期变化率
-    3. 三层条件判断:
-       - 如果趋势变化 > 0.25 (加速下跌)，返回-1
-       - 如果趋势变化 < 0 (加速上涨)，返回1
-       - 否则返回昨日收益的负值
-    
-    - 平均持有期: 5-10天
-    """
-    print(f"开始构建 Alpha 46 因子...")
-    print(f"参数: long_delay={long_delay}, mid_delay={mid_delay}, rebalance_period={rebalance_period}")
+META = {
+    "factor_name": "Alpha46_Factor",
+    "author": "local",
+    "level": "daily",
+    "category": "alpha101",
+    "description": "Alpha101 #46: trend-acceleration switch on delayed normalized close",
+}
 
-    # 可用性池
-    historical_df = load_historical_marketcap()
-    available_tokens_by_date = build_available_tokens_by_date(
-        historical_df, lookback_days=availability_lookback_days, mode="window"
-    )
-    print("🔍 生成各日期可用token列表（避免未来函数）...")
-    print_availability_sample(available_tokens_by_date, n=3)
+SETTING = {
+    "data_needed": ["close"],
+    "universe": "historical_top50",
+    "warmup_bars": 30,
+    "preprocessing": "mad_rank",
+    "params": {"long_delay": 20, "mid_delay": 10, "norm_window": 20},
+    "factor_direction": 1,
+}
 
-    # K线数据
-    df = load_kline_df()
+_EPSILON = 1e-8
 
-    # 单symbol计算
-    def compute_one(group: pd.DataFrame, symbol: str) -> pd.DataFrame:
-        if len(group) < long_delay + rebalance_period + 2:
-            return pd.DataFrame()
-        gp = group.copy()
 
-        # === 7×24h币圈特殊处理 ===
-        
-        # 1. 价格归一化处理（适应币圈价格差异）
-        gp['price_base'] = gp['close'].rolling(window=20, min_periods=1).mean()
-        gp['norm_close'] = gp['close'] / (gp['price_base'] + 1e-8)
-        
-        # 2. 计算因子组件
-        
-        # 2.1 远期价格变化率: (20天前到10天前的价格变化)/10天
-        gp['delay_close_20'] = gp['norm_close'].shift(long_delay)
-        gp['delay_close_10'] = gp['norm_close'].shift(mid_delay)
-        gp['far_change_rate'] = (gp['delay_close_20'] - gp['delay_close_10']) / (long_delay - mid_delay)
-        
-        # 2.2 近期价格变化率: (10天前到现在的价格变化)/10天
-        gp['recent_change_rate'] = (gp['delay_close_10'] - gp['norm_close']) / mid_delay
-        
-        # 2.3 趋势变化 = 远期变化率 - 近期变化率
-        gp['trend_change'] = gp['far_change_rate'] - gp['recent_change_rate']
-        
-        # 2.4 昨日收益
-        gp['daily_return'] = gp['norm_close'] - gp['norm_close'].shift(1)
-        
-        # 2.5 条件判断
-        gp['alpha46_raw'] = np.nan
-        
-        # 如果趋势变化 > 0.25 (加速下跌)，返回-1
-        gp.loc[gp['trend_change'] > 0.25, 'alpha46_raw'] = -1
-        
-        # 如果趋势变化 < 0 (加速上涨)，返回1
-        gp.loc[gp['trend_change'] < 0, 'alpha46_raw'] = 1
-        
-        # 否则返回昨日收益的负值
-        gp.loc[(gp['trend_change'] <= 0.25) & (gp['trend_change'] >= 0), 'alpha46_raw'] = -1 * gp['daily_return']
-        
-        # 未来收益（百分比）
-        gp["future_ret"] = future_return(gp["close"], rebalance_period, method="pct")
-        
-        # 可用性过滤
-        gp = filter_group_by_availability(gp, symbol, available_tokens_by_date)
-        
-        return gp[["date", "symbol", "alpha46_raw", "future_ret"]].dropna()
+def calc_factor(data_ctx: dict[str, pd.DataFrame]) -> pd.DataFrame:
+    """Return the raw daily Alpha#46 matrix (date x instrument)."""
 
-    print("计算因子并进行可用性过滤...")
-    result_dfs = group_apply_with_progress(df, "symbol", compute_one)
-    if not result_dfs:
-        print("警告: 没有足够的数据计算因子")
-        return pd.DataFrame()
-    
-    factor_df = pd.concat(result_dfs, ignore_index=True)
-    
-    # 去极值与按日秩归一化到[-1,1]
-    factor_df = winsorize_by_date(factor_df, col="alpha46_raw", n_std=3.0)
-    factor_df = rank_to_unit_by_date(factor_df, col="alpha46_raw", out_col="factor")
-    
-    # 输出
-    factor_df = factor_df.rename(columns={"symbol": "instrument"})[["date", "instrument", "factor", "future_ret"]]
-    out_path = save_factor_df(factor_df, file_prefix=f"alpha46_trend_accel_{long_delay}d_{mid_delay}d_rebalance{rebalance_period}d_")
-    
-    print_factor_summary(factor_df, out_path)
-    return factor_df
+    long_delay = SETTING["params"]["long_delay"]
+    mid_delay = SETTING["params"]["mid_delay"]
+    norm_window = SETTING["params"]["norm_window"]
+    for name, value in (
+        ("long_delay", long_delay),
+        ("mid_delay", mid_delay),
+        ("norm_window", norm_window),
+    ):
+        if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+            raise ValueError(f"SETTING.params.{name} must be an integer >= 1")
+    if long_delay <= mid_delay:
+        raise ValueError("SETTING.params.long_delay must be greater than mid_delay")
 
-if __name__ == "__main__":
-    # 默认参数
-    create_alpha46_factor(long_delay=20, mid_delay=10, rebalance_period=10)
+    close = data_ctx["close"].astype("float64")
+
+    # 价格归一化（适应币圈价格量级差异），与原脚本一致 min_periods=1
+    price_base = close.rolling(window=norm_window, min_periods=1).mean()
+    norm_close = close / (price_base + _EPSILON)
+
+    # 远期变化率: (long_delay 天前到 mid_delay 天前的变化) / (long_delay - mid_delay)
+    delay_close_long = norm_close.shift(long_delay)
+    delay_close_mid = norm_close.shift(mid_delay)
+    far_change_rate = (delay_close_long - delay_close_mid) / (long_delay - mid_delay)
+
+    # 近期变化率: (mid_delay 天前到现在的变化) / mid_delay
+    recent_change_rate = (delay_close_mid - norm_close) / mid_delay
+
+    # 趋势变化 = 远期变化率 - 近期变化率
+    trend_change = far_change_rate - recent_change_rate
+
+    # 昨日归一化收益
+    daily_return = norm_close - norm_close.shift(1)
+
+    # 三层条件判断（trend_change 为 NaN 的行保持 NaN）
+    factor = (-1.0 * daily_return).where(trend_change.notna())
+    factor = factor.where(~(trend_change > 0.25), -1.0)
+    factor = factor.where(~(trend_change < 0), 1.0)
+    return factor

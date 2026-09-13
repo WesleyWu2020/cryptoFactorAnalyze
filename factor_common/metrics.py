@@ -232,7 +232,7 @@ def _daily_ic(values: pd.DataFrame, labels: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows, columns=["date", "ic", "rank_ic", "n_pairs"])
 
 
-def _ic_summary(daily: pd.DataFrame, *, periods_per_year: int) -> dict:
+def _ic_summary(daily: pd.DataFrame, *, periods_per_year: float) -> dict:
     """Aggregate a daily IC series; t/p require >= 2 dates and variance."""
     n = int(len(daily))
     summary = {
@@ -283,6 +283,33 @@ def _ic_summary(daily: pd.DataFrame, *, periods_per_year: int) -> dict:
                 rank_icir * math.sqrt(periods_per_year)
             )
     return summary
+
+
+def _rebalance_signal_dates(
+    calendar: pd.DatetimeIndex, profile: BacktestProfile
+) -> pd.DatetimeIndex:
+    """Return signal dates whose delayed execution is on the rebalance grid."""
+    anchor = pd.Timestamp(profile.anchor_date)
+    execution_dates = calendar + pd.Timedelta(days=profile.signal_delay_days)
+    mask = (execution_dates - anchor).days % profile.rebalance_days == 0
+    return calendar[mask]
+
+
+def _rebalance_aligned_metrics(
+    values: pd.DataFrame,
+    labels: pd.DataFrame,
+    profile: BacktestProfile,
+) -> dict:
+    """Compute independent-period IC diagnostics on actual rebalance signals."""
+    signal_dates = _rebalance_signal_dates(values.index, profile)
+    daily = _daily_ic(values.loc[signal_dates], labels.loc[signal_dates])
+    periods_per_year = profile.periods_per_year / profile.rebalance_days
+    return {
+        "rebalance_days": profile.rebalance_days,
+        "periods_per_year": periods_per_year,
+        "ic": _ic_summary(daily, periods_per_year=periods_per_year),
+        "rank_ic_autocorr": _rank_ic_autocorr(daily, signal_dates),
+    }
 
 
 def _ic_decay(values: pd.DataFrame, labels: pd.DataFrame) -> list:
@@ -463,6 +490,9 @@ def evaluate_metrics(values, labels, accounting, profile) -> dict:
             "rank_ic_autocorr": _rank_ic_autocorr(daily, values.index),
             "rank_ic_half_life": _half_life(decay),
             "coverage": _coverage(values, sliced_labels, date_mask),
+            "rebalance_aligned": _rebalance_aligned_metrics(
+                values, sliced_labels, profile
+            ),
         }
 
     scenario_blocks = {

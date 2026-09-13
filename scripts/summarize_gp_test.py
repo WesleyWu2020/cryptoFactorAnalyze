@@ -58,6 +58,7 @@ def summarize(run_dir: Path) -> Path:
     return write_artifact(output, {
         "summary_version": 1,
         "selection_disclosure": "2026 metrics are reported only and do not change frozen candidate selection",
+        "research_disclosure": "2026 was previously inspected in this project; these results are repeat research, not unseen holdout evidence",
         "test_receipt": str(receipts[-1]),
         "min_all_costs_sharpe": min_sharpe,
         "frozen_candidate_count": len(validation_accepted),

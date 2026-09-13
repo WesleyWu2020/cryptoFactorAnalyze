@@ -19,7 +19,7 @@ from .evolution import SearchFormationError, search as evolution_search
 from .evaluator import evaluate_tree
 from .export import export_factor
 from .expression import Node
-from .features import RAW_FIELDS
+from .features import RAW_FIELDS, expression_families
 from .replay import ReplayEvaluationError, replay, test_manifest
 from .search import run_search
 from .selection import select_validation
@@ -27,7 +27,7 @@ from .selection import select_validation
 
 def _runtime_hashes() -> dict[str, str]:
     package = Path(__file__).resolve().parent
-    names = ("config", "data", "evolution", "evaluator", "expression", "features", "operators", "selection", "replay", "export")
+    names = ("config", "data", "evolution", "evaluator", "expression", "features", "operators", "selection", "replay", "export", "fitness", "cost_fitness")
     return {f"Genetic_Algorithm/{name}.py": hashlib.sha256((package / f"{name}.py").read_bytes()).hexdigest() for name in names}
 
 
@@ -126,12 +126,19 @@ def _search(args: argparse.Namespace) -> dict[str, Any]:
     result = run_search(
         args.h5, audit_path, stage=STAGES["train"], warmup_days=config.max_history,
         fields=fields,
-        search_stage=lambda _audit: evolution_search(load_stage(args.h5, STAGES["train"], config.max_history, fields), config),
+        search_stage=lambda _audit: evolution_search(load_stage(
+            args.h5, STAGES["train"], config.max_history, fields,
+            **({"include_accounting": True} if config.fitness_mode == "all_costs_sharpe" else {}),
+        ), config),
         artifact_dir=run_dir, config=asdict(config), repository_root=Path.cwd(),
         selected_code_paths=(), seed=config.seed, experiment_id=run_dir.name,
         backtest_profile={"n_groups": config.n_groups},
     )
     _write_json(config_path, raw_config, immutable=True)
+    if config.fitness_mode == "all_costs_sharpe":
+        _write_json(run_dir / "cost_fitness.json", {
+            "config": asdict(config), "candidates": result.fitness_diagnostics,
+        }, immutable=True)
     (run_dir / "generations.jsonl").write_text("".join(json.dumps(entry, sort_keys=True) + "\n" for entry in result.generation_log), encoding="utf-8")
     return {"status": "complete" if result.candidates else "no_candidates", "run_dir": str(run_dir)}
 
@@ -153,7 +160,29 @@ def _validate(args: argparse.Namespace) -> dict[str, Any]:
         _write_json(run_dir / "validation.json", {"status": "no_candidates", "accepted": [], "rejected": [], "results": {}, "training_archive_sha256": archive["sha256"], "provenance_sha256": provenance["sha256"], "config_sha256": config_document["sha256"], "validation_fingerprint": validation_data.fingerprint}, immutable=True)
         return {"status": "no_candidates", "artifact": str(run_dir / "validation.json")}
     config = _load_run_config(run_dir / "config.json")
-    stage_data = load_stage(args.h5, STAGES["validation"], config.max_history, sorted(RAW_FIELDS))
+    trading_evidence = None
+    trading_fingerprint = None
+    if config.fitness_mode == "all_costs_sharpe":
+        from .cost_fitness import evaluate_cost_window
+        training = load_stage(args.h5, STAGES["train"], config.max_history, sorted(RAW_FIELDS), include_accounting=True)
+        if training.fingerprint != provenance["stage_content_hashes"]["train"]:
+            raise ValueError("training data changed before validation trading deduplication")
+        cost_archive = _verified(run_dir / "cost_fitness.json", "training cost evidence")
+        trading_fingerprint = training.audit["accounting_fingerprint"]
+        trading_evidence = {}
+        for candidate in candidates[:config.validation_limit]:
+            original = cost_archive["candidates"].get(candidate["expression_id"], {})
+            if original.get("accounting_fingerprint") != trading_fingerprint:
+                raise ValueError("training accounting data changed before validation trading deduplication")
+            values = evaluate_tree(candidate["tree"], training.features, training.eligible).loc[training.opens.index]
+            _, returns, positions = evaluate_cost_window(
+                values, training, config, candidate["direction"], STAGES["train"].start, STAGES["train"].end,
+                include_positions=True,
+            )
+            trading_evidence[candidate["expression_id"]] = (returns, positions)
+        del training
+    stage_data = load_stage(args.h5, STAGES["validation"], config.max_history, sorted(RAW_FIELDS),
+                            **({"include_accounting": True} if (config.validation_stability or config.reference_factor or config.validation_parameter_stability) else {}))
     outcomes: dict[str, Any] = {}
     for candidate in candidates[:config.validation_limit]:
         result = replay(
@@ -167,13 +196,30 @@ def _validate(args: argparse.Namespace) -> dict[str, Any]:
         )
         metrics = result["metrics"]
         evidence = _validation_evidence(candidate, stage_data, config)
+        if config.reference_factor or config.validation_parameter_stability:
+            from .incremental import incremental_evidence, parameter_stability
+            from .cost_fitness import evaluate_cost_window
+            if config.reference_factor:
+                values = evaluate_tree(candidate["tree"], stage_data.features, stage_data.eligible).loc[stage_data.opens.index]
+                _, returns, positions = evaluate_cost_window(
+                    values, stage_data, config, candidate["direction"], stage_data.stage.start,
+                    stage_data.stage.end, include_positions=True)
+                evidence["incremental"] = incremental_evidence(returns, positions, stage_data, config)
+            if config.validation_parameter_stability:
+                evidence["parameter_stability"] = parameter_stability(
+                    candidate["tree"], candidate["direction"], stage_data, config)
+        if config.validation_stability:
+            from .cost_fitness import validation_cost_stability
+            values = evaluate_tree(candidate["tree"], stage_data.features, stage_data.eligible).loc[stage_data.opens.index]
+            evidence["cost_stability"] = validation_cost_stability(values, stage_data, config, candidate["direction"])
         outcomes[candidate["expression_id"]] = {
             **evidence,
+            "feature_families": sorted(expression_families(candidate["tree"])),
             **_all_costs_validation_metrics(metrics),
             "replay": result["artifact_path"],
         }
-    selected = select_validation(candidates, outcomes, config)
-    _write_json(run_dir / "validation.json", {"status": "complete" if selected.accepted else "no_candidates", "accepted": [item["expression_id"] for item in selected.accepted], "rejected": [item["expression_id"] for item in selected.rejected], "rejection_reasons": selected.rejection_reasons, "results": outcomes, "training_archive_sha256": archive["sha256"], "provenance_sha256": provenance["sha256"], "config_sha256": config_document["sha256"], "validation_fingerprint": stage_data.fingerprint}, immutable=True)
+    selected = select_validation(candidates, outcomes, config, trading_evidence=trading_evidence)
+    _write_json(run_dir / "validation.json", {"status": "complete" if selected.accepted else "no_candidates", "accepted": [item["expression_id"] for item in selected.accepted], "rejected": [item["expression_id"] for item in selected.rejected], "rejection_reasons": selected.rejection_reasons, "results": outcomes, "training_archive_sha256": archive["sha256"], "provenance_sha256": provenance["sha256"], "config_sha256": config_document["sha256"], "validation_fingerprint": stage_data.fingerprint, "training_accounting_fingerprint": trading_fingerprint}, immutable=True)
     return {"status": "complete" if selected.accepted else "no_candidates", "artifact": str(run_dir / "validation.json")}
 
 
@@ -232,9 +278,25 @@ def _export(args: argparse.Namespace) -> dict[str, Any]:
     return {"status": "complete" if exports else "no_candidates", "exports": [str(item.path) for item in exports]}
 
 
+def _walk_forward(args):
+    from .walk_forward import run_walk_forward
+    return run_walk_forward(args.h5, args.run_dir, load_config(args.config),
+                            first_test_start=args.first_test_start, last_test_end=args.last_test_end,
+                            allow_2026_test=args.allow_2026_test)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
+    walk = commands.add_parser("walk-forward")
+    walk.add_argument("--config", required=True)
+    walk.add_argument("--h5", required=True)
+    walk.add_argument("--run-dir", required=True)
+    walk.add_argument("--first-test-start", default="2025-01-01")
+    walk.add_argument("--last-test-end", default="2025-12-31")
+    walk.add_argument("--allow-2026-test", action="store_true",
+                      help="record one explicit 2026 walk-forward repeat evaluation")
+    walk.set_defaults(handler=_walk_forward)
     audit = commands.add_parser("audit"); audit.add_argument("--stage", required=True, choices=sorted(STAGES)); audit.add_argument("--h5", required=True); audit.add_argument("--output", required=True); audit.add_argument("--warmup-days", type=int, default=180); audit.set_defaults(handler=_audit)
     search = commands.add_parser("search"); search.add_argument("--config", required=True); search.add_argument("--h5", required=True); search.add_argument("--run-dir", required=True); search.set_defaults(handler=_search)
     validate = commands.add_parser("validate"); validate.add_argument("--run-dir", required=True); validate.add_argument("--h5", required=True); validate.set_defaults(handler=_validate)
@@ -249,7 +311,7 @@ def main(argv: list[str] | None = None) -> int:
         args = build_parser().parse_args(argv)
         outcome = args.handler(args)
         print(json.dumps(outcome, sort_keys=True))
-        return 2 if args.command == "test" and outcome.get("status") in {"partial", "failed"} else 0
+        return 2 if args.command in {"test", "walk-forward"} and outcome.get("status") in {"partial", "failed"} else 0
     except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError, ReplayEvaluationError, SearchFormationError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2

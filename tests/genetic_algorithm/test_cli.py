@@ -35,11 +35,89 @@ def test_help_lists_the_six_pipeline_commands():
         assert command in result.stdout
 
 
+def test_cost_fixed_year_validation_binds_training_and_never_loads_test(monkeypatch, tmp_path):
+    from types import SimpleNamespace
+    from dataclasses import asdict
+    import pandas as pd
+    from Genetic_Algorithm.config import SearchConfig
+    from Genetic_Algorithm.expression import Node
+    from Genetic_Algorithm.artifacts import read_verified_manifest
+    from Genetic_Algorithm import cost_fitness
+    from Genetic_Algorithm.selection import ValidationSelectionResult
+
+    config = SearchConfig(fitness_mode="all_costs_sharpe", n_groups=5, render_reports=False, validation_stability=True)
+    write_artifact(tmp_path / "config.json", asdict(config), immutable=True)
+    write_artifact(tmp_path / "training_candidates.json", {"candidates": [
+        {"expression_id": "a", "ast": asdict(Node("close")), "training_direction": 1}]}, immutable=True)
+    write_artifact(tmp_path / "provenance.json", {"stage_content_hashes": {"train": "train-fingerprint"}}, immutable=True)
+    write_artifact(tmp_path / "cost_fitness.json", {"candidates": {"a": {"accounting_fingerprint": "accounting"}}}, immutable=True)
+    stages = []
+    def load(path, stage, *args, **kwargs):
+        stages.append(stage.name)
+        assert stage.end < pd.Timestamp("2026-01-01")
+        panel = pd.DataFrame(1.0, index=pd.date_range(stage.start, stage.end), columns=["A"])
+        return SimpleNamespace(fingerprint=f"{stage.name}-fingerprint", features={"close": panel},
+                               opens=panel, eligible=panel.astype(bool), audit={"accounting_fingerprint": "accounting"})
+    def cost(values, data, config, direction, start, end, **kwargs):
+        assert start == pd.Timestamp("2024-01-01") and end == pd.Timestamp("2024-12-31")
+        assert kwargs["include_positions"]
+        return {}, values.iloc[:, 0], values
+    def select(candidates, outcomes, config, *, trading_evidence):
+        assert trading_evidence["a"][0].index.max().year == 2024
+        assert outcomes["a"]["net_sharpe"] == 1.5
+        assert outcomes["a"]["cost_stability"]["passed"] is True
+        return ValidationSelectionResult(tuple(candidates), (), {})
+    def stability(values, data, config, direction):
+        assert values.index.min() == pd.Timestamp("2025-01-01")
+        assert values.index.max() == pd.Timestamp("2025-12-31")
+        return {"passed": True, "reasons": []}
+    monkeypatch.setattr(cli, "load_stage", load)
+    monkeypatch.setattr(cost_fitness, "evaluate_cost_window", cost)
+    monkeypatch.setattr(cost_fitness, "validation_cost_stability", stability)
+    monkeypatch.setattr(cli, "replay", lambda *a, **k: {"metrics": {"total_return": 0.1, "sharpe": 1.5, "turnover": 0.1}, "artifact_path": "replay.json"})
+    monkeypatch.setattr(cli, "_validation_evidence", lambda *a: {"direction": 1})
+    monkeypatch.setattr(cli, "select_validation", select)
+    cli._validate(argparse.Namespace(run_dir=tmp_path, h5="unused"))
+    assert stages == ["train", "validation"]
+    result = read_verified_manifest(tmp_path / "validation.json")
+    assert result["accepted"] == ["a"]
+    assert result["training_accounting_fingerprint"] == "accounting"
+
+
 def test_test_rejects_a_missing_manifest(tmp_path):
     result = _cli("test", "--manifest", str(tmp_path / "missing.json"), "--h5", "missing.h5")
 
     assert result.returncode != 0
     assert "manifest" in result.stderr.lower()
+
+
+@pytest.mark.parametrize("fail_validation", [False, True])
+def test_full_bash_defaults_to_fixed_years_and_stops_before_test_on_failure(tmp_path, fail_validation):
+    import os
+    executable = tmp_path / "fake_python"
+    log = tmp_path / "calls"
+    executable.write_text("#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$GP_CALL_LOG\"\n"
+                          "if [ \"$3\" = 'validate' ] && [ \"$FAIL_VALIDATION\" = 'yes' ]; then exit 2; fi\n")
+    executable.chmod(0o755)
+    run = tmp_path / "new-run"
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GP_")}
+    env.update(GP_PYTHON=str(executable), GP_H5=str(executable), GP_RUN_DIR=str(run),
+               GP_CALL_LOG=str(log), FAIL_VALIDATION="yes" if fail_validation else "no")
+    result = subprocess.run(["bash", str(ROOT / "tmp/run_full_daily_gp.sh")], cwd=tmp_path,
+                            env=env, text=True, capture_output=True)
+    calls = log.read_text()
+    assert "Genetic_Algorithm walk-forward" not in calls
+    assert "Genetic_Algorithm audit --stage train" in calls
+    assert "Genetic_Algorithm search" in calls
+    assert "Genetic_Algorithm validate" in calls
+    if fail_validation:
+        assert result.returncode == 2
+        assert "Genetic_Algorithm freeze" not in calls
+        assert "Genetic_Algorithm test" not in calls
+    else:
+        assert result.returncode == 0, result.stderr
+        assert calls.index("Genetic_Algorithm freeze") < calls.index("Genetic_Algorithm test")
+        assert "summarize_gp_test.py --run-dir" in calls
 
 
 def test_search_rejects_invalid_configuration_before_reading_data(tmp_path):

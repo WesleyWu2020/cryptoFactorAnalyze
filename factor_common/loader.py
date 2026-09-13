@@ -11,7 +11,7 @@ from typing import Any
 
 import pandas as pd
 
-from .data_provider import MARKET_FIELDS
+from .data_provider import FUNDING_DAILY_FIELDS, MARKET_FIELDS
 from .definitions import FactorSpec
 
 
@@ -28,7 +28,7 @@ _SETTING_FIELDS = (
 _OPTIONAL_SETTING_FIELDS = ("context_eligible",)
 _RESERVED_CONTEXT_KEYS = frozenset({"__eligible__"})
 _SUPPORTED_PREPROCESSING = frozenset({"none", "mad_rank"})
-_SUPPORTED_FIELDS = frozenset(MARKET_FIELDS)
+_SUPPORTED_FIELDS = frozenset(MARKET_FIELDS) | frozenset(FUNDING_DAILY_FIELDS)
 
 
 def _validate_identifier(value: Any, *, field_name: str = "factor identifier") -> str:

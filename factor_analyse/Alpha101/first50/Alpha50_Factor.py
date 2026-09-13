@@ -1,167 +1,95 @@
-# factor_analyse/Alpha101/Alpha50_Factor.py
+"""Alpha101 Alpha#50 因子（factor_common 契约版）。
+
+原始定义:
+    Alpha#50 = (-1 * ts_max(rank(correlation(rank(volume), rank(vwap), 5)), 5))
+
+本实现按上述经典公式计算:
+    price_base = mean(close, 20)（min_periods=1，滚动归一化基准）
+    vwap = quote_volume / volume（仓库矩阵版约定，volume>0 掩码）
+    norm_vwap = vwap / price_base
+    corr = correlation(rank_cs(volume), rank_cs(norm_vwap), corr_window)（时间序列相关）
+    corr_rank = rank_cs(corr)（按日横截面 pct rank）
+    factor = -1 * ts_max(corr_rank, ts_max_window)
+    其中 rank_cs 为按日横截面 pct rank（公式内部的 rank，予以保留）。
+
+与旧脚本的重要偏离说明: 旧脚本 compute_one 中 volume_vwap_corr 初始化为
+NaN 后从未真正计算（时间序列 correlation 一步缺失），导致 corr_rank /
+ts_max / 因子值恒为 NaN、输出为空——属于实现 bug 而非有意语义。此处按
+docstring 中的经典公式补全该链路。另旧脚本 vwap 用 (high+low+close)/3
+近似，按仓库约定改为 quote_volume / volume。参数取原脚本 __main__ 实际
+调用值 corr_window=10, ts_max_window=10；旧版 rebalance_period 仅用于
+future_ret，已丢弃。factor_direction=1：公式已内置 -1，因子值越高对应
+量-价相关性排名越低（未过热），与“高值看多”一致。
+
+计算只使用当日及历史数据，无未来函数。FactorManager 只调用下面的标准模块接口。
+横截面去极值与秩归一化由框架 preprocessing="mad_rank" 完成，这里输出原始因子值。
+"""
+
+from __future__ import annotations
+
 import pandas as pd
-import numpy as np
-import os
-from datetime import datetime
-from tqdm import tqdm
 
-# 路径以便导入 util_factor
-current_dir = os.path.dirname(os.path.abspath(__file__))
-factor_mining_dir = os.path.join(current_dir, '..', 'factor_mining')
-import sys
-sys.path.insert(0, factor_mining_dir)
 
-from util_factor import (
-    load_historical_marketcap, build_available_tokens_by_date, load_kline_df,
-    filter_group_by_availability, group_apply_with_progress, winsorize_by_date,
-    rank_to_unit_by_date, save_factor_df, future_return, print_availability_sample,
-    print_factor_summary
-)
+TYPE = "regular"
 
-def create_alpha50_factor(corr_window=5, ts_max_window=5, rebalance_period=3, availability_lookback_days=90):
-    """
-    Alpha 50 因子 (币圈7×24h优化版)
-    
-    原始定义:
-    (-1 * ts_max(rank(correlation(rank(volume), rank(vwap), 5)), 5))
-    
-    思路:
-    1. 排名相关性: 分析交易量排名与VWAP排名的关系
-    2. 峰值识别: 取5天内相关性排名的最大值
-    3. 反向操作: 当相关性排名达到峰值时给出看跌信号
-    
-    当交易量排名与VWAP排名的相关性在市场中达到相对高点时，可能表明市场过热。
-    
-    - 平均持有期: 2-5天
-    """
-    print(f"开始构建 Alpha 50 因子...")
-    print(f"参数: corr_window={corr_window}, ts_max_window={ts_max_window}, rebalance_period={rebalance_period}")
+META = {
+    "factor_name": "Alpha50_Factor",
+    "author": "local",
+    "level": "daily",
+    "category": "alpha101",
+    "description": "Alpha101 #50: -ts_max(rank(correlation(rank(volume), rank(vwap), N)), N)",
+}
 
-    # 可用性池
-    historical_df = load_historical_marketcap()
-    available_tokens_by_date = build_available_tokens_by_date(
-        historical_df, lookback_days=availability_lookback_days, mode="window"
-    )
-    print("🔍 生成各日期可用token列表（避免未来函数）...")
-    print_availability_sample(available_tokens_by_date, n=3)
+SETTING = {
+    "data_needed": ["close", "volume", "quote_volume"],
+    "universe": "historical_top50",
+    "warmup_bars": 30,
+    "preprocessing": "mad_rank",
+    "params": {"corr_window": 10, "ts_max_window": 10, "norm_window": 20},
+    "factor_direction": 1,
+}
 
-    # K线数据
-    df = load_kline_df()
+_EPSILON = 1e-8
 
-    def compute_one(group: pd.DataFrame, symbol: str) -> pd.DataFrame:
-        # 降低数据长度要求，适应加密货币数据特点
-        min_required = max(corr_window, ts_max_window) + rebalance_period + 2
-        if len(group) < min_required:
-            return pd.DataFrame()
-        
-        gp = group.copy()
 
-        # === 7×24h币圈特殊处理 ===
-        
-        # 1. 价格归一化处理（适应币圈价格差异）
-        gp['price_base'] = gp['close'].rolling(window=20, min_periods=1).mean()
-        gp['norm_close'] = gp['close'] / (gp['price_base'] + 1e-8)
-        
-        # 2. 计算VWAP (如果没有，用(high+low+close)/3近似)
-        if 'vwap' not in gp.columns:
-            gp['vwap'] = (gp['high'] + gp['low'] + gp['close']) / 3
-        gp['norm_vwap'] = gp['vwap'] / (gp['price_base'] + 1e-8)
-        
-        # 3. 计算因子组件
-        
-        # 3.1 计算交易量和VWAP的排名
-        # 这里先用NaN占位，后面按日期分组计算横截面排名
-        gp['volume_rank'] = np.nan
-        gp['vwap_rank'] = np.nan
-        
-        # 3.2 计算相关性
-        gp['volume_vwap_corr'] = np.nan
-        
-        # 3.3 计算相关性排名
-        gp['corr_rank'] = np.nan
-        
-        # 3.4 计算时间序列最大值
-        gp['ts_max_corr_rank'] = np.nan
-        
-        # 4. 未来收益
-        gp['future_ret'] = future_return(gp['close'], rebalance_period, method="log")
-        
-        # 可用性过滤
-        gp = filter_group_by_availability(gp, symbol, available_tokens_by_date)
-        
-        return gp[['date', 'symbol', 'volume', 'norm_vwap', 'volume_rank', 'vwap_rank', 
-                   'volume_vwap_corr', 'corr_rank', 'ts_max_corr_rank', 'future_ret']].dropna()
+def calc_factor(data_ctx: dict[str, pd.DataFrame]) -> pd.DataFrame:
+    """Return the raw daily Alpha#50 matrix (date x instrument)."""
 
-    print("计算 Alpha 50 因子基础数据（考虑token可用性）...")
-    result_dfs = group_apply_with_progress(df, 'symbol', compute_one)
-    if not result_dfs:
-        print("警告: 没有足够的数据计算因子")
-        return pd.DataFrame()
+    corr_window = SETTING["params"]["corr_window"]
+    ts_max_window = SETTING["params"]["ts_max_window"]
+    norm_window = SETTING["params"]["norm_window"]
+    for name, value in (
+        ("corr_window", corr_window),
+        ("ts_max_window", ts_max_window),
+        ("norm_window", norm_window),
+    ):
+        if isinstance(value, bool) or not isinstance(value, int) or value < 2:
+            raise ValueError(f"SETTING.params.{name} must be an integer >= 2")
 
-    # 合并所有token的数据
-    all_data = pd.concat(result_dfs, ignore_index=True)
-    
-    # 按日期分组计算横截面排名和相关性
-    print("计算横截面排名和相关性组件...")
-    all_data_by_date = all_data.groupby('date')
-    
-    processed_dfs = []
-    for date, group in tqdm(all_data_by_date):
-        if len(group) < 2:  # 至少需要2个token才能计算有意义的排名
-            continue
-            
-        # 计算横截面排名
-        group = group.copy()
-        group['volume_rank'] = group['volume'].rank(pct=True)
-        group['vwap_rank'] = group['norm_vwap'].rank(pct=True)
-        
-        # 计算相关性排名
-        group['corr_rank'] = group['volume_vwap_corr'].rank(pct=True)
-        
-        processed_dfs.append(group)
-    
-    if not processed_dfs:
-        print("警告: 没有足够的数据计算因子")
-        return pd.DataFrame()
-    
-    # 重新按symbol分组计算时间序列最大值
-    print("计算时间序列最大值...")
-    all_data_processed = pd.concat(processed_dfs, ignore_index=True)
-    
-    def compute_ts_max(group):
-        if len(group) < ts_max_window:
-            return group
-        
-        group = group.copy()
-        # 计算相关性排名的时间序列最大值
-        group['ts_max_corr_rank'] = group['corr_rank'].rolling(window=ts_max_window, min_periods=ts_max_window).max()
-        
-        # 计算因子值: -1 * ts_max_corr_rank
-        group['alpha50_raw'] = -1 * group['ts_max_corr_rank']
-        
-        return group
-    
-    final_dfs = group_apply_with_progress(all_data_processed, 'symbol', compute_ts_max)
-    if not final_dfs:
-        print("警告: 没有足够的数据计算因子")
-        return pd.DataFrame()
-    
-    factor_df = pd.concat(final_dfs, ignore_index=True)
-    
-    # 去极值与归一化
-    factor_df = winsorize_by_date(factor_df, col='alpha50_raw', n_std=3.0)
-    factor_df = rank_to_unit_by_date(factor_df, col='alpha50_raw', out_col='factor')
+    close = data_ctx["close"].astype("float64")
+    volume = data_ctx["volume"].astype("float64")
+    quote_volume = data_ctx["quote_volume"].astype("float64")
 
-    # 输出
-    factor_df = factor_df.rename(columns={'symbol': 'instrument'})[['date', 'instrument', 'factor', 'future_ret']]
-    out_path = save_factor_df(factor_df, file_prefix=f"alpha50_volume_vwap_corr_peak_{corr_window}d_{ts_max_window}d_")
+    # 价格归一化（适应币圈价格量级差异），与原脚本一致 min_periods=1
+    price_base = close.rolling(window=norm_window, min_periods=1).mean()
 
-    print_factor_summary(factor_df, out_path)
-    return factor_df
+    # vwap 按仓库约定 = quote_volume / volume，仅在有成交的日子可观测
+    observed = volume > 0
+    vwap = (quote_volume / (volume + _EPSILON)).where(observed)
+    norm_vwap = vwap / (price_base + _EPSILON)
 
-if __name__ == "__main__":
-    # 建议使用更小的参数，适应加密货币数据特点
-    create_alpha50_factor(corr_window=10, ts_max_window=10, rebalance_period=5)
-    
-    # 可选：更短的窗口，适应加密货币市场的更快节奏
-    # create_alpha50_factor(corr_window=5, ts_max_window=5, rebalance_period=3)
+    # 公式内部的横截面 rank（保留）
+    volume_rank = volume.rank(axis=1, pct=True)
+    vwap_rank = norm_vwap.rank(axis=1, pct=True)
+
+    # 量-价排名的时间序列相关性（每个 instrument 各自沿时间轴）
+    volume_vwap_corr = volume_rank.rolling(
+        window=corr_window, min_periods=corr_window
+    ).corr(vwap_rank)
+
+    # 相关性的横截面排名，再取时间序列最大值，反向
+    corr_rank = volume_vwap_corr.rank(axis=1, pct=True)
+    ts_max_corr_rank = corr_rank.rolling(
+        window=ts_max_window, min_periods=ts_max_window
+    ).max()
+    return -1.0 * ts_max_corr_rank

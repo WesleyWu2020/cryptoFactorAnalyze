@@ -204,7 +204,8 @@ def test_example_values_track_raw_log_momentum(example_manager, example_h5):
 def test_cli_runs_migrated_example(example_h5, tmp_path):
     proc = subprocess.run(
         [
-            sys.executable, "factor_analyse/main.py", "example_momentum",
+            sys.executable, "factor_analyse/main.py",
+            "factor_analyse/factor_mining/example_momentum.py",
             "--h5-path", str(example_h5),
             "--start", EVAL_PARAMS["start"], "--end", EVAL_PARAMS["end"],
             "--no-plot", "--output-dir", str(tmp_path),

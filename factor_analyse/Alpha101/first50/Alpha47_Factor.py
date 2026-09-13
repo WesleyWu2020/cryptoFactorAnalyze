@@ -1,161 +1,115 @@
-# factor_analyse/Alpha101/Alpha47_Factor.py
+"""Alpha101 Alpha#47 因子（factor_common 契约版）。
+
+原始定义:
+    Alpha#47 = ((((rank((1 / close)) * volume) / adv20)
+                 * ((high * rank((high - close))) / (sum(high, 5) / 5)))
+                - rank((vwap - delay(vwap, 5))))
+
+本实现保留原脚本“币圈7×24h优化版”的实际计算逻辑:
+    price_base = mean(close, 20)（min_periods=1，滚动归一化基准）
+    norm_close = close / price_base, norm_high = high / price_base
+    adv20 = mean(volume, 20)，vol_ratio = volume / adv20（注意是量，不是成交额）
+    high_close_diff = norm_high - norm_close（冲高回落）
+    high_avg_5 = sum(norm_high, 5) / 5
+    vwap_change = norm_vwap - delay(norm_vwap, 5)
+    factor = (rank_cs(1/norm_close) * vol_ratio)
+             * (norm_high * rank_cs(high_close_diff) / high_avg_5)
+             - rank_cs(vwap_change)
+    其中 rank_cs 为按日横截面 pct rank（公式内部的 rank，予以保留）。
+
+与旧脚本的一处偏离: 旧脚本在无 vwap 字段时用 (high+low+close)/3 近似；
+按仓库矩阵版算子约定，vwap 统一为 quote_volume / volume（分母加 1e-8 并用
+volume>0 掩码），再除以 price_base 得到 norm_vwap。参数取原脚本 __main__
+实际调用值 adv_window=20, high_sum_window=5, vwap_delay=5；旧版
+rebalance_period 仅用于 future_ret，已丢弃。
+
+计算只使用当日及历史数据，无未来函数。FactorManager 只调用下面的标准模块接口。
+横截面去极值与秩归一化由框架 preprocessing="mad_rank" 完成，这里输出原始因子值。
+"""
+
+from __future__ import annotations
+
 import pandas as pd
-import numpy as np
-import os
-from datetime import datetime
-from tqdm import tqdm
 
-# 路径以便导入 util_factor
-current_dir = os.path.dirname(os.path.abspath(__file__))
-factor_mining_dir = os.path.join(current_dir, '..', 'factor_mining')
-import sys
-sys.path.insert(0, factor_mining_dir)
 
-from util_factor import (
-    load_historical_marketcap, build_available_tokens_by_date, load_kline_df,
-    filter_group_by_availability, group_apply_with_progress, winsorize_by_date,
-    rank_to_unit_by_date, save_factor_df, future_return, print_availability_sample,
-    print_factor_summary
-)
+TYPE = "regular"
 
-def create_alpha47_factor(adv_window=20, high_sum_window=5, vwap_delay=5, 
-                         rebalance_period=5, availability_lookback_days=90):
-    """
-    Alpha 47 因子 (币圈7×24h优化版)
-    
-    原始定义:
-    ((((rank((1 / close)) * volume) / adv20) * ((high * rank((high - close))) / (sum(high, 5) / 5))) - 
-     rank((vwap - delay(vwap, 5))))
-    
-    思路:
-    1. 低价股与成交量异常识别:
-       - rank(1/close) 聚焦低价股
-       - volume/adv20 识别放量
-    2. 日内价格强度与趋势分析:
-       - high * rank(high - close) 识别冲高回落
-       - 除以5日最高价均值进行标准化
-    3. 减去VWAP变化排名:
-       - rank(vwap - delay(vwap, 5)) 衡量中期资金成本变化
-    4. 综合逻辑:
-       - 若低价放量 * 冲高回落 > VWAP趋势排名，可能预示反转
-    
-    - 平均持有期: 3-7天
-    """
-    print(f"开始构建 Alpha 47 因子...")
-    print(f"参数: adv_window={adv_window}, high_sum_window={high_sum_window}, "
-          f"vwap_delay={vwap_delay}, rebalance_period={rebalance_period}")
+META = {
+    "factor_name": "Alpha47_Factor",
+    "author": "local",
+    "level": "daily",
+    "category": "alpha101",
+    "description": "Alpha101 #47: low-price volume spike * intraday fade - vwap trend rank",
+}
 
-    # 可用性池
-    historical_df = load_historical_marketcap()
-    available_tokens_by_date = build_available_tokens_by_date(
-        historical_df, lookback_days=availability_lookback_days, mode="window"
+SETTING = {
+    "data_needed": ["close", "high", "volume", "quote_volume"],
+    "universe": "historical_top50",
+    "warmup_bars": 30,
+    "preprocessing": "mad_rank",
+    "params": {
+        "adv_window": 20,
+        "high_sum_window": 5,
+        "vwap_delay": 5,
+        "norm_window": 20,
+    },
+    "factor_direction": 1,
+}
+
+_EPSILON = 1e-8
+
+
+def calc_factor(data_ctx: dict[str, pd.DataFrame]) -> pd.DataFrame:
+    """Return the raw daily Alpha#47 matrix (date x instrument)."""
+
+    adv_window = SETTING["params"]["adv_window"]
+    high_sum_window = SETTING["params"]["high_sum_window"]
+    vwap_delay = SETTING["params"]["vwap_delay"]
+    norm_window = SETTING["params"]["norm_window"]
+    for name, value in (
+        ("adv_window", adv_window),
+        ("high_sum_window", high_sum_window),
+        ("vwap_delay", vwap_delay),
+        ("norm_window", norm_window),
+    ):
+        if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+            raise ValueError(f"SETTING.params.{name} must be an integer >= 1")
+
+    close = data_ctx["close"].astype("float64")
+    high = data_ctx["high"].astype("float64")
+    volume = data_ctx["volume"].astype("float64")
+    quote_volume = data_ctx["quote_volume"].astype("float64")
+
+    # 价格归一化（适应币圈价格量级差异），与原脚本一致 min_periods=1
+    price_base = close.rolling(window=norm_window, min_periods=1).mean()
+    norm_close = close / (price_base + _EPSILON)
+    norm_high = high / (price_base + _EPSILON)
+
+    # vwap 按仓库约定 = quote_volume / volume，仅在有成交的日子可观测
+    observed = volume > 0
+    vwap = (quote_volume / (volume + _EPSILON)).where(observed)
+    norm_vwap = vwap / (price_base + _EPSILON)
+
+    # 低价股识别与成交量异常（adv 基于 volume，与原脚本一致）
+    inv_close = 1.0 / (norm_close + _EPSILON)
+    adv = volume.rolling(window=adv_window, min_periods=adv_window).mean()
+    vol_ratio = volume / (adv + _EPSILON)
+
+    # 日内价格强度: 冲高回落，除以 high_sum_window 日最高价均值标准化
+    high_close_diff = norm_high - norm_close
+    high_avg = (
+        norm_high.rolling(window=high_sum_window, min_periods=high_sum_window).sum()
+        / high_sum_window
     )
-    print("🔍 生成各日期可用token列表（避免未来函数）...")
-    print_availability_sample(available_tokens_by_date, n=3)
 
-    # K线数据
-    df = load_kline_df()
+    # VWAP 中期变化
+    vwap_change = norm_vwap - norm_vwap.shift(vwap_delay)
 
-    def compute_one(group: pd.DataFrame, symbol: str) -> pd.DataFrame:
-        if len(group) < max(adv_window, high_sum_window, vwap_delay) + rebalance_period + 2:
-            return pd.DataFrame()
-        gp = group.copy()
+    # 公式内部的横截面 rank（保留）
+    rank_inv_close = inv_close.rank(axis=1, pct=True)
+    rank_high_close_diff = high_close_diff.rank(axis=1, pct=True)
+    rank_vwap_change = vwap_change.rank(axis=1, pct=True)
 
-        # === 7×24h币圈特殊处理 ===
-        
-        # 1. 价格归一化处理（适应币圈价格差异）
-        gp['price_base'] = gp['close'].rolling(window=20, min_periods=1).mean()
-        gp['norm_close'] = gp['close'] / (gp['price_base'] + 1e-8)
-        gp['norm_high'] = gp['high'] / (gp['price_base'] + 1e-8)
-        
-        # 2. 计算VWAP (如果没有，用(high+low+close)/3近似)
-        if 'vwap' not in gp.columns:
-            gp['vwap'] = (gp['high'] + gp['low'] + gp['close']) / 3
-        gp['norm_vwap'] = gp['vwap'] / (gp['price_base'] + 1e-8)
-        
-        # 3. 计算因子组件
-        
-        # 3.1 低价股与成交量异常识别
-        gp['inv_close'] = 1 / (gp['norm_close'] + 1e-8)  # 收盘价倒数
-        
-        # 3.2 成交量比率
-        gp['adv20'] = gp['volume'].rolling(window=adv_window, min_periods=adv_window).mean()
-        gp['vol_ratio'] = gp['volume'] / (gp['adv20'] + 1e-8)
-        
-        # 3.3 日内价格强度与趋势分析
-        gp['high_close_diff'] = gp['norm_high'] - gp['norm_close']  # 冲高回落
-        gp['high_sum_5'] = gp['norm_high'].rolling(window=high_sum_window, min_periods=high_sum_window).sum()
-        gp['high_avg_5'] = gp['high_sum_5'] / high_sum_window
-        
-        # 3.4 VWAP变化
-        gp['vwap_change'] = gp['norm_vwap'] - gp['norm_vwap'].shift(vwap_delay)
-        
-        # 4. 横截面排名组件 (这里先用NaN占位，后面按日期分组计算)
-        gp['rank_inv_close'] = np.nan
-        gp['rank_high_close_diff'] = np.nan
-        gp['rank_vwap_change'] = np.nan
-        
-        # 5. 未来收益
-        gp['future_ret'] = future_return(gp['close'], rebalance_period, method="log")
-        
-        # 可用性过滤
-        gp = filter_group_by_availability(gp, symbol, available_tokens_by_date)
-        
-        return gp[['date', 'symbol', 'inv_close', 'vol_ratio', 'norm_high', 'high_close_diff', 
-                   'high_avg_5', 'vwap_change', 'future_ret']].dropna()
-
-    print("计算 Alpha 47 因子基础数据（考虑token可用性）...")
-    result_dfs = group_apply_with_progress(df, 'symbol', compute_one)
-    if not result_dfs:
-        print("警告: 没有足够的数据计算因子")
-        return pd.DataFrame()
-
-    # 合并所有token的数据
-    all_data = pd.concat(result_dfs, ignore_index=True)
-    
-    # 按日期分组计算横截面排名
-    print("计算横截面排名组件...")
-    all_data_by_date = all_data.groupby('date')
-    
-    rank_dfs = []
-    for date, group in tqdm(all_data_by_date):
-        if len(group) < 2:  # 至少需要2个token才能计算有意义的排名
-            continue
-            
-        # 计算横截面排名
-        group = group.copy()
-        group['rank_inv_close'] = group['inv_close'].rank(pct=True)
-        group['rank_high_close_diff'] = group['high_close_diff'].rank(pct=True)
-        group['rank_vwap_change'] = group['vwap_change'].rank(pct=True)
-        
-        # 计算因子值
-        # ((((rank((1 / close)) * volume) / adv20) * ((high * rank((high - close))) / (sum(high, 5) / 5))) - rank((vwap - delay(vwap, 5))))
-        group['alpha47_raw'] = ((group['rank_inv_close'] * group['vol_ratio']) * 
-                              ((group['norm_high'] * group['rank_high_close_diff']) / (group['high_avg_5'] + 1e-8))) - \
-                              group['rank_vwap_change']
-        
-        rank_dfs.append(group)
-    
-    if not rank_dfs:
-        print("警告: 没有足够的数据计算因子")
-        return pd.DataFrame()
-    
-    factor_df = pd.concat(rank_dfs, ignore_index=True)
-    
-    # 去极值与归一化
-    factor_df = winsorize_by_date(factor_df, col='alpha47_raw', n_std=3.0)
-    factor_df = rank_to_unit_by_date(factor_df, col='alpha47_raw', out_col='factor')
-
-    # 输出
-    factor_df = factor_df.rename(columns={'symbol': 'instrument'})[['date', 'instrument', 'factor', 'future_ret']]
-    out_path = save_factor_df(factor_df, file_prefix=f"alpha47_low_price_volume_reversal_")
-
-    print_factor_summary(factor_df, out_path)
-    return factor_df
-
-if __name__ == "__main__":
-    # 标准参数
-    create_alpha47_factor(adv_window=20, high_sum_window=5, vwap_delay=5, rebalance_period=5)
-    
-    # 可选：更短的窗口，更敏感地捕捉短期反转
-    # create_alpha47_factor(adv_window=10, high_sum_window=3, vwap_delay=3, rebalance_period=3)
+    return (rank_inv_close * vol_ratio) * (
+        (norm_high * rank_high_close_diff) / (high_avg + _EPSILON)
+    ) - rank_vwap_change

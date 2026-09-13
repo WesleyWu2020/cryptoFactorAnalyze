@@ -16,8 +16,11 @@ sharing the input axes, keyed by portfolio name:
 - ``"directional_long"``: the long-only portfolio in the factor's preferred
   direction — the top group (``n_groups``) when ``factor_direction == 1``
   and the bottom group (``1``) when ``factor_direction == -1``.
-- ``"long_short"``: a 50/50 dollar-neutral portfolio, long the top group and
-  short the bottom group, each leg at half of ``profile.gross_exposure``.
+- ``"long_short"``: a 50/50 dollar-neutral portfolio in the factor's
+  preferred direction — when ``factor_direction == 1`` it is long the top
+  group and short the bottom group; when ``factor_direction == -1`` the legs
+  are swapped (long bottom, short top). Each leg is half of
+  ``profile.gross_exposure``.
 
 Dates without enough valid names produce all-NaN target rows (no tradeable
 signal), never a silently smaller grouping. Everything here uses same-day
@@ -66,9 +69,9 @@ def target_weights(values: pd.DataFrame, profile: BacktestProfile) -> dict[str, 
     """Build per-group, directional long-only, and 50/50 long-short targets.
 
     Keys are ``group_1``..``group_{n_groups}``, ``directional_long``, and
-    ``long_short`` as documented in the module docstring. The directional
-    portfolio picks the top group when ``factor_direction == 1`` and the
-    bottom group when ``factor_direction == -1``.
+    ``long_short`` as documented in the module docstring. Both directional
+    portfolios follow ``factor_direction``: direction 1 favors the top group,
+    direction -1 favors the bottom group (the long-short legs swap).
     """
     if not isinstance(profile, BacktestProfile):
         raise TypeError("profile must be a BacktestProfile")
@@ -80,7 +83,10 @@ def target_weights(values: pd.DataFrame, profile: BacktestProfile) -> dict[str, 
     }
     weights["directional_long"] = _long_leg(groups, top_group, profile.gross_exposure)
     half = profile.gross_exposure / 2
+    long_group, short_group = (
+        (profile.n_groups, 1) if profile.factor_direction == 1 else (1, profile.n_groups)
+    )
     weights["long_short"] = (
-        _long_leg(groups, profile.n_groups, half) - _long_leg(groups, 1, half)
+        _long_leg(groups, long_group, half) - _long_leg(groups, short_group, half)
     )
     return weights

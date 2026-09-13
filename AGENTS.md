@@ -16,7 +16,7 @@
   - `./.venv/bin/python data/update_crypto_quant.py update`
   - `./.venv/bin/python data/update_crypto_quant.py validate`
   - `python factor_analyse/main.py --list`
-  - `python factor_analyse/main.py <factor_type> [rebalance_period]`
+  - `python factor_analyse/main.py <factor_path> [rebalance_days]`（`factor_path` 为因子模块 .py 的完整路径）
 - test: 当前仓库未配置统一测试入口；如新增逻辑需补充最小可复现验证脚本或测试用例
 - lint: 当前仓库未配置统一 lint 工具；提交前至少保证改动脚本可运行并通过基础语法检查
 - build: 无独立构建步骤，执行 `factor_analyse/main.py` 后在 `reports/` 产出报告
@@ -25,19 +25,18 @@
 ## Engineering conventions
 - 优先复用已有 `factor_analyse/factor_mining/util_factor.py` 与现有分析流程
 - 不新增重复 util，已有能力优先扩展
-- 新增因子需遵循现有命名与注册方式：
-  - 因子脚本放在 `factor_analyse/factor_mining/`
-  - 在 `factor_analyse/factor_config.py` 注册配置
+- 新增因子需遵循现有命名方式：
+  - 因子脚本放在 `factor_analyse/factor_mining/`，满足 `factor_common` loader 契约（`TYPE`/`META`/`SETTING`/`calc_factor`，`META.factor_name` 必须等于文件名）
+  - 无注册表：`FactorManager` 与 `main.py` 直接按因子文件完整路径加载；方向等元信息由模块内 `SETTING` 提供
 - 因子数据格式保持一致：至少包含 `date`、`instrument`、`factor` 三列
 - 报告输出路径与命名遵循 `main.py` 现有规范（输出到 `reports/`）
 
 ## 因子开发固定流程（强制）
 - 当用户给出新因子公式时，必须按以下顺序执行，不跳步：
-1. 在 `factor_analyse/factor_mining/` 新增因子脚本（复用 `util_factor.py` 与 `operator_utils.py`，并保持无未来函数）。
-2. 在 `factor_analyse/factor_config.py` 添加对应 `factor_type` 配置（至少包含 `file_prefix`、`factor_name`、`factor_direction`、`factor_desc`、`rebalance_period`）。
-3. 先运行因子脚本生成因子数据（输出到 `data/factor_data/`）。
-4. 再运行 `python factor_analyse/main.py <factor_type>` 生成报告（输出到 `reports/`）。
-5. 返回结果时必须包含：变更文件列表、执行命令、核心输出路径、未来函数检查结论与验证步骤。
+1. 在 `factor_analyse/factor_mining/` 新增因子脚本（遵循 `factor_common` loader 契约：`TYPE`/`META`/`SETTING`/`calc_factor`，`META.factor_name` 等于文件名，`SETTING` 含 `data_needed`/`universe`/`warmup_bars`/`preprocessing`/`params`/`factor_direction`，并保持无未来函数）。
+2. 无需注册表（`factor_config.py` 已移除）：因子直接以文件路径被加载。
+3. 运行 `./.venv/bin/python factor_analyse/main.py <factor_path> [rebalance_days]` 生成报告（输出到 `reports/`），或在 notebook 中把 `factor_path` 指向该文件后调用 `FactorManager.evaluate`。
+4. 返回结果时必须包含：变更文件列表、执行命令、核心输出路径、未来函数检查结论与验证步骤。
 
 ## Do-not rules
 - 不修改 `factor_miner` 的输入输出契约（列约定、核心调用方式），除非明确说明

@@ -66,9 +66,9 @@ On a non-zero run, inspect `logs/crypto_quant_update.log` and rerun the same com
 
 `has_complete_funding` 仅在 `complete` 时为 True。旧的 `funding_complete_through` 参数保留调用兼容，但不再用于证明完整性。
 采集 checkpoint 与 `last_successful_funding_time` 仍描述请求覆盖，不能作为结算完整性的证明。
-现有数据没有历史结算周期来源，因此标准管线不会自动产生已验证的 `complete`。不能用当前周期或从已有事件猜测出的周期冒充历史规则。
+交易所未发布历史结算周期表，因此标准管线使用 `panel.build_funding_schedule(universe, funding, panel_end)` 生成的**数据派生时刻表**：按交易对从事件历史学习每种日事件数的结算时刻模板（支持 8h/4h/2h/1h 混合周期），用众数模板检验缺失或残缺日。该时刻表比逐日观测强（能识别掉采事件），但弱于交易所官方历史日程——系统性漏采且与模板自洽的区间可能自证为 `complete`。官方日程可得时应替换该派生时刻表；不得用当前周期或临时猜测的周期冒充历史规则。
 
-`build_research_panel(..., funding_schedule=...)` 接受 `date, symbol, expected_times` 三列的可信日程，每日每标的一行，`expected_times` 为该日全部 UTC 应结算时刻；空列表明确表示不适用，缺行表示未知。允许一秒以内的历史时间戳漂移，一对一匹配；拒绝重复及跨日时刻。该可选输入目前用于显式核验，标准 HDF 管线尚无可信历史日程数据源接入。
+`build_research_panel(..., funding_schedule=...)` 接受 `date, symbol, expected_times` 三列的可信日程，每日每标的一行，`expected_times` 为该日全部 UTC 应结算时刻；空列表明确表示不适用，缺行表示未知。允许一秒以内的历史时间戳漂移，一对一匹配；拒绝重复及跨日时刻。标准 HDF 管线在 `data/crypto_quant/pipeline.py` 中已接入上述数据派生时刻表；也可通过该参数显式传入外部核验日程。
 这些状态描述该日结束后的数据质量，不能提前用于当日开仓决策。
 
 `has_placeholder_kline` 标记成交量为零且 OHLC 全部相等的行情。这是无交易行情识别，不是推定下架日期。

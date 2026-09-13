@@ -1,7 +1,6 @@
 """End-to-end portfolio pipeline."""
 from __future__ import annotations
 
-import importlib.util
 import pathlib
 from typing import Mapping
 
@@ -23,21 +22,33 @@ from portfolio.reporter.html_renderer import render_html
 
 
 def _load_factor_directions(factor_names: list[str]) -> dict[str, int]:
-    """Load factor directions from factor_analyse/factor_config.py."""
+    """Best-effort directions from factor_mining module SETTINGs; default 1.
+
+    CSV-era factor names are matched case-insensitively against the stems of
+    new-style modules under ``factor_analyse/factor_mining/``. Names without
+    a matching module fall back to direction 1, as before.
+    """
+    directions = {name: 1 for name in factor_names}
     try:
-        spec = importlib.util.spec_from_file_location(
-            "factor_config",
-            pathlib.Path(__file__).resolve().parents[1] / "factor_analyse" / "factor_config.py",
+        mining_dir = (
+            pathlib.Path(__file__).resolve().parents[1]
+            / "factor_analyse" / "factor_mining"
         )
-        mod = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(mod)
-        config = getattr(mod, "FACTOR_CONFIG", {})
-        return {
-            name: config.get(name, {}).get("factor_direction", 1)
-            for name in factor_names
-        }
+        from factor_common.loader import load_factor
+
+        by_stem: dict[str, int] = {}
+        for path in sorted(mining_dir.glob("*.py")):
+            try:
+                by_stem[path.stem.lower()] = load_factor(path).setting["factor_direction"]
+            except Exception:
+                continue
+        for name in factor_names:
+            direction = by_stem.get(str(name).lower())
+            if direction in (-1, 1):
+                directions[name] = direction
     except Exception:
-        return {name: 1 for name in factor_names}
+        pass
+    return directions
 
 
 def run_pipeline(

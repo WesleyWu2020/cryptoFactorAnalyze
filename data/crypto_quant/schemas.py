@@ -88,9 +88,16 @@ def normalize_table(name: str, frame: pd.DataFrame) -> pd.DataFrame:
         if column in spec.key and result[column].isna().any():
             raise ValueError(f"null primary-key value in {name}.{column}")
         if column in _DATE_COLUMNS:
-            result[column] = pd.to_datetime(result[column], errors="raise").dt.normalize()
+            result[column] = (
+                pd.to_datetime(result[column], errors="raise", utc=True)
+                .dt.tz_localize(None)
+                .dt.normalize()
+                .astype("datetime64[ns]")
+            )
         elif column.endswith("_time") or column == "fetched_at_utc" or column == "source_update_time":
-            result[column] = pd.to_datetime(result[column], errors="raise", utc=True)
+            result[column] = pd.to_datetime(
+                result[column], errors="raise", utc=True
+            ).astype("datetime64[ns, UTC]")
         elif column in _STRING_COLUMNS:
             result[column] = result[column].where(result[column].isna(), result[column].astype(str))
         elif column in _INTEGER_COLUMNS:

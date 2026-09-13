@@ -1,69 +1,60 @@
-import pandas as pd
+"""净订单流因子（Net Order Flow）。
+
+公式（与旧版 compute_one 逐点等价）：
+
+    daily_flow = taker_buy_quote_volume - taker_sell_quote_volume
+    其中 taker_sell_quote_volume 用 quote_volume - taker_buy_quote_volume 近似，
+    即 daily_flow = 2 * taker_buy_quote_volume - quote_volume
+    net_flow = rolling_sum(daily_flow, window) / rolling_sum(quote_volume, window)
+    （分母为 0 时置 NaN）
+
+因子衡量过去 window 天内主动买入净流量占总成交额的比例，值越大表示
+净主动买入压力越强。计算只使用当日及历史数据，无未来函数。
+"""
+
+from __future__ import annotations
+
 import numpy as np
-import os
-from datetime import datetime, timedelta
-from tqdm import tqdm
+import pandas as pd
 
-from util_factor import (
-    load_historical_marketcap, build_available_tokens_by_date,
-    load_kline_df, filter_group_by_availability, group_apply_with_progress,
-    rank_to_unit_by_date, save_factor_df, print_availability_sample
-)
 
-def create_net_order_flow_factor(window=20, rebalance_period=3, availability_lookback_days=90):
+TYPE = "regular"
+
+META = {
+    "factor_name": "Net_Order_Flow_Factor",
+    "author": "local",
+    "level": "daily",
+    "category": "order_flow",
+    "description": "N-day net taker buy order flow over quote volume",
+}
+
+SETTING = {
+    "data_needed": ["quote_volume", "taker_buy_quote_volume"],
+    "universe": "historical_top50",
+    "warmup_bars": 20,
+    "preprocessing": "mad_rank",
+    "params": {"window": 20},
+    "factor_direction": 1,
+}
+
+
+def calc_factor(data_ctx: dict[str, pd.DataFrame]) -> pd.DataFrame:
+    """Return the raw daily net-order-flow matrix.
+
+    ``rolling`` operates along the daily index with default
+    ``min_periods == window`` (same as the legacy script), so each value
+    only depends on the current and preceding ``window - 1`` observations.
     """
-    因子名称: net_order_flow（无未来函数版本）
 
-    思路 —— 订单不平衡/净主动买卖流量
-      ① 计算 daily_flow = taker_buy_quote - taker_sell_quote
-         • 若没有 taker_sell_quote，则用 quote_volume - taker_buy_quote 近似
-      ② 在过去 window 天内累计: net_flow = Σ(daily_flow) / Σ(quote_volume 或 taker_buy_quote)
-      ③ 因子值 = net_flow
-    """
-    print(f"开始构建净订单流因子 (Net_Order_Flow) —— 无未来函数版本")
-    print(f"参数: window={window}, rebalance_period={rebalance_period}")
+    window = SETTING["params"]["window"]
 
-    historical_df = load_historical_marketcap()
-    available_tokens_by_date = build_available_tokens_by_date(historical_df, lookback_days=availability_lookback_days, mode="window")
-    print("🔍 生成各日期可用token列表（避免未来函数）...")
-    print_availability_sample(available_tokens_by_date, n=3)
+    quote_volume = data_ctx["quote_volume"].astype("float64")
+    taker_buy_quote = data_ctx["taker_buy_quote_volume"].astype("float64")
 
-    df = load_kline_df()
+    # taker_sell_quote 近似为 quote_volume - taker_buy_quote（与旧版一致）
+    taker_sell_quote = quote_volume - taker_buy_quote
+    daily_flow = taker_buy_quote - taker_sell_quote
 
-    if "taker_sell_quote" not in df.columns:
-        if "quote_volume" in df.columns:
-            df["taker_sell_quote"] = df["quote_volume"] - df["taker_buy_quote"]
-            print("⚠️ 'taker_sell_quote' 缺失，已用 quote_volume - taker_buy_quote 近似")
-        else:
-            raise KeyError("数据缺少 'taker_sell_quote' 和 'quote_volume'，无法计算净流量")
-
-    def calc_factor(group: pd.DataFrame, symbol: str) -> pd.DataFrame:
-        if len(group) < window + rebalance_period:
-            return pd.DataFrame()
-        gp = group.copy()
-        gp["daily_flow"] = gp["taker_buy_quote"] - gp["taker_sell_quote"]
-        denom = gp["quote_volume"] if "quote_volume" in gp.columns else gp["taker_buy_quote"]
-        gp["net_flow"] = gp["daily_flow"].rolling(window).sum() / denom.rolling(window).sum().replace(0, np.nan)
-        gp["future_ret"] = gp["close"].pct_change(rebalance_period).shift(-rebalance_period)
-        gp = filter_group_by_availability(gp, symbol, available_tokens_by_date)
-        return gp[["date", "symbol", "net_flow", "future_ret"]]
-
-    print("计算因子并进行可用性过滤...")
-    result_dfs = group_apply_with_progress(df, "symbol", calc_factor)
-    if not result_dfs:
-        print("⚠️ 没有足够的数据生成因子")
-        return pd.DataFrame()
-
-    result = pd.concat(result_dfs, ignore_index=True).dropna(subset=["net_flow", "future_ret"])
-    result = result.rename(columns={"symbol": "instrument"})
-    factor_df = rank_to_unit_by_date(result, col="net_flow", out_col="factor")[["date", "instrument", "factor", "future_ret"]]
-
-    out_path = save_factor_df(factor_df, file_prefix=f"net_order_flow_{window}d_rebalance{rebalance_period}d_")
-    print(f"✅ 无未来函数的因子数据已保存至: {out_path}")
-    print(f"总计生成 {len(factor_df)} 条因子记录")
-    print("\n无未来函数因子统计信息:")
-    print(factor_df["factor"].describe())
-    return factor_df
-
-if __name__ == "__main__":
-    create_net_order_flow_factor(window=20, rebalance_period=10) 
+    numerator = daily_flow.rolling(window).sum()
+    denominator = quote_volume.rolling(window).sum().replace(0, np.nan)
+    return numerator / denominator

@@ -52,6 +52,18 @@ def test_provider_uses_current_quote_volume_field_name(h5_fixture):
         dp.get_single_data("quoteVolume", start="2024-01-03", end="2024-01-03")
 
 
+def test_provider_exposes_daily_funding_rate_field(h5_fixture):
+    from factor_common.data_provider import DataProvider
+
+    dp = DataProvider(h5_fixture)
+    funding = dp.get_single_data("funding", start="2024-01-03", end="2024-01-08")
+
+    assert funding.index.equals(pd.date_range("2024-01-03", "2024-01-08", freq="D"))
+    assert list(funding.columns) == list(dp.symbols)
+    # BUSDT 2024-01-03 events: -0.001 and -0.002 -> daily mean -0.0015
+    assert funding.loc["2024-01-03", "BUSDT"] == pytest.approx(-0.0015)
+
+
 def test_provider_returns_raw_funding_events_with_positive_and_negative_rates(h5_fixture):
     from factor_common.data_provider import DataProvider
 
@@ -212,6 +224,46 @@ def test_exit_day_fallback_accepts_cadence_superset_rejects_missing(tmp_path):
     assert statuses.loc[(pd.Timestamp("2024-01-06"), "AUSDT")] == "complete"
     assert statuses.loc[(pd.Timestamp("2024-01-07"), "AUSDT")] == "complete"
     assert statuses.loc[(pd.Timestamp("2024-01-07"), "BUSDT")] == "unknown"
+
+
+def test_exit_day_fallback_accepts_complete_replacement_cadence(tmp_path):
+    import pandas as pd
+    from factor_common.data_provider import DataProvider
+    from tests.factor_common.conftest import write_h5_fixture
+
+    def event(day, hour):
+        return {
+            "funding_time": f"2024-01-0{day} {hour:02d}:00:00",
+            "symbol": "AUSDT",
+            "funding_rate": 0.001,
+            "mark_price": 100.0,
+            "rate_type": "Regular",
+        }
+
+    events = pd.DataFrame([
+        event(6, 0), event(6, 8), event(6, 16),
+        event(7, 0), event(7, 4), event(7, 12), event(7, 20),
+    ])
+    schedule = pd.DataFrame([{
+        "date": "2024-01-06",
+        "symbol": "AUSDT",
+        "expected_times": [
+            "2024-01-06 00:00:00",
+            "2024-01-06 08:00:00",
+            "2024-01-06 16:00:00",
+        ],
+    }])
+    path = write_h5_fixture(
+        tmp_path / "fixture.h5", funding_schedule=schedule, funding_events=events
+    )
+
+    quality = DataProvider(path).get_quality(
+        start="2024-01-06", end="2024-01-07", symbols=["AUSDT"]
+    )
+
+    assert quality.loc[
+        (pd.Timestamp("2024-01-07"), "AUSDT"), "funding_coverage_status"
+    ] == "complete"
 
 
 def test_provider_keeps_quality_unknown_for_legacy_panel_flags(h5_fixture):

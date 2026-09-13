@@ -497,7 +497,7 @@ def _autocorr_section(performance) -> str:
             "RankIC autocorrelation", "every lag is null for the full sample"
         )
     chart = _line_chart(
-        "RankIC autocorrelation (full sample)",
+        "Daily overlapping RankIC autocorrelation (full sample)",
         [str(entry["lag"]) for entry in autocorr],
         {
             "autocorr": _clean([entry.get("autocorr") for entry in autocorr]),
@@ -506,6 +506,35 @@ def _autocorr_section(performance) -> str:
         mark_zero=True,
     )
     return _chart_block("chart_autocorr", chart)
+
+
+def _rebalance_autocorr_section(performance) -> str:
+    """Render the autocorrelation of non-overlapping, executed signals."""
+    aligned = performance["samples"]["full"].get("rebalance_aligned")
+    if not isinstance(aligned, dict):
+        return _unavailable(
+            "Rebalance-aligned RankIC autocorrelation",
+            "this saved evaluation predates rebalance-aligned diagnostics",
+        )
+    autocorr = aligned.get("rank_ic_autocorr", [])
+    if not autocorr or all(entry.get("autocorr") is None for entry in autocorr):
+        return _unavailable(
+            "Rebalance-aligned RankIC autocorrelation",
+            "every lag is null for the full sample",
+        )
+    rebalance_days = aligned.get("rebalance_days")
+    chart = _line_chart(
+        "Rebalance-aligned RankIC autocorrelation (full sample)",
+        [str(entry["lag"]) for entry in autocorr],
+        {"autocorr": _clean([entry.get("autocorr") for entry in autocorr])},
+        y_name="autocorrelation",
+        mark_zero=True,
+    )
+    note = (
+        f'<p class="note">lag (rebalances); one observation per {int(rebalance_days)} '
+        "signal days, matched to the actual execution schedule.</p>"
+    )
+    return _chart_block("chart_rebalance_autocorr", chart) + note
 
 
 # ---------------------------------------------------------------------------
@@ -831,6 +860,7 @@ def render_result(result, output_path, *, start=None, end=None) -> dict:
         positions_section=_positions_section(result, start_day, end_day),
         decay_section=_decay_section(performance),
         autocorr_section=_autocorr_section(performance),
+        rebalance_autocorr_section=_rebalance_autocorr_section(performance),
         groups_section=_latest_groups_section(result),
         diagnostics_section=_diagnostics_section(result),
     )

@@ -1,74 +1,72 @@
-import pandas as pd
+"""高波动性动量因子（High Volatility Momentum）。
+
+公式（ratio 模式，与旧版默认一致）：
+
+    roc       = close.pct_change(window)                    # N 日动量
+    tr        = max(high - low, |high - close_prev|, |low - close_prev|)
+    atr       = rolling_mean(tr, atr_window)
+    range_pct = (high - low) / close
+    factor    = roc / range_pct          （ratio 模式）
+    factor    = roc * atr                （product 模式）
+
+ratio 模式刻画单位日内振幅所承载的动量强度；product 模式为 ATR 加权的动量。
+计算只使用当日及历史数据（shift(1)、pct_change、trailing rolling），无未来函数。
+"""
+
+from __future__ import annotations
+
 import numpy as np
+import pandas as pd
 
-from util_factor import (
-    load_historical_marketcap, build_available_tokens_by_date, load_kline_df,
-    filter_group_by_availability, group_apply_with_progress, winsorize_by_date,
-    rank_to_unit_by_date, save_factor_df, future_return, print_availability_sample
-)
 
-def create_high_volatility_momentum_factor(window=20, atr_window=14, momentum_type="product", rebalance_period=3, availability_lookback_days=90):
-    """
-    高波动性动量:
-      roc = pct_change(window)
-      TR = max(high-low, |high-close_prev|, |low-close_prev|)
-      ATR = MA(TR, atr_window)
-      range_pct = (high-low)/close
-      hv_momentum = roc*ATR (product) 或 roc/range_pct (ratio)
-    """
-    print(f"开始构建高波动性动量因子... 参数: window={window}, atr_window={atr_window}, type={momentum_type}, rebalance={rebalance_period}")
+TYPE = "regular"
 
-    historical_df = load_historical_marketcap()
-    available_tokens_by_date = build_available_tokens_by_date(historical_df, lookback_days=availability_lookback_days, mode="window")
-    print("🔍 生成各日期可用token列表（避免未来函数）...")
-    print_availability_sample(available_tokens_by_date, n=3)
+META = {
+    "factor_name": "High_Volatility_Momentum",
+    "author": "local",
+    "level": "daily",
+    "category": "momentum",
+    "description": "Momentum scaled by volatility: roc / range_pct (ratio) or roc * ATR (product)",
+}
 
-    df = load_kline_df()
+SETTING = {
+    "data_needed": ["high", "low", "close"],
+    "universe": "historical_top50",
+    "warmup_bars": 20,
+    "preprocessing": "mad_rank",
+    "params": {
+        "window": 20,
+        "atr_window": 14,
+        "momentum_type": "ratio",
+        "rebalance_period": 10,
+    },
+    # 动量类因子：值越大动量越强（ratio 为单位振幅动量），方向取 +1。
+    "factor_direction": 1,
+}
 
-    def compute_one(group: pd.DataFrame, symbol: str) -> pd.DataFrame:
-        if len(group) < max(window, atr_window) + rebalance_period + 2:
-            return pd.DataFrame()
-        gp = group.copy()
 
-        gp['roc'] = gp['close'].pct_change(periods=window)
+def calc_factor(data_ctx: dict[str, pd.DataFrame]) -> pd.DataFrame:
+    """返回原始高波动性动量矩阵（date × instrument）。"""
 
-        gp['high_low'] = gp['high'] - gp['low']
-        gp['high_close_prev'] = (gp['high'] - gp['close'].shift(1)).abs()
-        gp['low_close_prev'] = (gp['low'] - gp['close'].shift(1)).abs()
-        gp['tr'] = gp[['high_low', 'high_close_prev', 'low_close_prev']].max(axis=1)
+    window = SETTING["params"]["window"]
+    atr_window = SETTING["params"]["atr_window"]
+    momentum_type = SETTING["params"]["momentum_type"]
 
-        gp['atr'] = gp['tr'].rolling(window=atr_window).mean()
-        gp['range_pct'] = gp['high_low'] / gp['close']
+    high = data_ctx["high"].astype("float64")
+    low = data_ctx["low"].astype("float64")
+    close = data_ctx["close"].astype("float64")
 
-        if momentum_type == "product":
-            gp['hvm_raw'] = gp['roc'] * gp['atr']
-        else:
-            gp['hvm_raw'] = gp['roc'] / gp['range_pct'].replace(0, np.nan)
+    roc = close.pct_change(periods=window)
 
-        gp['future_ret'] = future_return(gp['close'], rebalance_period, method="log")
+    close_prev = close.shift(1)
+    tr = pd.concat(
+        [high - low, (high - close_prev).abs(), (low - close_prev).abs()],
+        axis=0,
+    ).groupby(level=0).max()
 
-        gp = filter_group_by_availability(gp, symbol, available_tokens_by_date)
-        return gp[['date', 'symbol', 'hvm_raw', 'future_ret']].dropna()
+    if momentum_type == "product":
+        atr = tr.rolling(window=atr_window).mean()
+        return roc * atr
 
-    print("计算高波动性动量因子（考虑token可用性）...")
-    result_dfs = group_apply_with_progress(df, 'symbol', compute_one)
-    if not result_dfs:
-        print("警告: 没有足够的数据计算因子")
-        return pd.DataFrame()
-
-    factor_df = pd.concat(result_dfs, ignore_index=True)
-
-    factor_df = winsorize_by_date(factor_df, col='hvm_raw', n_std=3.0)
-    factor_df = rank_to_unit_by_date(factor_df, col='hvm_raw', out_col='factor')
-
-    factor_df = factor_df.rename(columns={'symbol': 'instrument'})[['date', 'instrument', 'factor', 'future_ret']]
-
-    out_path = save_factor_df(factor_df, file_prefix=f"high_volatility_momentum_{window}d_{momentum_type}_rebalance{rebalance_period}d_")
-    print(f"✅ 无未来函数的因子数据已保存至: {out_path}")
-    print(f"总计生成 {len(factor_df)} 条因子记录")
-    print("\n无未来函数因子统计信息:")
-    print(factor_df['factor'].describe())
-    return factor_df
-
-if __name__ == "__main__":
-    create_high_volatility_momentum_factor(window=20, atr_window=14, momentum_type="ratio", rebalance_period=10)
+    range_pct = (high - low) / close
+    return roc / range_pct.replace(0, np.nan)

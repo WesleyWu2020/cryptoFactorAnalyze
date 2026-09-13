@@ -37,6 +37,10 @@ FUNDING_FIELDS = (
     "rate_type",
     "mark_price_valid",
 )
+# Daily funding-rate series sourced from research_panel_daily.funding_rate_mean
+# (mean of the day's funding settlement events). Exposed as a regular
+# get_single_data field named "funding" for daily factor modules.
+FUNDING_DAILY_FIELDS = ("funding",)
 
 
 def _normalized_day(value: date | str | pd.Timestamp) -> pd.Timestamp:
@@ -119,8 +123,8 @@ class DataProvider:
         self._symbols = tuple(sorted(market_symbols | universe_symbols))
 
     def list_datas(self) -> list[str]:
-        """List supported daily market fields using the HDF5 schema names."""
-        return list(MARKET_FIELDS)
+        """List supported daily fields (klines_daily schema names plus "funding")."""
+        return list(MARKET_FIELDS) + list(FUNDING_DAILY_FIELDS)
 
     def get_time_range(self) -> tuple[pd.Timestamp | None, pd.Timestamp | None]:
         if self._as_of is not None:
@@ -146,6 +150,8 @@ class DataProvider:
         return pd.date_range(start_day, end_day, freq="D", name="date")
 
     def get_single_data(self, field: str, *, start, end) -> pd.DataFrame:
+        if field in FUNDING_DAILY_FIELDS:
+            return self._get_funding_daily(start=start, end=end)
         if field not in MARKET_FIELDS:
             raise ValueError(f"unknown market field: {field}")
         calendar = self._calendar(start, end)
@@ -162,6 +168,36 @@ class DataProvider:
         else:
             history["date"] = pd.to_datetime(history["date"]).dt.normalize()
             result = history.pivot(index="date", columns="instrument", values=field)
+            result = result.reindex(index=calendar, columns=self.symbols)
+        result.index.name = "date"
+        result.columns.name = None
+        return result
+
+    def _get_funding_daily(self, *, start, end) -> pd.DataFrame:
+        """Daily mean funding rate as a date x instrument matrix.
+
+        Sourced from research_panel_daily.funding_rate_mean (mean of the day's
+        funding settlement events); symbols outside the panel stay NaN.
+        """
+        calendar = self._calendar(start, end)
+        start_day, end_day = _requested_range(start, end, self._as_of)
+        if end_day < start_day:
+            panel = pd.DataFrame(columns=["date", "binance_symbol", "funding_rate_mean"])
+        else:
+            _require_hdf_query_columns(
+                self.path, "research_panel_daily", {"date"}, {"date"}
+            )
+            panel = self._store.read(
+                "research_panel_daily",
+                where=_daily_where("date", start=start_day, end=end_day),
+            )
+        if panel.empty:
+            result = pd.DataFrame(index=calendar, columns=self.symbols, dtype="float64")
+        else:
+            panel["date"] = pd.to_datetime(panel["date"]).dt.normalize()
+            result = panel.pivot(
+                index="date", columns="binance_symbol", values="funding_rate_mean"
+            )
             result = result.reindex(index=calendar, columns=self.symbols)
         result.index.name = "date"
         result.columns.name = None
@@ -293,10 +329,19 @@ class DataProvider:
                     )
                     for a in previous_times
                 )
+                # Keep exit-tail validation consistent with the panel's
+                # funding schedule builder. Binance may replace a cadence
+                # during a UTC day; 3..24 observed settlements constitute a
+                # complete daily template even when old hours disappear.
+                complete_day_template = 3 <= len(events) <= 24
                 valid_prices = events["mark_price_valid"].fillna(False).astype(bool).all()
-                if previous_status in accepted and cadence_kept and valid_prices:
+                if (
+                    previous_status in accepted
+                    and (cadence_kept or complete_day_template)
+                    and valid_prices
+                ):
                     result.loc[key, "funding_coverage_status"] = "complete"
         return result
 
 
-__all__ = ["DataProvider", "FUNDING_FIELDS", "MARKET_FIELDS", "QUALITY_FIELDS"]
+__all__ = ["DataProvider", "FUNDING_DAILY_FIELDS", "FUNDING_FIELDS", "MARKET_FIELDS", "QUALITY_FIELDS"]

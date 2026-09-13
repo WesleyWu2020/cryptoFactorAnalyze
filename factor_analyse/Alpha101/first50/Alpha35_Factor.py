@@ -1,123 +1,74 @@
-# factor_analyse/Alpha101/first50/Alpha35_Factor.py
+"""Alpha101 Alpha#35 因子（factor_common 契约版）。
+
+原始定义:
+    Alpha#35 = ((Ts_Rank(taker_buy_quote, 32) * (1 - Ts_Rank(((close + high) - low), 16))) * (1 - Ts_Rank(returns, 32)))
+
+本实现保留原脚本“币圈7×24h优化版”的实际计算逻辑（参数取旧脚本 __main__
+实际调用值 vol_window=30, price_window=10, ret_window=10，而非签名默认值 32/16/32）:
+    price_strength_rel = ((close + high) - low) / close      # 旧脚本做了无量纲化
+    factor = Ts_Rank(taker_buy_quote_volume, vol_window)
+             * (1 - Ts_Rank(price_strength_rel, price_window))
+             * (1 - Ts_Rank(returns, ret_window))
+其中 returns = close.pct_change()；Ts_Rank 为时序百分位排名（窗口内当前值的
+rank pct），全部只使用当日及历史数据，无未来函数。
+
+FactorManager 只调用下面的标准模块接口；横截面去极值与秩归一化由框架
+preprocessing="mad_rank" 完成，这里输出原始因子值。
+"""
+
+from __future__ import annotations
+
 import pandas as pd
-import numpy as np
-import os
-from datetime import datetime
-from tqdm import tqdm
 
-# 路径以便导入 util_factor
-current_dir = os.path.dirname(os.path.abspath(__file__))
-factor_mining_dir = os.path.join(current_dir, '..', '..', 'factor_mining')
-import sys
-sys.path.insert(0, factor_mining_dir)
 
-from util_factor import (
-    load_historical_marketcap, build_available_tokens_by_date, load_kline_df,
-    filter_group_by_availability, group_apply_with_progress, winsorize_by_date,
-    rank_to_unit_by_date, save_factor_df, future_return, print_availability_sample,
-    print_factor_summary
-)
+TYPE = "regular"
 
-def create_alpha35_factor(vol_window=32, price_window=16, ret_window=32, rebalance_period=7, availability_lookback_days=90):
-    """
-    Alpha 35 因子 (币圈7×24h优化版)
-    
-    原始定义:
-    Alpha 35 = ((Ts_Rank(taker_buy_quote, 32) * (1 - Ts_Rank(((close + high) - low), 16))) * (1 - Ts_Rank(returns, 32)))
-    
-    思路:
-    1. 主动买入金额时序排名：Ts_Rank(taker_buy_quote, 32)
-    2. 价格强度时序排名：Ts_Rank(((close + high) - low), 16)
-    3. 收益率时序排名：Ts_Rank(returns, 32)
-    4. 组合逻辑：买入强度 × (1 - 价格强度排名) × (1 - 收益率排名)
-    
-    - 平均持有期: 7-15天
-    """
-    print(f"开始构建 Alpha 35 因子...")
-    print(f"参数: vol_window={vol_window}, price_window={price_window}, ret_window={ret_window}, rebalance_period={rebalance_period}")
+META = {
+    "factor_name": "Alpha35_Factor",
+    "author": "local",
+    "level": "daily",
+    "category": "alpha101",
+    "description": "Alpha101 #35: tsrank(taker_buy_quote,30) * (1-tsrank(price_strength,10)) * (1-tsrank(returns,10))",
+}
 
-    # 可用性池
-    historical_df = load_historical_marketcap()
-    available_tokens_by_date = build_available_tokens_by_date(
-        historical_df, lookback_days=availability_lookback_days, mode="window"
+SETTING = {
+    "data_needed": ["close", "high", "low", "taker_buy_quote_volume"],
+    "universe": "historical_top50",
+    "warmup_bars": 40,
+    "preprocessing": "mad_rank",
+    "params": {"vol_window": 30, "price_window": 10, "ret_window": 10},
+    "factor_direction": 1,
+}
+
+_EPSILON = 1e-8
+
+
+def _ts_rank(x: pd.DataFrame, window: int) -> pd.DataFrame:
+    """Rolling time-series percentile rank of the current value within the window."""
+    return x.rolling(window=window, min_periods=window).apply(
+        lambda arr: pd.Series(arr).rank(pct=True).iloc[-1], raw=False
     )
-    print("🔍 生成各日期可用token列表（避免未来函数）...")
-    print_availability_sample(available_tokens_by_date, n=3)
 
-    # K线数据
-    df = load_kline_df()
 
-    # 单symbol计算
-    def compute_one(group: pd.DataFrame, symbol: str) -> pd.DataFrame:
-        if len(group) < max(vol_window, price_window, ret_window) + rebalance_period + 2:
-            return pd.DataFrame()
-        gp = group.copy()
+def calc_factor(data_ctx: dict[str, pd.DataFrame]) -> pd.DataFrame:
+    """Return the raw daily Alpha#35 matrix (date x instrument)."""
 
-        # === Alpha 35 因子计算 ===
-        
-        # 1. 收益率
-        gp['returns'] = gp['close'].pct_change()
-        
-        # 2. 价格强度（无量纲化）
-        # ((close + high) - low) / close
-        gp['price_strength_rel'] = ((gp['close'] + gp['high']) - gp['low']) / (gp['close'] + 1e-8)
-        gp['price_strength_rel'] = gp['price_strength_rel'].replace([np.inf, -np.inf], np.nan)
-        
-        # 3. 时序排名计算
-        def ts_rank(series):
-            if len(series) < vol_window:
-                return np.nan
-            # 计算当前值在过去窗口中的排名百分位
-            return series.rank(pct=True).iloc[-1]
-        
-        # 主动买入金额时序排名
-        gp['tsrank_taker_buy'] = gp['taker_buy_quote'].rolling(window=vol_window, min_periods=vol_window).apply(
-            ts_rank, raw=False
-        )
-        
-        # 价格强度时序排名
-        gp['tsrank_price'] = gp['price_strength_rel'].rolling(window=price_window, min_periods=price_window).apply(
-            ts_rank, raw=False
-        )
-        
-        # 收益率时序排名
-        gp['tsrank_ret'] = gp['returns'].rolling(window=ret_window, min_periods=ret_window).apply(
-            ts_rank, raw=False
-        )
-        
-        # 4. 组合因子值
-        gp['alpha35_raw'] = (gp['tsrank_taker_buy'] * (1 - gp['tsrank_price'])) * (1 - gp['tsrank_ret'])
-        
-        # 5. 未来收益
-        gp['future_ret'] = future_return(gp['close'], rebalance_period, method="pct")
+    vol_window = SETTING["params"]["vol_window"]
+    price_window = SETTING["params"]["price_window"]
+    ret_window = SETTING["params"]["ret_window"]
 
-        # 可用性过滤
-        gp = filter_group_by_availability(gp, symbol, available_tokens_by_date)
+    close = data_ctx["close"].astype("float64")
+    high = data_ctx["high"].astype("float64")
+    low = data_ctx["low"].astype("float64")
+    taker_buy_quote = data_ctx["taker_buy_quote_volume"].astype("float64")
 
-        return gp[["date", "symbol", "alpha35_raw", "future_ret"]].dropna()
+    returns = close.pct_change()
 
-    print("计算因子并进行可用性过滤...")
-    result_dfs = group_apply_with_progress(df, "symbol", compute_one)
-    if not result_dfs:
-        print("警告: 没有足够的数据计算因子")
-        return pd.DataFrame()
+    # 价格强度（旧脚本无量纲化版本）: ((close + high) - low) / close
+    price_strength_rel = ((close + high) - low) / (close + _EPSILON)
 
-    factor_df = pd.concat(result_dfs, ignore_index=True)
+    tsrank_taker_buy = _ts_rank(taker_buy_quote, vol_window)
+    tsrank_price = _ts_rank(price_strength_rel, price_window)
+    tsrank_ret = _ts_rank(returns, ret_window)
 
-    # 去极值与按日秩归一化到[-1,1]
-    factor_df = winsorize_by_date(factor_df, col="alpha35_raw", n_std=3.0)
-    factor_df = rank_to_unit_by_date(factor_df, col="alpha35_raw", out_col="factor")
-
-    # 输出
-    factor_df = factor_df.rename(columns={"symbol": "instrument"})[["date", "instrument", "factor", "future_ret"]]
-    out_path = save_factor_df(factor_df, file_prefix=f"alpha35_taker_buy_tsrank_vol{vol_window}d_price{price_window}d_ret{ret_window}d_")
-
-    print_factor_summary(factor_df, out_path)
-    return factor_df
-
-if __name__ == "__main__":
-    # 标准参数
-    create_alpha35_factor(vol_window=30, price_window=10, ret_window=10, rebalance_period=7)
-    
-    # 可选：更短的窗口，适应加密货币市场的更快节奏
-    # create_alpha35_factor(vol_window=20, price_window=7, ret_window=7, rebalance_period=5)
+    return tsrank_taker_buy * (1.0 - tsrank_price) * (1.0 - tsrank_ret)

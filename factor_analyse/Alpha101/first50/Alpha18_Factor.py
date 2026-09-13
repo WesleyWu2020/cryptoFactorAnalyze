@@ -1,155 +1,65 @@
+"""Alpha101 Alpha#18 因子（factor_common 契约版）。
+
+原始定义:
+    Alpha#18 = -1 * rank(((stddev(abs((close - open)), 5) + (close - open))
+                          + correlation(close, open, 10)))
+
+本实现保留原脚本“币圈7×24h优化版”的实际计算逻辑（以代码为准）:
+    std_abs_co = ts_std(abs(close - open), std_window)
+    co_diff    = close - open
+    corr_co    = correlation(close, open, corr_window)
+    factor     = -1 * cross_sectional_rank((std_abs_co + co_diff) + corr_co)
+
+参数取原脚本 __main__ 实际调用值: std_window=5, corr_window=5。
+原脚本的 normalization_method 仅生成未被因子使用的 normalized_* 列，丢弃；
+rebalance_period 只用于旧版 future_ret，不属于因子值计算，丢弃。
+
+计算只使用当日及历史数据，无未来函数。FactorManager 只调用下面的标准模块接口。
+公式内部的横截面 rank 保留；最终去极值与归一化由框架 preprocessing="mad_rank" 完成。
+"""
+
+from __future__ import annotations
+
 import pandas as pd
-import numpy as np
-import os
-from datetime import datetime
-from tqdm import tqdm
 
-def create_alpha18_factor(std_window=5, corr_window=10, rebalance_period=3, normalization_method='relative_price'):
-    """
-    创建 Alpha 18 因子 (币圈7×24h优化版)
-    
-    参数:
-    std_window: 波动性窗口，默认为5天
-    corr_window: 相关性窗口，默认为10天
-    rebalance_period: 调仓周期，默认为3天
-    normalization_method: 归一化方法，可选: 'relative_price', 'market_cap', 'price_change'
-    
-    原理:
-    Alpha 18 = -1 * rank(((stddev(abs((close - open)), 5) + (close - open)) + correlation(close, open, 10)))
-    """
-    print(f"开始构建 Alpha 18 因子 (币圈7×24h优化版)...")
-    print(f"参数: std_window={std_window}, corr_window={corr_window}, rebalance_period={rebalance_period}, normalization_method={normalization_method}")
-    
-    # 获取当前脚本所在目录
-    current_dir = os.path.dirname(os.path.abspath(__file__))
-    base_dir = os.path.dirname(os.path.dirname(current_dir))  # 回到Crypto目录
-    
-    # 数据文件路径
-    data_dir = os.path.join(base_dir, "data", "kline_data")
-    
-    # 查找最新的K线数据文件
-    kline_files = [f for f in os.listdir(data_dir) if f.startswith("binance_daily_klines_")]
-    if not kline_files:
-        raise FileNotFoundError("未找到K线数据文件")
-    
-    latest_file = sorted(kline_files)[-1]
-    data_path = os.path.join(data_dir, latest_file)
-    
-    print(f"读取数据文件: {data_path}")
-    
-    # 读取K线数据
-    df = pd.read_csv(data_path)
-    df['date'] = pd.to_datetime(df['date'])
-    df = df.sort_values(['symbol', 'date'])
-    
-    def calculate_alpha18_factor(group):
-        if len(group) < max(std_window, corr_window) + rebalance_period + 20:
-            return pd.DataFrame()
-        
-        # 归一化处理
-        if normalization_method == 'relative_price':
-            group['normalized_close'] = group['close'] / group['close'].rolling(window=20, min_periods=20).mean()
-            group['normalized_open'] = group['open'] / group['open'].rolling(window=20, min_periods=20).mean()
-        elif normalization_method == 'market_cap':
-            group['normalized_close'] = group['close'] * group['volume'] / group['volume'].rolling(window=20, min_periods=20).mean()
-            group['normalized_open'] = group['open'] * group['volume'] / group['volume'].rolling(window=20, min_periods=20).mean()
-        elif normalization_method == 'price_change':
-            group['normalized_close'] = group['close'].pct_change(periods=5)
-            group['normalized_open'] = group['open'].pct_change(periods=5)
-        else:
-            group['normalized_close'] = group['close'] / group['close'].rolling(window=20, min_periods=20).mean()
-            group['normalized_open'] = group['open'] / group['open'].rolling(window=20, min_periods=20).mean()
-        
-        # 计算未来对数收益率
-        group['future_ret'] = np.log(group['close'].shift(-rebalance_period) / group['close'])
-        
-        # 只保留需要的列
-        result = group[['date', 'symbol', 'normalized_close', 'normalized_open', 'close', 'open', 'future_ret']].copy()
-        result = result.dropna()
-        return result
 
-    print("计算 Alpha 18 因子基础数据...")
-    result_dfs = []
-    for symbol, group in tqdm(df.groupby('symbol')):
-        factor_result = calculate_alpha18_factor(group)
-        if not factor_result.empty:
-            result_dfs.append(factor_result)
-    if not result_dfs:
-        print("警告: 没有足够的数据计算因子")
-        return pd.DataFrame()
-    factor_df = pd.concat(result_dfs, ignore_index=True)
+TYPE = "regular"
 
-    print("计算时序波动性、日内收益和相关性...")
-    def calculate_time_series_metrics(group):
-        if len(group) < max(std_window, corr_window) + 1:
-            return pd.DataFrame()
-        # 日内波动性
-        group['abs_co'] = np.abs(group['close'] - group['open'])
-        group['std_abs_co'] = group['abs_co'].rolling(window=std_window, min_periods=std_window).std()
-        # 日内收益
-        group['co_diff'] = group['close'] - group['open']
-        # 收盘-开盘相关性
-        group['corr_co'] = group['close'].rolling(window=corr_window, min_periods=corr_window).corr(group['open'])
-        return group
+META = {
+    "factor_name": "Alpha18_Factor",
+    "author": "local",
+    "level": "daily",
+    "category": "alpha101",
+    "description": "Alpha101 #18: -1 * rank(ts_std(abs(close-open), 5) + (close-open) + corr(close, open, 5))",
+}
 
-    result_dfs = []
-    for symbol, group in tqdm(factor_df.groupby('symbol')):
-        ts_result = calculate_time_series_metrics(group)
-        if not ts_result.empty:
-            result_dfs.append(ts_result)
-    if not result_dfs:
-        print("警告: 没有足够的数据计算时序指标")
-        return pd.DataFrame()
-    factor_df = pd.concat(result_dfs, ignore_index=True)
-    factor_df = factor_df.dropna(subset=['std_abs_co', 'co_diff', 'corr_co'])
+SETTING = {
+    "data_needed": ["open", "close"],
+    "universe": "historical_top50",
+    "warmup_bars": 15,
+    "preprocessing": "mad_rank",
+    "params": {"std_window": 5, "corr_window": 5},
+    "factor_direction": 1,
+}
 
-    print("计算横截面排名和复合因子...")
-    def calculate_final_factor(df):
-        df = df.copy()
-        # 复合信号
-        df['alpha18_raw'] = (df['std_abs_co'] + df['co_diff']) + df['corr_co']
-        # 横截面排名
-        df['alpha18_rank'] = df['alpha18_raw'].rank(pct=True)
-        # 取反
-        df['alpha18_factor'] = -1 * df['alpha18_rank']
-        return df
 
-    factor_df = factor_df.groupby('date', group_keys=False).apply(calculate_final_factor)
+def calc_factor(data_ctx: dict[str, pd.DataFrame]) -> pd.DataFrame:
+    """Return the raw daily Alpha#18 matrix (date x instrument)."""
 
-    print("处理极端值和归一化...")
-    def winsorize_by_date(df):
-        df = df.copy()
-        mean = df['alpha18_factor'].mean()
-        std = df['alpha18_factor'].std()
-        df['alpha18_factor'] = df['alpha18_factor'].clip(lower=mean-3*std, upper=mean+3*std)
-        return df
-    factor_df = factor_df.groupby('date', group_keys=False).apply(winsorize_by_date)
+    std_window = SETTING["params"]["std_window"]
+    corr_window = SETTING["params"]["corr_window"]
 
-    def normalize_by_date(df):
-        df = df.copy()
-        rank_pct = df['alpha18_factor'].rank(pct=True)
-        df['factor'] = 2 * (rank_pct - 0.5)
-        return df
-    print("排序归一化因子值到-1到1之间...")
-    factor_df = factor_df.groupby('date', group_keys=False).apply(normalize_by_date)
+    open_ = data_ctx["open"].astype("float64")
+    close = data_ctx["close"].astype("float64")
 
-    factor_df = factor_df.rename(columns={'symbol': 'instrument'})
-    factor_df = factor_df[['date', 'instrument', 'factor', 'future_ret']]
+    # 日内波动性与日内收益
+    abs_co = (close - open_).abs()
+    std_abs_co = abs_co.rolling(window=std_window, min_periods=std_window).std()
+    co_diff = close - open_
 
-    output_dir = os.path.join(base_dir, "data", "factor_data")
-    os.makedirs(output_dir, exist_ok=True)
-    today = datetime.now().strftime('%Y%m%d')
-    output_path = os.path.join(output_dir, f"alpha18_intraday_vol_corr_std{std_window}d_corr{corr_window}d_{normalization_method}_rebalance{rebalance_period}d_{today}.csv")
-    factor_df.to_csv(output_path, index=False)
+    # 收盘-开盘时序相关性
+    corr_co = close.rolling(window=corr_window, min_periods=corr_window).corr(open_)
 
-    print(f"✅ 因子数据已保存至: {output_path}")
-    print(f"总计生成 {len(factor_df)} 条因子记录")
-    print("\n因子统计信息:")
-    print(factor_df['factor'].describe())
-    print("\n数据预览:")
-    print(factor_df.head())
-    return factor_df
-
-if __name__ == "__main__":
-    # 推荐参数
-    create_alpha18_factor(std_window=5, corr_window=5, rebalance_period=5, normalization_method='relative_price')
+    # 复合信号 -> 横截面 rank -> 取反（公式内部 rank 保留）
+    raw = (std_abs_co + co_diff) + corr_co
+    return -1.0 * raw.rank(axis=1, pct=True)

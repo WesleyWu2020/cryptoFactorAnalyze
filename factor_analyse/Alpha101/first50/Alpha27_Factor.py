@@ -1,134 +1,78 @@
+"""Alpha101 Alpha#27 因子（factor_common 契约版）。
+
+原始定义:
+    Alpha#27 = (0.5 < rank((sum(correlation(rank(volume), rank(vwap), 6), 2) / 2.0))) ? -1 : 1
+
+本实现保留原脚本“币圈7×24h优化版”的实际计算结构:
+    vwap      = quote_volume / volume（volume>0 掩码）
+    corr      = correlation(rank(volume), rank(vwap), corr_window)
+    corr_mean = mean(corr, mean_window)
+    factor    = where(cross_section_rank_pct(corr_mean) > 0.5, -1, 1)
+参数取原脚本 __main__ 实际调用值 corr_window=20, mean_window=10
+（rebalance_period 仅用于旧版 future_ret，丢弃）。
+
+与旧脚本的一处必要偏离（修复未来函数）:
+    旧脚本中 rank(volume)/rank(vwap) 是“单 symbol 全历史时间序列秩”，
+    其 t 时点取值依赖未来数据，属于前视偏差。这里按经典 Alpha#27 公式语义
+    改为当日横截面 pct 秩（axis=1），既是公式原意又满足无未来函数约束。
+
+计算只使用当日及历史数据，无未来函数。FactorManager 只调用下面的标准模块接口。
+横截面去极值与秩归一化由框架 preprocessing="mad_rank" 完成（对 -1/1 二元信号等价于保序归一）。
+"""
+
+from __future__ import annotations
+
 import pandas as pd
-import numpy as np
-import os
-from datetime import datetime
-from tqdm import tqdm
 
-def create_alpha27_factor(rebalance_period=5, corr_window=6, mean_window=2):
-    """
-    创建 Alpha 27 因子 (基于市场微观结构的二元因子)
 
-    参数:
-    rebalance_period: 调仓周期，默认为5天
-    corr_window: 相关性窗口，默认为6
-    mean_window: 相关性均值窗口，默认为2
+TYPE = "regular"
 
-    原理:
-    Alpha 27 = 
-        if (0.5 < rank((sum(correlation(rank(volume), rank(vwap), 6), 2) / 2.0))):
-            -1
-        else:
-            1
+META = {
+    "factor_name": "Alpha27_Factor",
+    "author": "local",
+    "level": "daily",
+    "category": "alpha101",
+    "description": "Alpha101 #27: where(cs_rank(mean(corr(cs_rank(volume), cs_rank(vwap), 20), 10)) > 0.5, -1, 1)",
+}
 
-    1. correlation(rank(volume), rank(vwap), 6)：分析交易量排名与VWAP排名的关系
-    2. sum(..., 2) / 2：2天平均相关性，衡量关系稳定性
-    3. rank(...)：横截面排名
-    4. 二元信号：买入(1)或卖出(-1)
-    """
-    print(f"开始构建 Alpha 27 因子 ...")
-    print(f"参数: rebalance_period={rebalance_period}, corr_window={corr_window}, mean_window={mean_window}")
+SETTING = {
+    "data_needed": ["volume", "quote_volume"],
+    "universe": "historical_top50",
+    "warmup_bars": 35,
+    "preprocessing": "mad_rank",
+    "params": {"corr_window": 20, "mean_window": 10},
+    "factor_direction": 1,
+}
 
-    # 获取当前脚本所在目录
-    current_dir = os.path.dirname(os.path.abspath(__file__))
-    base_dir = os.path.dirname(os.path.dirname(current_dir))  # 回到Crypto目录
+_EPSILON = 1e-8
 
-    # 数据文件路径
-    data_dir = os.path.join(base_dir, "data", "kline_data")
 
-    # 查找最新的K线数据文件
-    kline_files = [f for f in os.listdir(data_dir) if f.startswith("binance_daily_klines_")]
-    if not kline_files:
-        raise FileNotFoundError("未找到K线数据文件")
+def calc_factor(data_ctx: dict[str, pd.DataFrame]) -> pd.DataFrame:
+    """Return the raw daily Alpha#27 binary signal matrix (date x instrument)."""
 
-    latest_file = sorted(kline_files)[-1]
-    data_path = os.path.join(data_dir, latest_file)
+    corr_window = SETTING["params"]["corr_window"]
+    mean_window = SETTING["params"]["mean_window"]
+    for name, value in (("corr_window", corr_window), ("mean_window", mean_window)):
+        if isinstance(value, bool) or not isinstance(value, int) or value < 2:
+            raise ValueError(f"SETTING.params.{name} must be an integer >= 2")
 
-    print(f"读取数据文件: {data_path}")
+    volume = data_ctx["volume"].astype("float64")
+    quote_volume = data_ctx["quote_volume"].astype("float64")
 
-    # 读取K线数据
-    df = pd.read_csv(data_path)
-    df['date'] = pd.to_datetime(df['date'])
-    df = df.sort_values(['symbol', 'date'])
+    # 1. VWAP（仅在有成交流的日子可观测）
+    vwap = (quote_volume / (volume + _EPSILON)).where(volume > 0)
 
-    # 创建因子计算函数
-    def calculate_alpha27_factor(group):
-        if len(group) < corr_window + mean_window + 5:
-            return pd.DataFrame()
+    # 2. 横截面 pct 秩（经典公式语义；替代旧脚本非因果的全历史 TS 秩）
+    vol_rank = volume.rank(axis=1, pct=True)
+    vwap_rank = vwap.rank(axis=1, pct=True)
 
-        # 1. VWAP
-        group['vwap'] = (group['quote_volume'] / group['volume']).replace([np.inf, -np.inf], np.nan)
-        # 2. rank(volume), rank(vwap)
-        group['vol_rank'] = group['volume'].rank(method='average')
-        group['vwap_rank'] = group['vwap'].rank(method='average')
-        # 3. correlation(rank(volume), rank(vwap), corr_window)
-        group['corr_vol_vwap'] = group[['vol_rank', 'vwap_rank']].rolling(window=corr_window, min_periods=corr_window).corr().iloc[0::2,-1].reset_index(level=1, drop=True)
-        # 4. 2天均值
-        group['corr_mean'] = group['corr_vol_vwap'].rolling(window=mean_window, min_periods=mean_window).mean()
-        # 5. future return
-        group['future_ret'] = np.log(group['close'].shift(-rebalance_period) / group['close'])
+    # 3. corr_window 日滚动相关
+    corr = vol_rank.rolling(window=corr_window, min_periods=corr_window).corr(vwap_rank)
 
-        # 只保留需要的列
-        result = group[['date', 'symbol', 'corr_mean', 'future_ret']].copy()
-        result = result.dropna()
-        return result
+    # 4. mean_window 日均值（sum(..., 2) / 2 即 2 日均值）
+    corr_mean = corr.rolling(window=mean_window, min_periods=mean_window).mean()
 
-    # 按交易对分组计算
-    print("计算 Alpha 27 因子基础数据...")
-    result_dfs = []
-    for symbol, group in tqdm(df.groupby('symbol')):
-        factor_result = calculate_alpha27_factor(group)
-        if not factor_result.empty:
-            result_dfs.append(factor_result)
-
-    if not result_dfs:
-        print("警告: 没有足够的数据计算因子")
-        return pd.DataFrame()
-
-    factor_df = pd.concat(result_dfs, ignore_index=True)
-
-    # 横截面排名并生成二元信号
-    def cross_section_rank_signal(df):
-        df = df.copy()
-        # 横截面排名
-        rank_pct = df['corr_mean'].rank(pct=True)
-        # 0.5为阈值，>0.5为-1，<=0.5为1
-        df['factor'] = np.where(rank_pct > 0.5, -1, 1)
-        return df
-
-    print("横截面排名并生成二元信号...")
-    factor_df = factor_df.groupby('date', group_keys=False).apply(cross_section_rank_signal)
-
-    # 重命名列以符合因子分析框架要求
-    factor_df = factor_df.rename(columns={
-        'symbol': 'instrument'
-    })
-
-    # 确保列的顺序为 date, instrument, factor, future_ret
-    factor_df = factor_df[['date', 'instrument', 'factor', 'future_ret']]
-
-    # 创建输出目录
-    output_dir = os.path.join(base_dir, "data", "factor_data")
-    os.makedirs(output_dir, exist_ok=True)
-
-    # 保存因子数据
-    today = datetime.now().strftime('%Y%m%d')
-    output_path = os.path.join(output_dir, f"alpha27_microstructure_binary_rebalance{rebalance_period}d_{today}.csv")
-    factor_df.to_csv(output_path, index=False)
-
-    print(f"✅ 因子数据已保存至: {output_path}")
-    print(f"总计生成 {len(factor_df)} 条因子记录")
-
-    # 显示因子数据统计信息
-    print("\n因子统计信息:")
-    stats = factor_df['factor'].describe()
-    print(stats)
-
-    # 显示前几行数据
-    print("\n数据预览:")
-    print(factor_df.head())
-
-    return factor_df
-
-if __name__ == "__main__":
-    # === Alpha 27 因子参数优化测试 ===
-    create_alpha27_factor(rebalance_period=10, corr_window=20, mean_window=10)
+    # 5. 横截面秩 > 0.5 给 -1，否则给 1（二元信号；NaN 保持 NaN）
+    cs_rank = corr_mean.rank(axis=1, pct=True)
+    signal = 1.0 - 2.0 * cs_rank.gt(0.5).astype(float)
+    return signal.where(cs_rank.notna())

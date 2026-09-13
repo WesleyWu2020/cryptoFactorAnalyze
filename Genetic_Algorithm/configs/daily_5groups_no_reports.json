@@ -1,5 +1,9 @@
 {
   "seed": 42,
+  "fitness_mode": "robust_ic",
+  "stability_penalty": 0.5,
+  "worst_quarter_penalty": 1.0,
+  "complexity_penalty": 0.001,
   "population": 200,
   "generations": 20,
   "max_depth": 4,

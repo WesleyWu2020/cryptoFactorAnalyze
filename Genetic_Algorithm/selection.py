@@ -7,6 +7,37 @@ from typing import Any, Iterable, Mapping, Sequence
 
 import numpy as np
 import pandas as pd
+from .features import expression_families
+
+
+def trading_similarity(left_returns, right_returns, left_positions, right_positions, config):
+    """Training-only net return correlation and same-side holding overlap.
+
+    Positions are quantities: compare membership/sign, never raw quantities
+    across differently priced instruments. Ignore jointly flat dates.
+    """
+    pair = pd.concat([left_returns, right_returns], axis=1).dropna()
+    if len(pair) < config.min_overlap_days:
+        raise ValueError("insufficient training return overlap")
+    correlation = pair.iloc[:, 0].corr(pair.iloc[:, 1])
+    if not np.isfinite(correlation):
+        raise ValueError("undefined training return correlation")
+    dates = left_positions.index.intersection(right_positions.index)
+    columns = left_positions.columns.union(right_positions.columns)
+    left = np.sign(left_positions.reindex(index=dates, columns=columns, fill_value=0))
+    right = np.sign(right_positions.reindex(index=dates, columns=columns, fill_value=0))
+    if left.isna().any().any() or right.isna().any().any():
+        raise ValueError("missing training positions")
+    denominator = (left.ne(0).sum(axis=1) + right.ne(0).sum(axis=1))
+    overlap = (2 * (left.eq(right) & left.ne(0)).sum(axis=1) / denominator.where(denominator > 0)).dropna()
+    if len(overlap) < config.min_overlap_days:
+        raise ValueError("insufficient active training position overlap")
+    mean_overlap = float(overlap.mean())
+    return {
+        "return_correlation": float(correlation), "position_overlap": mean_overlap,
+        "too_similar": bool(correlation >= config.return_correlation_limit
+                            or mean_overlap >= config.position_overlap_limit),
+    }
 
 
 @dataclass(frozen=True)
@@ -192,7 +223,8 @@ def deduplicate_training(
             for candidate, candidate_id in zip(candidate_items, candidate_ids)
             if candidate_id not in duplicate_ids and candidate_id not in ineligible_ids
         ),
-        key=_candidate_score,
+        key=(lambda c: (_candidate_score(c)[1], _candidate_score(c)[0], *_candidate_score(c)[2:]))
+        if _value(config, "fitness_mode", "legacy_ic") == "all_costs_sharpe" else _candidate_score,
     )
     archive_items = tuple(archive)
     accepted: list[Any] = []
@@ -288,6 +320,16 @@ def deduplicate_training(
             else:
                 comparisons.append(Comparison(candidate_id, reference_id, common_days, mean_abs, True))
 
+        if _value(config, "family_diversity", False):
+            tree = candidate["tree"] if isinstance(candidate, Mapping) else candidate.tree
+            families = expression_families(tree)
+            # Balance the shortlist too: otherwise a global top-20 cap could
+            # discard other families before independent validation.
+            family_limit = max(1, (limit + 3) // 4)
+            for family in families:
+                count = sum(family in expression_families(c["tree"] if isinstance(c, Mapping) else c.tree) for c in accepted)
+                if count >= family_limit:
+                    candidate_reasons.append(f"shortlist family limit reached: {family} ({family_limit})")
         if candidate_reasons or len(accepted) >= limit:
             if len(accepted) >= limit:
                 candidate_reasons.append(f"selection limit reached: {limit}")
@@ -314,7 +356,8 @@ def deduplicate_training(
 
 
 def select_validation(
-    training_candidates: Iterable[Any], validation_results: Mapping[str, Mapping[str, Any]], config: Any
+    training_candidates: Iterable[Any], validation_results: Mapping[str, Mapping[str, Any]], config: Any,
+    *, trading_evidence=None,
 ) -> ValidationSelectionResult:
     """Freeze only candidates meeting predeclared validation evidence gates."""
     accepted: list[tuple[Any, Mapping[str, Any]]] = []
@@ -351,13 +394,14 @@ def select_validation(
                 minimum_days = int(_value(config, "min_quarter_days", 45))
                 if not isinstance(days, (int, float)) or days < minimum_days:
                     failures.append(f"{quarter} has fewer than {minimum_days} valid days")
-            if (_finite(result.get("mean_ic")) or 0.0) <= 0.0:
-                failures.append("mean IC is not positive")
-            quarters = result.get("quarter_means", {})
-            if not isinstance(quarters, Mapping):
-                quarters = {}
-            if sum(1 for value in quarters.values() if (_finite(value) or 0.0) > 0.0) < 3:
-                failures.append("fewer than 3 positive validation quarters")
+            if _value(config, "fitness_mode", "legacy_ic") != "all_costs_sharpe":
+                if (_finite(result.get("mean_ic")) or 0.0) <= 0.0:
+                    failures.append("mean IC is not positive")
+                quarters = result.get("quarter_means", {})
+                if not isinstance(quarters, Mapping):
+                    quarters = {}
+                if sum(1 for value in quarters.values() if (_finite(value) or 0.0) > 0.0) < 3:
+                    failures.append("fewer than 3 positive validation quarters")
             if (_finite(result.get("all_costs_cumulative_return")) or 0.0) <= 0.0:
                 failures.append("all_costs cumulative return is not positive")
             net_sharpe = _finite(result.get("net_sharpe"))
@@ -369,6 +413,20 @@ def select_validation(
                     failures.append(
                         f"all_costs Sharpe is not greater than {minimum_sharpe:g}"
                     )
+            for enabled, key in (("reference_factor", "incremental"),
+                                 ("validation_parameter_stability", "parameter_stability")):
+                if _value(config, enabled, False):
+                    check = result.get(key)
+                    if not isinstance(check, Mapping) or check.get("passed") is not True:
+                        failures.extend((check.get("reasons") if isinstance(check, Mapping) else None)
+                                        or [f"missing or failed validation {key}"])
+            if _value(config, "validation_stability", False):
+                stability = result.get("cost_stability")
+                if not isinstance(stability, Mapping) or stability.get("passed") is not True:
+                    failures.extend(stability.get("reasons", ["missing validation cost stability"]) if isinstance(stability, Mapping)
+                                    else ["missing validation cost stability"])
+                    if not failures:
+                        failures.append("validation cost stability failed")
         if failures:
             rejected.append(candidate)
             reasons[candidate_id] = (*reasons.get(candidate_id, ()), *failures)
@@ -380,11 +438,36 @@ def select_validation(
         _candidate_id(pair[0]),
     ))
     limit = min(5, int(_value(config, "frozen_limit", 5)))
-    for candidate, _ in accepted[limit:]:
-        rejected.append(candidate)
+    diversified = []
+    for candidate, _ in accepted:
         candidate_id = _candidate_id(candidate)
-        reasons[candidate_id] = (*reasons.get(candidate_id, ()), f"selection limit reached: {limit}")
-    return ValidationSelectionResult(tuple(candidate for candidate, _ in accepted[:limit]), tuple(rejected), reasons)
+        failures = []
+        if _value(config, "family_diversity", False):
+            tree = candidate["tree"] if isinstance(candidate, Mapping) else candidate.tree
+            for family in sorted(expression_families(tree)):
+                count = sum(family in expression_families(c["tree"] if isinstance(c, Mapping) else c.tree) for c in diversified)
+                if count >= _value(config, "family_candidate_limit", 2):
+                    failures.append(f"frozen family limit reached: {family}")
+        if trading_evidence is not None:
+            if candidate_id not in trading_evidence:
+                raise ValueError(f"missing training trading evidence: {candidate_id}")
+            returns, positions = trading_evidence[candidate_id]
+            for reference in diversified:
+                reference_id = _candidate_id(reference)
+                other_returns, other_positions = trading_evidence[reference_id]
+                comparison = trading_similarity(returns, other_returns, positions, other_positions, config)
+                if comparison["too_similar"]:
+                    failures.append(f"training trading similarity with {reference_id}: "
+                                    f"return_correlation={comparison['return_correlation']:.6f}, "
+                                    f"position_overlap={comparison['position_overlap']:.6f}")
+        if len(diversified) >= limit:
+            failures.append(f"selection limit reached: {limit}")
+        if failures:
+            rejected.append(candidate)
+            reasons[candidate_id] = (*reasons.get(candidate_id, ()), *failures)
+        else:
+            diversified.append(candidate)
+    return ValidationSelectionResult(tuple(diversified), tuple(rejected), reasons)
 
 
 __all__ = ["Comparison", "DeduplicationResult", "ValidationSelectionResult", "deduplicate_training", "select_validation"]

@@ -203,6 +203,7 @@ def _run_scenario(ctx: _Context, *, fees: bool, funding: bool) -> dict:
     coverage_frames: list[pd.DataFrame] = []
     blocked: list[dict] = []
     retrospective: list[dict] = []
+    forced_exits: list[dict] = []
     failed_orders = 0
     halt = None
 
@@ -212,16 +213,45 @@ def _run_scenario(ctx: _Context, *, fees: bool, funding: bool) -> dict:
 
         # 1. Value old holdings at this boundary's open.
         price_pnl = 0.0
+        fee = 0.0
+        slippage = 0.0
+        trade_notional = 0.0
         for inst, qty in held_pre.items():
             price = open_row[inst]
             if not _valid_price(price):
-                halt = {"reason": "unpriceable_position", "date": day, "instrument": str(inst)}
-                break
+                exit_price = last_price[inst]
+                notional = abs(qty) * exit_price
+                order_fee = notional * fee_rate
+                order_slippage = notional * slippage_rate
+                fee += order_fee
+                slippage += order_slippage
+                trade_notional += notional
+                order_rows.append({
+                    "date": day,
+                    "instrument": inst,
+                    "side": "buy" if qty < 0 else "sell",
+                    "target_weight": 0.0,
+                    "target_quantity": 0.0,
+                    "order_quantity": -qty,
+                    "price": exit_price,
+                    "notional": notional,
+                    "fee": order_fee,
+                    "slippage": order_slippage,
+                    "status": "filled",
+                    "reason": "unpriceable_forced_exit",
+                })
+                quantities[inst] = 0.0
+                forced_exits.append({
+                    "date": _iso(day),
+                    "instrument": str(inst),
+                    "price": exit_price,
+                })
+                continue
             price_pnl += qty * (float(price) - last_price[inst])
             last_price[inst] = float(price)
-        if halt is not None:
-            break
         equity += price_pnl
+        equity -= fee + slippage
+        held_pre = {inst: qty for inst, qty in quantities.items() if qty != 0.0}
 
         # 2. Settle funding exactly at this boundary on pre-trade quantities.
         funding_cash = 0.0
@@ -246,9 +276,6 @@ def _run_scenario(ctx: _Context, *, fees: bool, funding: bool) -> dict:
             break
 
         # 3. Execute scheduled orders against equity after already-due funding.
-        fee = 0.0
-        slippage = 0.0
-        trade_notional = 0.0
         if day in ctx.scheduled_set:
             signal = ctx.signal_row(day)
             equity_before_trade = equity
@@ -438,6 +465,7 @@ def _run_scenario(ctx: _Context, *, fees: bool, funding: bool) -> dict:
         "final_quantities": final_quantities,
         "blocked_orders": blocked,
         "retrospective_nonexecution": retrospective,
+        "unpriceable_forced_exits": forced_exits,
         "funding_total": float(funding_out["cashflow"].sum()) if not funding_out.empty else 0.0,
     }
     return {

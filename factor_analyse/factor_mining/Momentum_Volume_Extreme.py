@@ -1,87 +1,83 @@
-import pandas as pd
+"""动量-成交量极值分组因子 (Momentum Volume Extreme)。
+
+公式（window=20，半窗 half=window//2=10）：
+
+    momentum_t = close_t / close_{t-window} - 1
+    对每个标的、每个交易日 t，取过去 window 天 (t-window+1 .. t)，
+    按当日 volume 从大到小排序；
+    factor_t = 成交量最大的 half 天的 momentum 之和
+             / 成交量最小的 half 天的 momentum 之和
+
+其中对 momentum 求和时跳过 NaN（与旧版 pandas ``.sum()`` 默认 skipna=True
+语义一致）；当低成交量半窗动量和为 0 或比值非有限值时输出 NaN。
+
+计算只使用当日及历史数据，无未来函数。FactorManager 只调用下面的标准模块接口。
+"""
+
+from __future__ import annotations
+
 import numpy as np
-import os
-from datetime import datetime, timedelta
-from tqdm import tqdm
+import pandas as pd
 
-from util_factor import (
-    load_historical_marketcap, build_available_tokens_by_date,
-    load_kline_df, filter_group_by_availability, group_apply_with_progress,
-    winsorize_by_date, rank_to_unit_by_date, save_factor_df, print_availability_sample
-)
 
-def create_momentum_volume_extreme(window=20, rebalance_period=3, availability_lookback_days=90):
+TYPE = "regular"
+
+META = {
+    "factor_name": "Momentum_Volume_Extreme",
+    "author": "local",
+    "level": "daily",
+    "category": "momentum",
+    "description": "Ratio of momentum summed on top-volume days vs bottom-volume days within a trailing window",
+}
+
+SETTING = {
+    "data_needed": ["close", "volume"],
+    "universe": "historical_top50",
+    # momentum 需要 shift(window)，rolling 窗口再回看 window 天，
+    # 首个完全有效的因子值在第 2*window-1 行，取保守值 2*window。
+    "warmup_bars": 40,
+    "preprocessing": "mad_rank",
+    "params": {"window": 20, "rebalance_period": 10},
+    "factor_direction": 1,
+}
+
+
+def calc_factor(data_ctx: dict[str, pd.DataFrame]) -> pd.DataFrame:
+    """返回原始动量-成交量极值因子矩阵（date × instrument）。
+
+    沿时间轴逐日处理：对每个交易日取过去 ``window`` 天，按成交量降序排序后，
+    分别对成交量最高/最低的各 ``window // 2`` 天的动量求和并相除。
+    每个值只依赖当前及历史 ``2 * window - 1`` 根 K 线。
     """
-    创建动量-成交量极值分组因子 (Momentum Volume Extreme)
-    严格避免未来函数，只使用上一期已出现的token
-    
-    参数:
-    window: 计算窗口，默认为20天
-    rebalance_period: 调仓周期，默认为3天
 
-    逻辑:
-    - 计算20日动量
-    - 在每个rolling window内，按成交量排序
-    - 取最大10天的动量加总，除以最小10天的动量加总，作为该日因子值
-    - 🔥 关键：结合历史市值排名，确保只使用上一期已出现的token
-    """
-    print(f"开始构建动量-成交量极值分组因子 (Momentum Volume Extreme)...")
-    print(f"参数: window={window}, rebalance_period={rebalance_period}")
-    print("🔥 使用无未来函数版本：只使用上一期已出现的token")
-    
-    historical_df = load_historical_marketcap()
-    available_tokens_by_date = build_available_tokens_by_date(historical_df, lookback_days=availability_lookback_days, mode="window")
-    print("🔍 生成各日期可用token列表（避免未来函数）...")
-    print_availability_sample(available_tokens_by_date, n=3)
+    window = SETTING["params"]["window"]
+    if isinstance(window, bool) or not isinstance(window, int) or window < 2:
+        raise ValueError("SETTING.params.window must be an integer >= 2")
+    half = window // 2
 
-    df = load_kline_df()
+    close = data_ctx["close"].astype("float64")
+    volume = data_ctx["volume"].astype("float64")
 
-    def compute_one(group: pd.DataFrame, symbol: str) -> pd.DataFrame:
-        if len(group) < window + rebalance_period:
-            return pd.DataFrame()
-        gp = group.copy()
-        gp['momentum'] = gp['close'] / gp['close'].shift(window) - 1
+    momentum = (close / close.shift(window) - 1.0).to_numpy()
+    vol = volume.to_numpy()
 
-        vals, dates, syms, fwd = [], [], [], []
-        for i in range(window - 1, len(gp) - rebalance_period):
-            current_date = gp.iloc[i]['date']
-            sub = gp.iloc[i - window + 1:i + 1]
-            if len(sub) < window:
-                continue
-            sub_sorted = sub.sort_values('volume', ascending=False)
-            top10 = sub_sorted.head(10)['momentum'].sum()
-            bot10 = sub_sorted.tail(10)['momentum'].sum()
-            if bot10 == 0 or np.isnan(top10) or np.isnan(bot10):
-                continue
-            factor = top10 / bot10
-            if np.isnan(factor) or np.isinf(factor):
-                continue
-            dates.append(current_date); syms.append(symbol); vals.append(factor)
-            fwd.append(np.log(gp.iloc[i + rebalance_period]['close'] / gp.iloc[i]['close']) if i + rebalance_period < len(gp) else np.nan)
+    n_days, n_symbols = momentum.shape
+    out = np.full((n_days, n_symbols), np.nan, dtype="float64")
 
-        if not vals:
-            return pd.DataFrame()
-        res = pd.DataFrame({'date': dates, 'symbol': syms, 'momentum_volume_extreme': vals, 'future_ret': fwd}).dropna()
-        res = filter_group_by_availability(res, symbol, available_tokens_by_date)
-        return res
+    for i in range(window - 1, n_days):
+        m_win = momentum[i - window + 1 : i + 1]  # (window, n_symbols)
+        v_win = vol[i - window + 1 : i + 1]
+        # 每列（每个标的）按成交量降序排序；-NaN 仍为 NaN，argsort 将其排在最后，
+        # 与旧版 pandas sort_values 默认 NaN 置尾一致。
+        order = np.argsort(-v_win, axis=0)
+        m_sorted = np.take_along_axis(m_win, order, axis=0)
+        # nansum 与旧版 pandas .sum() 的 skipna=True 语义一致（全 NaN 得 0.0）。
+        top = np.nansum(m_sorted[:half], axis=0)
+        bot = np.nansum(m_sorted[-half:], axis=0)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            ratio = top / bot
+        ratio[bot == 0] = np.nan
+        ratio[~np.isfinite(ratio)] = np.nan
+        out[i] = ratio
 
-    print("计算动量-成交量极值分组因子（考虑token可用性）...")
-    result_dfs = group_apply_with_progress(df, 'symbol', compute_one)
-    if not result_dfs:
-        print("警告: 没有足够的数据计算因子")
-        return pd.DataFrame()
-
-    factor_df = pd.concat(result_dfs, ignore_index=True)
-    factor_df = winsorize_by_date(factor_df, col='momentum_volume_extreme', n_std=3.0)
-    factor_df = rank_to_unit_by_date(factor_df, col='momentum_volume_extreme', out_col='factor')
-    factor_df = factor_df.rename(columns={'symbol': 'instrument'})[['date', 'instrument', 'factor', 'future_ret']]
-
-    out_path = save_factor_df(factor_df, file_prefix=f"momentum_volume_extreme_{window}d_rebalance{rebalance_period}d_")
-    print(f"✅ 无未来函数的因子数据已保存至: {out_path}")
-    print(f"总计生成 {len(factor_df)} 条因子记录")
-    print("\n无未来函数因子统计信息:")
-    print(factor_df['factor'].describe())
-    return factor_df
-
-if __name__ == "__main__":
-    create_momentum_volume_extreme(window=20, rebalance_period=10)
+    return pd.DataFrame(out, index=close.index, columns=close.columns)

@@ -28,9 +28,13 @@ class TrainingScore:
     node_count: int
     eligible: bool
     reasons: tuple[str, ...]
+    fitness_mode: str = "legacy_ic"
+    robust_ic: float | None = None
 
     @property
     def objective_vector(self) -> tuple[float | None, float | None, int]:
+        if self.fitness_mode == "robust_ic":
+            return (self.robust_ic, self.worst_quarter_ic, -self.node_count)
         return (self.mean_ic, self.worst_quarter_ic, -self.node_count)
 
 
@@ -95,6 +99,20 @@ def score_training(
     quality = quality_eligible.fillna(False).astype(bool)
     finite_values = values.replace([np.inf, -np.inf], np.nan)
     finite_labels = labels.replace([np.inf, -np.inf], np.nan)
+    robust = _config_value(config, "fitness_mode", "legacy_ic") == "robust_ic"
+    if robust:
+        if not isinstance(values.index, pd.DatetimeIndex) or not values.index.is_monotonic_increasing:
+            raise ValueError("robust fitness requires ordered daily dates")
+        if len(set(values.index.year)) != 1:
+            raise ValueError("robust fitness requires one training calendar year")
+        # Labels alone may look forward. Purge every quarter's execution tail,
+        # even when a caller supplies precomputed labels containing later prices.
+        exits = values.index + pd.Timedelta(days=1 + int(_config_value(config, "hold_days", 1)))
+        quarter_ends = values.index.to_period("Q").end_time.normalize()
+        boundary = values.index.max() if end is None else end
+        usable = (exits <= quarter_ends) & (exits <= boundary)
+        finite_labels = finite_labels.copy()
+        finite_labels.loc[~usable] = np.nan
     signal_days = quality.any(axis=1)
     signal_values = finite_values.where(quality)
     daily = _daily_ic(signal_values.loc[signal_days], finite_labels.loc[signal_days])
@@ -112,6 +130,10 @@ def score_training(
     cell_coverage = observed / denominator if denominator else 0.0
 
     raw_mean = _finite(daily["rank_ic"].mean()) if valid_days else None
+    if robust:
+        # Direction calibration uses Q1 only. Q2-Q4 never reorient the signal.
+        first = daily.loc[pd.to_datetime(daily["date"]).dt.quarter == 1, "rank_ic"]
+        raw_mean = _finite(first.mean())
     if raw_mean == 0.0:
         return TrainingScore(
             direction=0,
@@ -125,6 +147,7 @@ def score_training(
             node_count=int(_config_value(config, "node_count", 0)),
             eligible=False,
             reasons=("zero raw training mean; direction is undefined",),
+            fitness_mode="robust_ic" if robust else "legacy_ic",
         )
     direction = 1 if raw_mean is None or raw_mean >= 0 else -1
     directed = daily["rank_ic"] * direction
@@ -158,6 +181,26 @@ def score_training(
         reasons.append("fewer than three positive quarters")
 
     node_count = int(_config_value(config, "node_count", 0))
+    robust_ic = None
+    if robust:
+        later = [quarter_means[key] for key in ("Q2", "Q3", "Q4")]
+        if raw_mean is None:
+            reasons.append("Q1 direction calibration unavailable")
+        if all(value is not None for value in later):
+            worst_quarter_ic = min(later)
+            robust_ic = float(
+                np.median(later)
+                - float(_config_value(config, "stability_penalty", 0.5)) * np.std(later)
+                - float(_config_value(config, "worst_quarter_penalty", 1.0)) * max(0.0, -min(later))
+                - float(_config_value(config, "complexity_penalty", 0.001)) * node_count
+            )
+            if robust_ic <= 0:
+                reasons.append("robust IC objective is not positive")
+            if sum(value > 0 for value in later) < 2:
+                reasons.append("fewer than two positive post-calibration quarters")
+        else:
+            worst_quarter_ic = None
+            reasons.append("incomplete post-calibration quarters")
     return TrainingScore(
         direction=direction,
         mean_ic=mean_ic,
@@ -170,6 +213,8 @@ def score_training(
         node_count=node_count,
         eligible=not reasons,
         reasons=tuple(reasons),
+        fitness_mode="robust_ic" if robust else "legacy_ic",
+        robust_ic=robust_ic,
     )
 
 

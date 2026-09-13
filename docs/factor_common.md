@@ -269,6 +269,13 @@ are available only in the non-flat storage mode.
   completeness from daily observations. **Observed events alone never prove
   completeness, and a settlement schedule must never be fabricated from
   observed timestamps.**
+  - Production-store caveat: the schedule currently shipped in
+    `data/crypto_quant.h5` is built by `build_funding_schedule`, which learns
+    per-symbol cadence templates from the observed event history. That is a
+    data-derived grid — stronger than per-day observation (it can flag
+    dropped events against a per-symbol modal template) but weaker than an
+    exchange-published historical schedule, and it should be replaced when
+    one becomes available.
 
 ## Sample definitions
 
@@ -396,17 +403,21 @@ Unsupported by design (rejected with errors, not silently approximated):
 - Binance API credentials/clients anywhere in the evaluation path.
 - Funding coverage inferred from observed events or fetch watermarks.
 
-Known data blockers on the production H5:
+Known data blockers and caveats on the production H5:
 
-- **Funding coverage is `unknown` for every stored panel day**: no
-  authoritative historical settlement schedules are available, so the
-  `all_costs` scenario cannot be certified complete on real data. Real-H5
-  evaluations truthfully report `status="incomplete"` with usable factor
-  artifacts, null all-costs full metrics, and a labeled `known_segment`;
-  `verified_complete_net_performance` stays false until verified schedules
-  are supplied. This is an external-data limitation, not a framework gap —
-  the synthetic fully-scheduled fixture certifies the complete accounting
-  path.
+- **Funding coverage is backed by a data-derived schedule, not an
+  exchange-published one**: the pipeline builds the expected-settlement grid
+  with `build_funding_schedule` (`data/crypto_quant/panel.py`), which learns
+  per-symbol cadence templates from observed event history and uses the modal
+  template to flag missing/partial days. This makes `all_costs` certifiable on
+  real data (panel days are marked `complete` and evaluations can reach
+  `status="complete"`), but the schedule is inferred from the observations
+  themselves — a systematically under-collected cadence could self-certify.
+  Treat `all_costs` metrics as usable but weaker than those backed by an
+  official historical schedule; replace the derived schedule when the exchange
+  publishes one. If a future store regression returns coverage to `unknown`,
+  evaluations fall back to the old behavior: `status="incomplete"`, null
+  all-costs full metrics, and a labeled `known_segment`.
 - Holding-period placeholder klines remain in the store
   (`has_complete_kline=False`) and block new entries on the following day.
 - The optional CMC100 benchmark is omitted from the report (with an explicit

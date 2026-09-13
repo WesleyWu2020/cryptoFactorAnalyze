@@ -20,6 +20,26 @@ DERIVED_FIELDS = frozenset({
 
 TERMINAL_FIELDS = RAW_FIELDS | DERIVED_FIELDS
 
+# Structural labels are conservative exposure hints, not economic attribution.
+FEATURE_FAMILIES = {
+    "price": frozenset({"open", "high", "low", "close", "return_1d"}),
+    "volatility": frozenset({"range_relative", "body_relative"}),
+    "activity": frozenset({"volume", "quote_volume", "trade_count", "volume_relative_20",
+                           "quote_volume_relative_20", "quote_per_trade"}),
+    "buy_flow": frozenset({"taker_buy_base_volume", "taker_buy_quote_volume", "taker_base_ratio", "taker_quote_ratio"}),
+}
+
+
+def expression_families(tree):
+    """Count every referenced family; mixed expressions cannot evade caps."""
+    if not tree.children:
+        field = tree.field if tree.op == "field" else tree.op
+        return frozenset(name for name, fields in FEATURE_FAMILIES.items() if field in fields)
+    families = frozenset().union(*(expression_families(child) for child in tree.children))
+    if tree.op == "rolling_std" and families == {"price"}:
+        return families | {"volatility"}
+    return families
+
 TERMINAL_HISTORY = {
     "return_1d": 1,
     "range_relative": 0,
@@ -46,12 +66,14 @@ TERMINAL_DEPENDENCIES = {
 def evaluate_terminal(field: str, data_ctx: dict[str, pd.DataFrame]) -> pd.DataFrame:
     if field in RAW_FIELDS:
         return data_ctx[field].astype("float64")
-    close = data_ctx["close"]
     if field == "return_1d":
+        close = data_ctx["close"]
         return safe_div(close, close.shift(1)) - 1.0
     if field == "range_relative":
+        close = data_ctx["close"]
         return safe_div(data_ctx["high"] - data_ctx["low"], close)
     if field == "body_relative":
+        close = data_ctx["close"]
         return safe_div(close - data_ctx["open"], data_ctx["open"])
     if field == "volume_relative_20":
         return safe_div(data_ctx["volume"], data_ctx["volume"].rolling(20, min_periods=20).mean())

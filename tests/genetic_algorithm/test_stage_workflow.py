@@ -56,6 +56,26 @@ def test_validation_selection_allows_zero_candidates():
     assert result.rejected == ()
 
 
+def test_cost_validation_uses_net_gates_and_training_diversity_before_cap():
+    import pandas as pd
+    candidates = [_candidate(name) for name in ("a", "b", "c")]
+    results = {name: _validation(mean_ic=-0.1, quarter_means={}, net_sharpe=sharpe)
+               for name, sharpe in (("a", 3.0), ("b", 2.0), ("c", 1.5))}
+    dates = pd.date_range("2024-01-01", periods=130)
+    r = pd.Series([0.01, -0.02] * 65, index=dates)
+    p = pd.DataFrame({"A": 1.0, "B": -1.0}, index=dates)
+    evidence = {"a": (r, p), "b": (r, p * 10), "c": (-r, -p)}
+    config = SearchConfig(fitness_mode="all_costs_sharpe", frozen_limit=2)
+    selected = select_validation(candidates, results, config, trading_evidence=evidence)
+    assert [c["expression_id"] for c in selected] == ["a", "c"]
+    assert "trading similarity" in selected.rejection_reasons["b"][0]
+    results["c"]["net_sharpe"] = 1.0
+    selected = select_validation(candidates, results, config, trading_evidence=evidence)
+    assert [c["expression_id"] for c in selected] == ["a"]
+    assert "Sharpe" in selected.rejection_reasons["c"][0]
+    assert not select_validation(candidates, results, SearchConfig()).accepted
+
+
 def test_validation_selection_rejects_missing_fourth_calendar_quarter():
     result = select_validation(
         [_candidate()], {"candidate": _validation(quarter_valid_days={"Q1": 45, "Q2": 45, "Q3": 45})}, SearchConfig()

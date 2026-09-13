@@ -1,107 +1,59 @@
+"""ATS-Price 背离因子（Average Trade Size 与价格变动背离）。
+
+公式（与旧版 compute_one 逐点等价，无未来函数）：
+
+    ATS        = quote_volume / (trade_count + eps)
+    ATS_ROC    = ATS / ATS.shift(window) - 1        # 等价旧版 PCT_CHANGE(ATS, window)
+    PRICE_ROC  = close / close.shift(window) - 1    # 等价旧版 PCT_CHANGE(close, window)
+    factor     = ATS_ROC - PRICE_ROC
+
+所有计算只依赖当日及历史数据（shift 为正位移）。新框架入口为
+``calc_factor(data_ctx)``，输出原始因子矩阵，截面去极值与归一化由框架的
+``preprocessing="mad_rank"`` 完成。
+"""
+
+from __future__ import annotations
+
 import pandas as pd
 
-from util_factor import (
-    load_kline_df,
-    build_available_tokens_by_date_from_kline,
-    filter_group_by_availability,
-    group_apply_with_progress,
-    winsorize_by_date,
-    rank_to_unit_by_date,
-    save_factor_df,
-    print_availability_sample,
-    print_factor_summary,
-    print_latest_date_inference,
-    future_return,
-)
-from operator_utils import PCT_CHANGE
+TYPE = "regular"
+
+META = {
+    "factor_name": "ATS_Price_Divergence_Factor",
+    "author": "local",
+    "level": "daily",
+    "category": "volume",
+    "description": "N-day ROC divergence between average trade size and price",
+}
+
+SETTING = {
+    "data_needed": ["quote_volume", "trade_count", "close"],
+    "universe": "historical_top50",
+    "warmup_bars": 21,
+    "preprocessing": "mad_rank",
+    "params": {"window": 20, "eps": 1e-5},
+    "factor_direction": 1,
+}
 
 
-def create_ats_price_divergence_factor(window=20, rebalance_period=10, top_n=50, eps=1e-5):
+def calc_factor(data_ctx: dict[str, pd.DataFrame]) -> pd.DataFrame:
+    """返回 date × instrument 的原始 ATS-Price 背离因子矩阵。
+
+    ``data_ctx`` 键为 ``SETTING["data_needed"]`` 中的字段，值为日期升序、
+    列为 instrument 的矩阵。shift 沿时间轴（axis 0），因子值只依赖当日
+    及历史数据。
     """
-    ATS-Price 背离因子（无未来函数）
 
-    公式:
-    1) ATS = quote_volume / (trades_count + eps)
-    2) ATS_ROC = PCT_CHANGE(ATS, window)
-    3) PRICE_ROC = PCT_CHANGE(close, window)
-    4) raw = ATS_ROC - PRICE_ROC
-    """
-    print("开始构建 ATS-Price 背离因子 (ATS Price Divergence) —— 无未来函数版本")
-    print(
-        f"参数: window={window}, rebalance_period={rebalance_period}, top_n={top_n}, eps={eps}"
-    )
+    window = SETTING["params"]["window"]
+    eps = SETTING["params"]["eps"]
+    if isinstance(window, bool) or not isinstance(window, int) or window < 1:
+        raise ValueError("SETTING.params.window must be an integer >= 1")
 
-    df = load_kline_df()
+    quote_volume = data_ctx["quote_volume"].astype("float64")
+    trade_count = data_ctx["trade_count"].astype("float64")
+    close = data_ctx["close"].astype("float64")
 
-    print("🔍 基于Binance K线数据构建每日前50排名...")
-    available_tokens_by_date = build_available_tokens_by_date_from_kline(
-        kline_df=df,
-        top_n=top_n,
-        ranking_method="quote_volume",
-        rebalance_period=rebalance_period,
-        lookback_buffer=20,
-        strict_top_n=True,
-    )
-    print("🔍 生成各日期可用token列表（每天前50，考虑调仓周期）...")
-    print_availability_sample(available_tokens_by_date, n=3)
-
-    def compute_one(group: pd.DataFrame, symbol: str) -> pd.DataFrame:
-        if len(group) < window + rebalance_period + 2:
-            return pd.DataFrame()
-
-        gp = group.copy()
-        gp["ats"] = gp["quote_volume"] / (gp["trades_count"] + eps)
-        gp["ats_roc"] = PCT_CHANGE(gp["ats"], n=window)
-        gp["price_roc"] = PCT_CHANGE(gp["close"], n=window)
-        gp["ats_price_div_raw"] = gp["ats_roc"] - gp["price_roc"]
-        gp["future_ret"] = future_return(gp["close"], rebalance_period, method="log")
-
-        gp = filter_group_by_availability(gp, symbol, available_tokens_by_date)
-
-        # Live 推理需要保留 future_ret=NaN 的末端日期
-        return gp[["date", "symbol", "ats_price_div_raw", "future_ret"]].dropna(
-            subset=["ats_price_div_raw"]
-        )
-
-    print("计算 ATS-Price 背离并进行可用性过滤...")
-    result_dfs = group_apply_with_progress(df, "symbol", compute_one)
-    if not result_dfs:
-        print("警告: 没有足够的数据计算因子")
-        return pd.DataFrame()
-
-    factor_df_raw = pd.concat(result_dfs, ignore_index=True)
-
-    factor_df_live = winsorize_by_date(factor_df_raw, col="ats_price_div_raw", n_std=3.0)
-    factor_df_live = rank_to_unit_by_date(
-        factor_df_live, col="ats_price_div_raw", out_col="factor"
-    )
-
-    # 回测/报告使用：仅保留 future_ret 有效样本
-    factor_df_backtest = factor_df_live.dropna(subset=["future_ret"]).copy()
-
-    factor_df_backtest = factor_df_backtest.rename(columns={"symbol": "instrument"})[
-        ["date", "instrument", "factor", "future_ret"]
-    ]
-    out_path = save_factor_df(
-        factor_df_backtest,
-        file_prefix=f"ats_price_divergence_{window}d_rebalance{rebalance_period}d_",
-    )
-
-    print_factor_summary(factor_df_backtest, out_path)
-
-    factor_df_live = factor_df_live.rename(columns={"symbol": "instrument"})[
-        ["date", "instrument", "factor", "future_ret"]
-    ]
-    latest_date = factor_df_live["date"].max()
-    print_latest_date_inference(factor_df_live, latest_date, groups=5)
-
-    print(
-        f"ℹ️ Live推理日期范围: {factor_df_live['date'].min().date()} ~ {factor_df_live['date'].max().date()} | "
-        f"回测有效日期范围: {factor_df_backtest['date'].min().date()} ~ {factor_df_backtest['date'].max().date()}"
-    )
-
-    return factor_df_backtest
-
-
-if __name__ == "__main__":
-    create_ats_price_divergence_factor(window=20, rebalance_period=10, top_n=50, eps=1e-5)
+    ats = quote_volume / (trade_count + eps)
+    ats_roc = ats / ats.shift(window) - 1.0
+    price_roc = close / close.shift(window) - 1.0
+    return ats_roc - price_roc

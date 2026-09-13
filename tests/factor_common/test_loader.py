@@ -222,7 +222,7 @@ def test_load_factor_rejects_unsupported_type(tmp_path):
 
 @pytest.mark.parametrize("field", [
     "close", "open", "high", "low", "volume", "quote_volume", "trade_count",
-    "taker_buy_base_volume", "taker_buy_quote_volume",
+    "taker_buy_base_volume", "taker_buy_quote_volume", "funding",
 ])
 def test_load_factor_accepts_fields_declared_by_daily_provider(tmp_path, field):
     from factor_common.loader import load_factor

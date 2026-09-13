@@ -508,19 +508,23 @@ def test_prior_bar_placeholder_eligibility_and_retrospective_evidence():
     assert gross["positions"].loc[pd.Timestamp("2024-01-03")].abs().sum() == pytest.approx(0.0)
 
 
-def test_unpriceable_held_position_halts_valuation():
-    # A is held into 2024-01-03 but has no valid open there: certified
-    # valuation halts for every scenario and the position never disappears.
+def test_unpriceable_held_position_forces_exit_at_last_known_price():
+    # A is held into 2024-01-03 but has no valid open there.  The accounting
+    # closes A at its last known price, labels that synthetic exit explicitly,
+    # and still liquidates the remaining position at the current valid price.
     values, opens = _frames(
         3,
         {0: {"A": 2.0, "B": 1.0}},
         {1: {"A": 100.0, "B": 100.0}, 2: {"A": np.nan, "B": 100.0}},
     )
     result = _run(values, opens)
-    assert result["status"] == "incomplete"
+    assert result["status"] == "complete"
     for scenario in result["scenarios"].values():
-        assert scenario["status"] == "incomplete"
-        assert scenario["diagnostics"]["halt_reason"] == "unpriceable_position"
-        assert scenario["diagnostics"]["halt_date"] == "2024-01-03"
-        assert len(scenario["ledger"]) == 1
-        assert scenario["diagnostics"]["final_quantities"] == {"A": 0.005, "B": -0.005}
+        assert scenario["status"] == "complete"
+        assert scenario["diagnostics"]["halt_reason"] is None
+        forced = scenario["orders"].query("reason == 'unpriceable_forced_exit'")
+        assert forced[["instrument", "price", "order_quantity"]].to_dict("records") == [
+            {"instrument": "A", "price": 100.0, "order_quantity": -0.005}
+        ]
+        assert scenario["positions"].loc[pd.Timestamp("2024-01-03")].abs().sum() == pytest.approx(0.0)
+        assert scenario["diagnostics"]["final_quantities"] == {}

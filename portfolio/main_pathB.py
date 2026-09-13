@@ -1,8 +1,8 @@
 """CLI for Path B: BTC Core + Alt Short Overlay OOS backtest."""
 from __future__ import annotations
 import argparse
-import importlib.util
 import pathlib
+import re
 import sys
 import pandas as pd
 
@@ -11,21 +11,17 @@ from portfolio.pipeline import run_pathB_pipeline
 
 
 def discover_factor_paths(factor_dir: str) -> dict:
-    """Return {factor_name: latest CSV path} using factor_analyse/factor_config.py prefixes."""
+    """Return {factor_name: latest CSV path} discovered in ``factor_dir``.
+
+    The factor name is the CSV stem with a trailing ``_YYYYMMDD`` vintage
+    suffix stripped; when several vintages share a stem, the latest file
+    (sorted order) wins.
+    """
     factor_dir = pathlib.Path(factor_dir)
-    root = pathlib.Path(__file__).resolve().parents[1]
-    spec = importlib.util.spec_from_file_location(
-        "factor_config", root / "factor_analyse" / "factor_config.py"
-    )
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    cfg = getattr(mod, "FACTOR_CONFIG", {})
     paths = {}
-    for ftype, meta in cfg.items():
-        prefix = meta.get("file_prefix") or ftype
-        matches = sorted(factor_dir.glob(f"{prefix}*.csv"))
-        if matches:
-            paths[ftype] = str(matches[-1])  # latest
+    for csv_path in sorted(factor_dir.glob("*.csv")):
+        name = re.sub(r"[_-]?\d{8}$", "", csv_path.stem)
+        paths[name] = str(csv_path)
     return paths
 
 
@@ -48,7 +44,7 @@ def main():
         wanted = set(s.strip() for s in args.factors.split(","))
         factor_paths = {k: v for k, v in factor_paths.items() if k in wanted}
     if not factor_paths:
-        print("ERROR: no factors discovered; check --factor-dir and factor_config.py", file=sys.stderr)
+        print("ERROR: no factors discovered; check --factor-dir for CSV files", file=sys.stderr)
         sys.exit(2)
     print(f"📂 {len(factor_paths)} factors discovered")
 
