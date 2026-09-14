@@ -346,6 +346,8 @@ def evaluate_oos(
     All accounting tables are copied exactly from the manager result.  A
     halted all-costs scenario therefore remains halted in both the JSON and
     the report; no zero-filled tail or second per-quarter backtest is made.
+    The canonical artifacts are ``factor_oos.parquet``, ``daily_ledger.parquet``,
+    ``group_forward_return_diagnostics.parquet``, and ``quarterly.html``.
     """
     destination = Path(output_dir)
     destination.mkdir(parents=True, exist_ok=True)
