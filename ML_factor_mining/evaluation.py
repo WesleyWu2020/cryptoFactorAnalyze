@@ -186,9 +186,14 @@ def _validate_ledger(ledger: pd.DataFrame) -> pd.DataFrame:
 
 def quarterly_metrics(
     ledger: pd.DataFrame,
-    *,
+    *legacy_args: Any,
+    predictions: pd.DataFrame | None = None,
+    evidence_end: Any = None,
     periods_per_year: int = 365,
     status: str = "complete",
+    accounting_status: str | None = None,
+    daily_ic: pd.DataFrame | None = None,
+    coverage: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     """Summarize calendar quarters by slicing one continuous ledger.
 
@@ -196,48 +201,137 @@ def quarterly_metrics(
     ``reconciled`` flag checks both that compounding agrees with the equity
     path and that adjacent quarter equity slices join without a reset.
     """
+    # The original plan passed daily IC, predictions, and coverage as the
+    # first three positional arguments.  Keep that form readable while the
+    # compact current API uses named ``predictions``/``evidence_end``.
+    if legacy_args:
+        if len(legacy_args) > 3:
+            raise TypeError("quarterly_metrics accepts at most three legacy positional tables")
+        if daily_ic is None:
+            daily_ic = legacy_args[0]
+        if len(legacy_args) >= 2 and predictions is None:
+            predictions = legacy_args[1]
+        if len(legacy_args) == 3 and coverage is None:
+            coverage = legacy_args[2]
+    if accounting_status is not None:
+        status = accounting_status
     if status not in {"complete", "incomplete", "insufficient_data"}:
         raise ValueError("status must be complete, incomplete, or insufficient_data")
     frame = _validate_ledger(ledger)
+    prediction_dates = pd.DatetimeIndex([], name="date")
+    if predictions is not None:
+        if not isinstance(predictions, pd.DataFrame) or "date" not in predictions.columns:
+            raise ValueError("predictions must contain a date column")
+        parsed = pd.to_datetime(predictions["date"], errors="raise", utc=True)
+        prediction_dates = pd.DatetimeIndex(
+            parsed.dt.tz_localize(None).dt.normalize(), name="date"
+        )
     columns = [
         "quarter", "start_date", "end_date", "n_periods", "starting_equity",
         "ending_equity", "equity_return", "reconciled", "status",
         "missing_tail", "total_return", "annual_return", "volatility",
         "annual_volatility", "sharpe", "max_drawdown", "win_rate",
-        "profit_loss_ratio", "turnover",
+        "profit_loss_ratio", "turnover", "mean_rank_ic", "ic_dates",
+        "prediction_days", "expected_calendar_days", "coverage_mean",
+        "complete_calendar_quarter", "accounting_tail_only",
+        "evaluated_through", "accounting_status", "metrics_scope",
     ]
-    if frame.empty:
+    if frame.empty and prediction_dates.empty:
         return pd.DataFrame(columns=columns)
 
     rows: list[dict[str, Any]] = []
-    periods = frame.index.to_period("Q")
-    for quarter in periods.unique():
-        piece = frame.loc[periods == quarter]
-        summary = _ledger_summary(piece, periods_per_year=periods_per_year)
+    ledger_periods = frame.index.to_period("Q") if not frame.empty else pd.PeriodIndex([], freq="Q")
+    prediction_periods = prediction_dates.to_period("Q") if not prediction_dates.empty else pd.PeriodIndex([], freq="Q")
+    quarters = sorted(set(ledger_periods.tolist()) | set(prediction_periods.tolist()))
+    evidence_timestamp = None
+    if evidence_end is not None:
+        evidence_timestamp = pd.Timestamp(_iso_date(evidence_end, "evidence_end"))
+    for quarter in quarters:
+        piece = frame.loc[ledger_periods == quarter] if not frame.empty else frame
+        if piece.empty:
+            summary = {
+                "total_return": None, "annual_return": None, "volatility": None,
+                "annual_volatility": None, "sharpe": None, "max_drawdown": None,
+                "win_rate": None, "profit_loss_ratio": None, "turnover": None,
+                "n_periods": 0,
+            }
+        else:
+            summary = _ledger_summary(piece, periods_per_year=periods_per_year)
         compounded = float((1.0 + piece["return"].astype(float)).prod() - 1.0)
-        first_position = int(frame.index.get_loc(piece.index[0]))
-        starting = 1.0 if first_position == 0 else float(piece["equity"].iloc[0])
-        ending = float(piece["equity"].iloc[-1])
-        prior_equity = 1.0 if first_position == 0 else float(frame["equity"].iloc[first_position - 1])
-        equity_return = ending / prior_equity - 1.0 if prior_equity != 0 else np.nan
-        reconciled = bool(
-            np.isfinite(compounded)
-            and np.isfinite(equity_return)
-            and np.isclose(compounded, equity_return, rtol=1e-9, atol=1e-12)
+        if piece.empty:
+            start_date = quarter.start_time.date().isoformat()
+            end_date = None
+            starting = ending = equity_return = np.nan
+            reconciled = False
+            actual_end = None
+        else:
+            first_position = int(frame.index.get_loc(piece.index[0]))
+            starting = 1.0 if first_position == 0 else float(piece["equity"].iloc[0])
+            ending = float(piece["equity"].iloc[-1])
+            prior_equity = 1.0 if first_position == 0 else float(frame["equity"].iloc[first_position - 1])
+            equity_return = ending / prior_equity - 1.0 if prior_equity != 0 else np.nan
+            reconciled = bool(
+                np.isfinite(compounded)
+                and np.isfinite(equity_return)
+                and np.isclose(compounded, equity_return, rtol=1e-9, atol=1e-12)
+            )
+            start_date = piece.index[0].date().isoformat()
+            end_date = piece.index[-1].date().isoformat()
+            actual_end = piece.index[-1]
+        quarter_prediction_dates = prediction_dates[prediction_dates.to_period("Q") == quarter]
+        quarter_ic = daily_ic
+        if isinstance(quarter_ic, pd.DataFrame) and "date" in quarter_ic.columns:
+            ic_dates = pd.to_datetime(quarter_ic["date"], errors="coerce", utc=True).dt.tz_localize(None).dt.normalize()
+            quarter_ic = quarter_ic.loc[ic_dates.dt.to_period("Q") == quarter]
+        mean_rank_ic = (
+            float(pd.to_numeric(quarter_ic["rank_ic"], errors="coerce").mean())
+            if isinstance(quarter_ic, pd.DataFrame) and "rank_ic" in quarter_ic and quarter_ic["rank_ic"].notna().any()
+            else None
+        )
+        quarter_coverage = coverage
+        if isinstance(quarter_coverage, pd.DataFrame) and "date" in quarter_coverage.columns:
+            coverage_dates = pd.to_datetime(quarter_coverage["date"], errors="coerce", utc=True).dt.tz_localize(None).dt.normalize()
+            quarter_coverage = quarter_coverage.loc[coverage_dates.dt.to_period("Q") == quarter]
+        coverage_mean = (
+            float(pd.to_numeric(quarter_coverage["coverage"], errors="coerce").mean())
+            if isinstance(quarter_coverage, pd.DataFrame) and "coverage" in quarter_coverage and quarter_coverage["coverage"].notna().any()
+            else None
+        )
+        complete_calendar = bool(
+            not piece.empty
+            and actual_end is not None
+            and actual_end >= quarter.end_time.normalize()
+            and (evidence_timestamp is None or evidence_timestamp >= quarter.end_time.normalize())
+            and status == "complete"
+        )
+        missing_tail = bool(
+            status != "complete"
+            or piece.empty
+            or (evidence_timestamp is not None and evidence_timestamp < quarter.end_time.normalize())
         )
         rows.append(
             {
                 "quarter": str(quarter),
-                "start_date": piece.index[0].date().isoformat(),
-                "end_date": piece.index[-1].date().isoformat(),
+                "start_date": start_date,
+                "end_date": end_date,
                 "n_periods": int(len(piece)),
                 "starting_equity": starting,
                 "ending_equity": ending,
                 "equity_return": equity_return,
                 "reconciled": reconciled,
                 "status": status,
-                "missing_tail": status != "complete" and quarter == periods[-1],
+                "missing_tail": missing_tail,
                 **summary,
+                "mean_rank_ic": mean_rank_ic,
+                "ic_dates": int(len(quarter_ic)) if isinstance(quarter_ic, pd.DataFrame) else 0,
+                "prediction_days": int(quarter_prediction_dates.nunique()),
+                "expected_calendar_days": int((quarter.end_time.normalize() - quarter.start_time).days + 1),
+                "coverage_mean": coverage_mean,
+                "complete_calendar_quarter": complete_calendar,
+                "accounting_tail_only": bool(piece.empty and len(quarter_prediction_dates)),
+                "evaluated_through": actual_end.date().isoformat() if actual_end is not None else None,
+                "accounting_status": status,
+                "metrics_scope": "full_run_ledger_slice" if status == "complete" else "certified_prefix_slice",
             }
         )
     return pd.DataFrame(rows, columns=columns)
@@ -304,6 +398,7 @@ def _render_quarterly_html(
     path: Path,
     factor_name: str,
     accounting_status: str,
+    standard_report_path: str | Path | None = None,
 ) -> None:
     """Write the ML-specific quarterly view and its interpretation notes."""
     disclaimer = (
@@ -314,6 +409,13 @@ def _render_quarterly_html(
         "certified-prefix data rather than zero-filled returns."
     )
     table_html = quarterly.to_html(index=False, escape=True, na_rep="unavailable")
+    report_link = ""
+    if standard_report_path:
+        report_name = Path(standard_report_path).name
+        report_link = (
+            f"<p><a href='{html.escape(report_name, quote=True)}'>"
+            "Continuous NAV / standard evaluation report</a></p>"
+        )
     page = (
         "<!doctype html><html lang='en'><meta charset='utf-8'>"
         f"<title>{html.escape(factor_name)} — quarterly OOS evaluation</title>"
@@ -323,6 +425,7 @@ def _render_quarterly_html(
         f"<h1>{html.escape(factor_name)} — quarterly OOS evaluation</h1>"
         f"<p class='note'>{html.escape(disclaimer)}</p>"
         f"<p>All-costs accounting status: {html.escape(str(accounting_status))}</p>"
+        f"{report_link}"
         f"{table_html}</html>"
     )
     path.write_text(page, encoding="utf-8")
@@ -354,7 +457,10 @@ def evaluate_oos(
     table = _factor_table(predictions)
     prediction_start = table["date"].min().normalize()
     prediction_end = table["date"].max().normalize()
-    holding_days = int(getattr(config, "holding_days", 3)) if config is not None else 3
+    if isinstance(config, Mapping):
+        holding_days = int(config.get("holding_days", 3))
+    else:
+        holding_days = int(getattr(config, "holding_days", 3)) if config is not None else 3
     if evidence_end is None and isinstance(config, Mapping):
         evidence_end = config.get("evidence_end")
     if evidence_end is None and config is not None and hasattr(config, "evidence_end"):
@@ -398,13 +504,14 @@ def evaluate_oos(
             kwargs["h5_path"] = h5_path
         if base_dir is not None:
             kwargs["base_dir"] = base_dir
+        kwargs["as_of"] = evidence_day
         manager = manager_cls(**kwargs)
     result = manager.evaluate(
         evaluated,
         factor_name=factor_name,
         profile_id="perp_1d",
         params=params,
-        plot=False,
+        plot=plot,
     )
     if not isinstance(result, Mapping):
         raise TypeError("FactorManager.evaluate must return a mapping")
@@ -436,7 +543,12 @@ def evaluate_oos(
     all_costs = scenarios.get("all_costs", {}) if isinstance(scenarios, Mapping) else {}
     all_ledger = all_costs.get("ledger", pd.DataFrame()) if isinstance(all_costs, Mapping) else pd.DataFrame()
     scenario_status = all_costs.get("status", result.get("status", "complete")) if isinstance(all_costs, Mapping) else result.get("status", "complete")
-    quarterly = quarterly_metrics(all_ledger, status=scenario_status)
+    quarterly = quarterly_metrics(
+        all_ledger,
+        predictions=table,
+        evidence_end=evidence_day,
+        status=scenario_status,
+    )
     quarterly_path = destination / "quarterly_metrics.parquet"
     quarterly.to_parquet(quarterly_path, index=False)
     paths["quarterly_metrics"] = str(quarterly_path)
@@ -467,11 +579,13 @@ def evaluate_oos(
     paths["html"] = str(html_path)
 
     quarterly_html_path = destination / "quarterly.html"
+    standard_report_path = result.get("paths", {}).get("report_path") if isinstance(result.get("paths"), Mapping) else None
     _render_quarterly_html(
         quarterly,
         path=quarterly_html_path,
         factor_name=factor_name,
         accounting_status=str(scenario_status),
+        standard_report_path=standard_report_path,
     )
     paths["quarterly_html"] = str(quarterly_html_path)
 

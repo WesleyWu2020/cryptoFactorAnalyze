@@ -42,6 +42,26 @@ def test_quarterly_metrics_slices_continuous_ledger_and_reconciles():
     assert result.loc[1, "starting_equity"] == ledger.loc["2025-04-01", "equity"]
 
 
+def test_quarterly_metrics_keeps_prediction_quarters_after_accounting_halt():
+    ledger = _ledger(start="2025-01-01", periods=2)
+    prediction_dates = pd.date_range("2025-01-01", "2025-07-01", freq="QS")
+    predictions = pd.DataFrame(
+        {"date": prediction_dates, "instrument": "A", "factor": 1.0}
+    )
+
+    result = quarterly_metrics(
+        ledger,
+        predictions=predictions,
+        evidence_end="2025-07-03",
+        status="incomplete",
+    )
+
+    assert list(result["quarter"]) == ["2025Q1", "2025Q2", "2025Q3"]
+    assert result.loc[result["quarter"].eq("2025Q2"), "total_return"].isna().all()
+    assert result.loc[result["quarter"].eq("2025Q2"), "missing_tail"].item()
+    assert result.loc[result["quarter"].eq("2025Q3"), "missing_tail"].item()
+
+
 def test_manager_params_allowlist_and_iso_dates():
     config = Config(
         holding_days=5,
@@ -152,3 +172,41 @@ def test_evaluate_oos_writes_original_tables_and_honest_status(tmp_path):
     assert payload["scenarios"]["all_costs"]["diagnostics"]["missing_tail"] is True
     assert "forward-label diagnostics" in payload["group_diagnostics_scope"]
     assert "NaN" not in (tmp_path / "evaluation.json").read_text()
+
+
+def test_evaluate_oos_mapping_config_bounds_and_as_of(tmp_path):
+    dates = pd.date_range("2025-01-01", periods=6, name="date")
+    predictions = pd.DataFrame(
+        {"date": dates.repeat(3), "instrument": ["A", "B", "C"] * 6,
+         "factor": np.arange(18, dtype=float)}
+    )
+    ledger = _ledger(periods=2)
+    captured = {}
+
+    class FakeManager:
+        def __init__(self, **kwargs):
+            captured["init"] = kwargs
+
+        def evaluate(self, source, **kwargs):
+            captured["source_end"] = source["date"].max()
+            captured["params"] = kwargs["params"]
+            return {
+                "status": "incomplete", "metadata": {},
+                "factor_performance": {},
+                "factor_result": {"scenarios": {"all_costs": {
+                    "status": "incomplete", "ledger": ledger,
+                    "orders": pd.DataFrame(), "positions": pd.DataFrame(),
+                    "funding": pd.DataFrame(), "diagnostics": {},
+                }}},
+                "diagnostics": {},
+            }
+
+    evaluate_oos(
+        predictions, tmp_path, config={"holding_days": 2},
+        evidence_end="2025-01-06", manager_cls=FakeManager,
+    )
+    assert captured["init"]["as_of"] == pd.Timestamp("2025-01-06")
+    assert captured["params"]["start"] == "2025-01-01"
+    assert captured["params"]["end"] == "2025-01-03"
+    assert captured["params"]["rebalance_days"] == 2
+    assert captured["source_end"] == pd.Timestamp("2025-01-03")
