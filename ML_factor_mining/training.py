@@ -70,6 +70,7 @@ def prepare_fold(catalog, h5_path, fold, config) -> PreparedFold:
 
 def select_and_refit(prepared: PreparedFold, fold, config, name):
     """Validate each candidate, rank valid candidates, and refit the winner."""
+    knowledge_end = pd.Timestamp(fold.retrain_at).normalize() - pd.Timedelta(days=1)
     X, targets, rows = prepared.X, prepared.targets, prepared.rows
     validation_rows = rows["validation"]
     inference_rows = X.index[
@@ -109,7 +110,12 @@ def select_and_refit(prepared: PreparedFold, fold, config, name):
         except CandidateRejected as exc:
             record.update(status="rejected", reason=str(exc))
         else:
-            record.update(status="valid", **metrics)
+            # ``score_validation`` returns the accounting status (currently
+            # ``complete``), while candidate tables use ``valid`` as their
+            # selection status.  Merge first, then normalize the one shared
+            # key to avoid passing duplicate ``status`` kwargs to ``dict.update``.
+            record.update(metrics)
+            record["status"] = "valid"
             fitted[candidate_id] = (dict(params), model.rounds)
         records.append(record)
 
@@ -146,7 +152,7 @@ def select_and_refit(prepared: PreparedFold, fold, config, name):
         "history_start": pd.Timestamp(fold.history_start).date().isoformat(),
         "validation_start": pd.Timestamp(fold.validation_start).date().isoformat(),
         "retrain_at": pd.Timestamp(fold.retrain_at).date().isoformat(),
-        "knowledge_end": cutoff.date().isoformat(),
+        "knowledge_end": knowledge_end.date().isoformat(),
         "feature_admission": prepared.features.diagnostics,
         "selected_factors": list(prepared.features.factors),
         "rows": {key: len(index) for key, index in rows.items()},
