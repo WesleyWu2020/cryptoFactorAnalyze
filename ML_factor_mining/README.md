@@ -14,7 +14,7 @@ From the repository root:
 ```bash
 ./.venv/bin/python -m ML_factor_mining.cli run \
   --config ML_factor_mining/configs/default.json \
-  --factor-dir data/factor_data \
+  --factor-dir data/factor_results \
   --h5 data/crypto_quant.h5 \
   --output outputs/ml_runs/$(date +%Y%m%d_%H%M%S)
 ```

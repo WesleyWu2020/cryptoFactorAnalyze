@@ -19,7 +19,44 @@ import pandas as pd
 from .artifacts import _json_safe, discover_catalog, sha256, snapshot_inputs, write_json
 from .config import Config, quarter_folds
 from .models import require_backends
-from .validation import compare_cutoff, replay_model, static_scan, verify_hashes
+from .validation import compare_cutoff, replay_model, sha256_bytes, static_scan, verify_hashes
+
+
+def _resolve_path(value: str | Path, root: str | Path) -> Path:
+    path = Path(value).expanduser()
+    base = Path(root).expanduser().resolve(strict=False)
+    return path if path.is_absolute() else base / path
+
+
+def _repository_root() -> Path:
+    return Path(__file__).resolve().parents[1]
+
+
+def _runtime_source_files(manifest: dict[str, Any], code_root: Path) -> list[Path]:
+    """Select ML runtime sources for static scans, retaining framework hashes."""
+    code_info = manifest.get("code", {})
+    code_files = code_info.get("files", []) if isinstance(code_info, dict) else []
+    return [
+        code_root / item["path"]
+        for item in code_files
+        if isinstance(item, dict) and Path(item.get("path", "")).parts[:1] == ("ML_factor_mining",)
+    ]
+
+
+def _validate_cutoffs(cutoffs: list[str], oos_start: Any) -> list[pd.Timestamp]:
+    """Normalize verification cutoffs and reject dates before the OOS window."""
+    start = pd.Timestamp(oos_start)
+    if pd.isna(start) or start.tzinfo is not None or start != start.normalize():
+        raise ValueError("config.oos_start must be a timezone-naive calendar date")
+    validated: list[pd.Timestamp] = []
+    for value in cutoffs:
+        cutoff = pd.Timestamp(value)
+        if pd.isna(cutoff) or cutoff.tzinfo is not None or cutoff != cutoff.normalize():
+            raise ValueError("cutoffs must be timezone-naive calendar dates")
+        if cutoff < start:
+            raise ValueError("cutoffs must be on or after config.oos_start")
+        validated.append(cutoff.normalize())
+    return validated
 
 
 def canonical_relative(path: str | Path, root: str | Path) -> str:
@@ -113,6 +150,8 @@ def _snapshot_run(args: argparse.Namespace, config: Config, run_dir: Path, code_
     manifest_path = run_dir / "manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     manifest["config"] = _json_safe(asdict(config))
+    canonical_config = json.dumps(manifest["config"], sort_keys=True, separators=(",", ":"), allow_nan=False)
+    manifest["config_sha256"] = sha256_bytes(canonical_config.encode())
     manifest["code"] = _code_provenance(code_root)
     manifest["paths"] = {
         "inputs": "inputs",
@@ -125,14 +164,18 @@ def _snapshot_run(args: argparse.Namespace, config: Config, run_dir: Path, code_
 
 
 def _run(args: argparse.Namespace) -> int:
-    run_dir = Path(args.output).expanduser().resolve(strict=False)
+    repo_root = _repository_root()
+    run_dir = _resolve_path(args.output, repo_root).resolve(strict=False)
     if run_dir.exists():
         raise FileExistsError(f"output run directory already exists: {run_dir}")
     run_dir.mkdir(parents=True, exist_ok=False)
     _state(run_dir, "running", command="run")
     try:
-        code_root = Path(args.code_root).expanduser().resolve(strict=True)
-        config = _load_config(Path(args.config).expanduser().resolve(strict=True))
+        code_root = _resolve_path(args.code_root, repo_root).resolve(strict=True)
+        config_path = _resolve_path(args.config, repo_root).resolve(strict=True)
+        args.factor_dir = _resolve_path(args.factor_dir, repo_root).resolve(strict=True)
+        args.h5_path = _resolve_path(args.h5_path, repo_root).resolve(strict=True)
+        config = _load_config(config_path)
         require_backends(config.models)
         catalog = _snapshot_run(args, config, run_dir, code_root)
         evidence_end = args.evidence_end or config.end
@@ -188,12 +231,13 @@ def _run(args: argparse.Namespace) -> int:
 
 
 def _verify(args: argparse.Namespace) -> int:
-    run_dir = Path(args.run_dir).expanduser().resolve(strict=True)
+    repo_root = _repository_root()
+    run_dir = _resolve_path(args.run_dir, repo_root).resolve(strict=True)
     payload: dict[str, Any] = {"status": "running", "run_dir": str(run_dir)}
     try:
         manifest = json.loads((run_dir / "manifest.json").read_text(encoding="utf-8"))
         if args.code_root:
-            code_root = Path(args.code_root).expanduser().resolve(strict=True)
+            code_root = _resolve_path(args.code_root, repo_root).resolve(strict=True)
         else:
             code_root = None
             code_files = manifest.get("code", {}).get("files", [])
@@ -203,11 +247,11 @@ def _verify(args: argparse.Namespace) -> int:
                     break
             code_root = code_root or run_dir.parent
         hashes = verify_hashes(run_dir, code_root=code_root)
-        source_files = [code_root / item["path"] for item in manifest.get("code", {}).get("files", [])]
+        source_files = _runtime_source_files(manifest, code_root)
         scan = static_scan(source_files) if source_files else {"status": "verified", "findings": [], "scanned": []}
         payload.update(hashes=hashes, static_scan=scan)
         full_path = run_dir / "models"
-        cutoffs = args.cutoff or [manifest["config"]["oos_start"]]
+        cutoffs = _validate_cutoffs(args.cutoff or [manifest["config"]["oos_start"]], manifest["config"]["oos_start"])
         replay_results = []
         for model_dir in sorted(path for path in full_path.iterdir() if path.is_dir()) if full_path.is_dir() else []:
             full_predictions_path = model_dir / "predictions.parquet"
@@ -217,6 +261,8 @@ def _verify(args: argparse.Namespace) -> int:
             for cutoff in cutoffs:
                 replay = replay_model(run_dir, cutoff, model_name=model_dir.name)
                 replay_results.append(compare_cutoff(full_predictions, replay, cutoff, atol=args.atol))
+        if not replay_results:
+            raise ValueError("no cutoff replay results")
         payload["cutoff"] = replay_results
         payload["status"] = "verified" if hashes["status"] == "verified" and scan["status"] == "verified" and all(item["status"] == "verified" for item in replay_results) else "failed"
         write_json(run_dir / "verification.json", payload)

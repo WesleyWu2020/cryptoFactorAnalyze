@@ -10,6 +10,7 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable, Mapping
 from pathlib import Path
 import json
+import hashlib
 import re
 from typing import Any
 
@@ -20,8 +21,20 @@ from .artifacts import discover_catalog, sha256, write_json
 from .config import Config, quarter_folds
 
 
+def sha256_bytes(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def assert_frozen_inputs(run_dir: str | Path) -> dict[str, Any]:
+    result = verify_hashes(run_dir)
+    if result["status"] != "verified":
+        path = result.get("failures", [{}])[0].get("path", "snapshot")
+        raise ValueError(f"frozen input verification failed: {path}")
+    return json.loads((Path(run_dir) / "manifest.json").read_text(encoding="utf-8"))
+
+
 FORBIDDEN_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
-    ("negative_shift", re.compile(r"\.shift\s*\(\s*-\s*\d+")),
+    ("negative_shift", re.compile(r"\.shift\s*\(\s*(?:periods\s*=\s*)?-\s*\d+")),
     ("rolling_center", re.compile(r"\.rolling\s*\([^\n]*\bcenter\s*=\s*True")),
     ("backfill", re.compile(r"\.(?:bfill|backfill)\s*\(")),
     ("forward_asof", re.compile(r"merge_asof\s*\([^\n]*direction\s*=\s*[\"']forward[\"']")),
@@ -117,6 +130,8 @@ def replay_model(
         run_dir = Path(run_or_retrain)
         manifest = json.loads((run_dir / "manifest.json").read_text(encoding="utf-8"))
         config = Config.from_dict(manifest["config"])
+        if cutoff_ts < pd.Timestamp(config.oos_start):
+            raise ValueError("cutoff must be on or after config.oos_start")
         inputs = run_dir / "inputs"
         factor_dir = inputs / "factors"
         h5_path = inputs / "crypto_quant.h5"
@@ -161,7 +176,7 @@ def compare_cutoff(
     missing = merged.loc[merged["_merge"] != "both", keys + ["_merge"]]
     both = merged.loc[merged["_merge"] == "both"]
     if both.empty:
-        max_abs_diff = 0.0 if full.empty and replay.empty else float("inf")
+        max_abs_diff = float("inf")
     else:
         max_abs_diff = float(np.max(np.abs(both["factor_full"] - both["factor_replay"])))
     return {
@@ -179,14 +194,32 @@ def verify_hashes(run_dir: str | Path, *, code_root: str | Path | None = None) -
     """Verify every immutable snapshot and code-provenance hash."""
     root = Path(run_dir)
     manifest = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
-    failures: list[dict[str, str]] = []
+    if not isinstance(manifest.get("hashes"), Mapping) or not manifest["hashes"]:
+        raise ValueError("manifest contains no input hashes")
+    code_info = manifest.get("code")
+    code_files = code_info.get("files") if isinstance(code_info, Mapping) else None
+    if not isinstance(code_files, list) or not code_files:
+        raise ValueError("manifest code.files must be non-empty")
+    for item in code_files:
+        if not isinstance(item, Mapping) or not item.get("path") or not item.get("sha256"):
+            raise ValueError("manifest code.files entries require path and sha256")
+    config = manifest.get("config")
+    config_hash = manifest.get("config_sha256")
+    if not isinstance(config, Mapping) or not isinstance(config_hash, str) or not config_hash:
+        raise ValueError("manifest config and config_sha256 are required")
+    canonical = json.dumps(config, sort_keys=True, separators=(",", ":"), allow_nan=False)
+    actual_config_hash = sha256_bytes(canonical.encode())
+    failures: list[dict[str, Any]] = []
+    if actual_config_hash != config_hash:
+        failures.append({"path": "manifest.config", "expected": str(config_hash), "actual": actual_config_hash})
     for relative, expected in manifest.get("hashes", {}).items():
+        if not isinstance(relative, str) or not relative or not isinstance(expected, str) or not expected:
+            raise ValueError("manifest hashes must contain non-empty paths and digests")
         path = root / "inputs" / relative
         actual = sha256(path) if path.is_file() else None
         if actual != expected:
             failures.append({"path": relative, "expected": str(expected), "actual": str(actual)})
-    code_files = manifest.get("code", {}).get("files", [])
-    if code_root is None and code_files:
+    if code_root is None:
         # Runs are commonly written below ``outputs/``.  Find the nearest
         # ancestor containing the recorded relative source paths so that the
         # manifest remains canonical and portable without absolute paths.
@@ -209,5 +242,6 @@ __all__ = [
     "static_scan",
     "replay_model",
     "compare_cutoff",
+    "assert_frozen_inputs",
     "verify_hashes",
 ]
