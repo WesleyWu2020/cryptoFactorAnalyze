@@ -4,6 +4,7 @@ import json
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from ML_factor_mining.config import Config
 from ML_factor_mining.evaluation import evaluate_oos, manager_params, quarterly_metrics
@@ -44,7 +45,7 @@ def test_quarterly_metrics_slices_continuous_ledger_and_reconciles():
 
 def test_quarterly_metrics_keeps_prediction_quarters_after_accounting_halt():
     ledger = _ledger(start="2025-01-01", periods=2)
-    prediction_dates = pd.date_range("2025-01-01", "2025-07-01", freq="QS")
+    prediction_dates = pd.to_datetime(["2025-01-01", "2025-07-01"])
     predictions = pd.DataFrame(
         {"date": prediction_dates, "instrument": "A", "factor": 1.0}
     )
@@ -154,7 +155,7 @@ def test_evaluate_oos_writes_original_tables_and_honest_status(tmp_path):
                     "scenarios": {
                         "gross": {"status": "complete", "ledger": ledger, "orders": empty, "positions": empty, "funding": empty, "diagnostics": {}},
                         "trading_net": {"status": "complete", "ledger": ledger, "orders": empty, "positions": empty, "funding": empty, "diagnostics": {}},
-                        "all_costs": {"status": "incomplete", "ledger": ledger.iloc[:2], "orders": empty, "positions": empty, "funding": empty, "diagnostics": {"missing_tail": True}},
+                        "all_costs": {"status": "incomplete", "ledger": ledger.iloc[:2], "orders": empty, "positions": empty, "funding": empty, "funding_coverage": empty, "diagnostics": {"missing_tail": True}},
                     },
                 },
                 "group_returns": pd.DataFrame({"group_1": [0.1, 0.2, 0.3]}, index=dates),
@@ -168,6 +169,7 @@ def test_evaluate_oos_writes_original_tables_and_honest_status(tmp_path):
         factor_name="ml_demo",
         manager_cls=FakeManager,
         h5_path=tmp_path / "input.h5",
+        coverage=pd.DataFrame({"date": dates, "coverage": [0.7, 0.8, 0.9]}),
     )
 
     assert result["status"] == "incomplete"
@@ -176,6 +178,10 @@ def test_evaluate_oos_writes_original_tables_and_honest_status(tmp_path):
     assert (tmp_path / "daily_ic.parquet").is_file()
     assert (tmp_path / "quarterly_metrics.parquet").is_file()
     assert (tmp_path / "all_costs__ledger.parquet").is_file()
+    assert (tmp_path / "orders.parquet").is_file()
+    assert (tmp_path / "positions.parquet").is_file()
+    assert (tmp_path / "funding.parquet").is_file()
+    assert (tmp_path / "funding_coverage.parquet").is_file()
     assert (tmp_path / "daily_ledger.parquet").is_file()
     assert (tmp_path / "group_forward_return_diagnostics.parquet").is_file()
     assert (tmp_path / "quarterly.html").is_file()
@@ -189,6 +195,7 @@ def test_evaluate_oos_writes_original_tables_and_honest_status(tmp_path):
     assert payload["all_costs_status"] == "incomplete"
     assert payload["prediction_start"] == "2025-01-01"
     assert payload["prediction_end"] == "2025-01-03"
+    assert payload["quarterly_metrics"][0]["coverage_mean"] == 0.8
     assert payload["scenarios"]["all_costs"]["diagnostics"]["missing_tail"] is True
     assert "forward-label diagnostics" in payload["group_diagnostics_scope"]
     assert "NaN" not in (tmp_path / "evaluation.json").read_text()
@@ -230,3 +237,27 @@ def test_evaluate_oos_mapping_config_bounds_and_as_of(tmp_path):
     assert captured["params"]["end"] == "2025-01-03"
     assert captured["params"]["rebalance_days"] == 2
     assert captured["source_end"] == pd.Timestamp("2025-01-03")
+
+
+def test_evaluate_oos_rejects_ineligible_external_prediction(tmp_path):
+    dates = pd.date_range("2025-01-01", periods=2, name="date")
+    predictions = pd.DataFrame(
+        {"date": dates.repeat(2), "instrument": ["A", "B"] * 2,
+         "factor": np.arange(4, dtype=float)}
+    )
+
+    class Provider:
+        def get_universe(self, *, start, end):
+            return pd.DataFrame(
+                {"A": [True, True], "B": [False, False]},
+                index=pd.date_range(start, end, freq="D", name="date"),
+            )
+
+    class FakeManager:
+        dp = Provider()
+
+        def evaluate(self, *args, **kwargs):
+            raise AssertionError("membership failure must happen before evaluation")
+
+    with pytest.raises(ValueError, match="ineligible historical instruments"):
+        evaluate_oos(predictions, tmp_path, manager=FakeManager())

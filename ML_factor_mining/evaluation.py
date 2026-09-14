@@ -242,7 +242,8 @@ def quarterly_metrics(
     rows: list[dict[str, Any]] = []
     ledger_periods = frame.index.to_period("Q") if not frame.empty else pd.PeriodIndex([], freq="Q")
     prediction_periods = prediction_dates.to_period("Q") if not prediction_dates.empty else pd.PeriodIndex([], freq="Q")
-    quarters = sorted(set(ledger_periods.tolist()) | set(prediction_periods.tolist()))
+    observed = list(ledger_periods) + list(prediction_periods)
+    quarters = list(pd.period_range(min(observed), max(observed), freq="Q")) if observed else []
     evidence_timestamp = None
     if evidence_end is not None:
         evidence_timestamp = pd.Timestamp(_iso_date(evidence_end, "evidence_end"))
@@ -293,7 +294,7 @@ def quarterly_metrics(
             coverage_dates = pd.to_datetime(quarter_coverage["date"], errors="coerce", utc=True).dt.tz_localize(None).dt.normalize()
             quarter_coverage = quarter_coverage.loc[coverage_dates.dt.to_period("Q") == quarter]
         coverage_mean = (
-            float(pd.to_numeric(quarter_coverage["coverage"], errors="coerce").mean())
+            round(float(pd.to_numeric(quarter_coverage["coverage"], errors="coerce").mean()), 12)
             if isinstance(quarter_coverage, pd.DataFrame) and "coverage" in quarter_coverage and quarter_coverage["coverage"].notna().any()
             else None
         )
@@ -444,6 +445,7 @@ def evaluate_oos(
     h5_path: str | Path | None = None,
     base_dir: str | Path | None = None,
     evidence_end: Any = None,
+    coverage: pd.DataFrame | None = None,
     plot: bool = True,
 ) -> dict[str, Any]:
     """Evaluate and persist one continuous ML OOS prediction stream.
@@ -508,6 +510,12 @@ def evaluate_oos(
             kwargs["base_dir"] = base_dir
         kwargs["as_of"] = evidence_day
         manager = manager_cls(**kwargs)
+    if hasattr(manager, "dp") and hasattr(manager.dp, "get_universe"):
+        membership = manager.dp.get_universe(start=prediction_start, end=evaluation_end)
+        keys = pd.MultiIndex.from_frame(evaluated[["date", "instrument"]])
+        eligible = membership.rename_axis(columns="instrument").stack(future_stack=True)
+        if not eligible.reindex(keys).fillna(False).all():
+            raise ValueError("OOS output contains ineligible historical instruments")
     result = manager.evaluate(
         evaluated,
         factor_name=factor_name,
@@ -545,11 +553,18 @@ def evaluate_oos(
     all_costs = scenarios.get("all_costs", {}) if isinstance(scenarios, Mapping) else {}
     all_ledger = all_costs.get("ledger", pd.DataFrame()) if isinstance(all_costs, Mapping) else pd.DataFrame()
     scenario_status = all_costs.get("status", result.get("status", "complete")) if isinstance(all_costs, Mapping) else result.get("status", "complete")
+    for name in ("orders", "positions", "funding", "funding_coverage"):
+        frame = all_costs.get(name) if isinstance(all_costs, Mapping) else None
+        if isinstance(frame, pd.DataFrame):
+            path = destination / f"{name}.parquet"
+            _write_table(path, frame)
+            paths[name] = str(path)
     quarterly = quarterly_metrics(
         all_ledger,
         predictions=table,
         evidence_end=evidence_day,
         status=scenario_status,
+        coverage=coverage,
     )
     quarterly_path = destination / "quarterly_metrics.parquet"
     quarterly.to_parquet(quarterly_path, index=False)
