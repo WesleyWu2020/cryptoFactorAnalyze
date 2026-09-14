@@ -13,11 +13,14 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from .artifacts import write_json
+
 
 _BACKENDS = {
     "lightgbm": "lightgbm",
     "xgboost": "xgboost",
-    "sklearn.linear_model": "sklearn.linear_model",
+    "ridge": "sklearn.linear_model",
+    "linear": "sklearn.linear_model",
 }
 _ALLOWED = {
     "lightgbm": {"num_leaves", "min_data_in_leaf", "lambda_l2"},
@@ -52,12 +55,14 @@ def _config_value(config: Any, name: str, default: Any) -> Any:
     return getattr(config, name, default)
 
 
-def _candidate_entries(values: Sequence[Mapping[str, Any]], name: str) -> list[dict[str, Any]]:
+def _candidate_entries(
+    values: Sequence[Mapping[str, Any]], name: str
+) -> list[tuple[str, dict[str, Any]]]:
     allowed = _ALLOWED[name]
     if isinstance(values, (str, bytes)) or not isinstance(values, Sequence) or not values:
         raise ValueError(f"candidate override for {name!r} must be a nonempty list")
     seen: set[str] = set()
-    entries: list[dict[str, Any]] = []
+    entries: list[tuple[str, dict[str, Any]]] = []
     for params in values:
         if not isinstance(params, Mapping):
             raise ValueError("candidate entries must be objects")
@@ -72,11 +77,11 @@ def _candidate_entries(values: Sequence[Mapping[str, Any]], name: str) -> list[d
         if key in seen:
             raise ValueError(f"duplicate candidate for {name}: {params_copy}")
         seen.add(key)
-        entries.append({"candidate_id": f"c{len(entries):03d}", "params": params_copy})
+        entries.append((f"c{len(entries):03d}", params_copy))
     return entries
 
 
-def candidate_bank(name: str, config: Any = None) -> list[dict[str, Any]]:
+def candidate_bank(name: str, config: Any = None) -> list[tuple[str, dict[str, Any]]]:
     """Return the deterministic candidate grid, or validated config overrides."""
     if name not in _ALLOWED:
         raise ValueError(f"unknown model: {name!r}")
@@ -169,8 +174,16 @@ class Fitted:
                 iteration_range=(0, self.rounds),
             )
         elif isinstance(self.estimator, Mapping):
-            coefficient = np.asarray(self.estimator["coefficients"], dtype="float64")
-            intercept = float(self.estimator["intercept"])
+            weights = self.estimator.get("weights", self.estimator)
+            if not isinstance(weights, Mapping):
+                raise ValueError("serialized linear model weights must be an object")
+            if "coef" in weights:
+                coefficient = np.asarray(weights["coef"], dtype="float64")
+            elif "coefficients" in weights:
+                coefficient = np.asarray(weights["coefficients"], dtype="float64")
+            else:
+                raise ValueError("serialized linear model is missing coef weights")
+            intercept = float(weights["intercept"])
             output = values @ coefficient + intercept
         else:
             output = self.estimator.predict(frame)
@@ -275,7 +288,7 @@ def fit_model(name: str, *args: Any, **kwargs: Any) -> Fitted:
 
     columns = tuple(frame.columns)
     if name in ("linear", "ridge"):
-        sklearn = require_backends(("sklearn.linear_model",))["sklearn.linear_model"]
+        sklearn = require_backends((name,))[name]
         if name == "linear":
             estimator = sklearn.LinearRegression()
         else:
@@ -286,7 +299,8 @@ def fit_model(name: str, *args: Any, **kwargs: Any) -> Fitted:
         estimator.fit(frame, target)
         return Fitted(name, estimator, columns, None)
 
-    if validation_pair is None:
+    fixed_rounds = rounds is not None
+    if validation_pair is None and not fixed_rounds:
         raise ValueError(f"{name} requires validation data for early-stopping tuning")
     max_rounds = rounds if rounds is not None else _config_value(config, "max_rounds", 1000)
     patience = _config_value(config, "patience", 50)
@@ -299,9 +313,10 @@ def fit_model(name: str, *args: Any, **kwargs: Any) -> Fitted:
 
     if name == "lightgbm":
         lgb = require_backends(("lightgbm",))["lightgbm"]
+        fit_rounds = int(rounds) if fixed_rounds else int(max_rounds)
         estimator = lgb.LGBMRegressor(
             objective="regression",
-            n_estimators=int(max_rounds),
+            n_estimators=fit_rounds,
             learning_rate=0.05,
             random_state=int(seed),
             n_jobs=int(threads),
@@ -310,35 +325,70 @@ def fit_model(name: str, *args: Any, **kwargs: Any) -> Fitted:
             verbosity=-1,
             **candidate,
         )
-        estimator.fit(
-            frame,
-            target,
-            eval_set=[(val_frame, val_target)],
-            callbacks=[lgb.early_stopping(int(patience), verbose=False)],
-        )
-        best = getattr(estimator, "best_iteration_", None)
-        selected = int(best) if best is not None and int(best) > 0 else int(max_rounds)
+        if fixed_rounds:
+            estimator.fit(frame, target)
+            selected = int(rounds)
+        else:
+            estimator.fit(
+                frame,
+                target,
+                eval_X=val_frame,
+                eval_y=val_target,
+                callbacks=[lgb.early_stopping(int(patience), verbose=False)],
+            )
+            best = getattr(estimator, "best_iteration_", None)
+            selected = int(best) if best is not None and int(best) > 0 else int(max_rounds)
     else:
         xgb = require_backends(("xgboost",))["xgboost"]
-        estimator = xgb.XGBRegressor(
-            objective="reg:squarederror",
-            n_estimators=int(max_rounds),
-            tree_method="hist",
-            random_state=int(seed),
-            n_jobs=int(threads),
-            eval_metric="rmse",
-            early_stopping_rounds=int(patience),
-            reg_lambda=candidate.pop("lambda", 1.0),
+        fit_rounds = int(rounds) if fixed_rounds else int(max_rounds)
+        xgb_kwargs = {
+            "objective": "reg:squarederror",
+            "n_estimators": fit_rounds,
+            "tree_method": "hist",
+            "random_state": int(seed),
+            "n_jobs": int(threads),
+            "eval_metric": "rmse",
+            "reg_lambda": candidate.pop("lambda", 1.0),
             **candidate,
+        }
+        if not fixed_rounds:
+            xgb_kwargs["early_stopping_rounds"] = int(patience)
+        estimator = xgb.XGBRegressor(
+            **xgb_kwargs,
         )
-        estimator.fit(frame, target, eval_set=[(val_frame, val_target)], verbose=False)
-        best = getattr(estimator, "best_iteration", None)
-        selected = int(best) + 1 if best is not None and int(best) >= 0 else int(max_rounds)
+        if fixed_rounds:
+            estimator.fit(frame, target, verbose=False)
+            selected = int(rounds)
+        else:
+            estimator.fit(frame, target, eval_set=[(val_frame, val_target)], verbose=False)
+            best = getattr(estimator, "best_iteration", None)
+            selected = int(best) + 1 if best is not None and int(best) >= 0 else int(max_rounds)
     return Fitted(name, estimator, columns, selected)
 
 
 def _metadata(model: Fitted) -> dict[str, Any]:
     return {"name": model.name, "columns": list(model.columns), "rounds": model.rounds}
+
+
+def _linear_weights(estimator: Any, n_columns: int) -> dict[str, Any]:
+    """Return canonical JSON-safe linear weights, accepting legacy mappings."""
+    if isinstance(estimator, Mapping):
+        weights = estimator.get("weights", estimator)
+        if not isinstance(weights, Mapping):
+            raise ValueError("serialized linear model weights must be an object")
+        coefficient_key = "coef" if "coef" in weights else "coefficients"
+        if coefficient_key not in weights or "intercept" not in weights:
+            raise ValueError("serialized linear model must contain coef and intercept")
+        coefficient = np.asarray(weights[coefficient_key], dtype="float64")
+        intercept = float(weights["intercept"])
+    else:
+        coefficient = np.asarray(estimator.coef_, dtype="float64").reshape(-1)
+        intercept = float(np.asarray(estimator.intercept_).reshape(-1)[0])
+    if coefficient.ndim != 1 or len(coefficient) != n_columns or not np.isfinite(coefficient).all():
+        raise ValueError("invalid serialized coefficients")
+    if not np.isfinite(intercept):
+        raise ValueError("invalid serialized intercept")
+    return {"coef": coefficient.tolist(), "intercept": intercept}
 
 
 def save_model(model: Fitted | str | Path, directory: str | Path | Fitted) -> Path:
@@ -349,21 +399,15 @@ def save_model(model: Fitted | str | Path, directory: str | Path | Fitted) -> Pa
         raise TypeError("save_model expects a Fitted model")
     root = Path(directory)
     root.mkdir(parents=True, exist_ok=True)
-    (root / "metadata.json").write_text(json.dumps(_metadata(model), allow_nan=False), encoding="utf-8")
+    payload = _metadata(model)
+    if model.name in ("linear", "ridge"):
+        payload["weights"] = _linear_weights(model.estimator, len(model.columns))
+    write_json(root / "model.json", payload)
     if model.name == "lightgbm":
         booster = model.estimator.booster_ if hasattr(model.estimator, "booster_") else model.estimator
         booster.save_model(str(root / "model.txt"))
     elif model.name == "xgboost":
         model.estimator.save_model(str(root / "model.ubj"))
-    else:
-        if isinstance(model.estimator, Mapping):
-            payload = dict(model.estimator)
-        else:
-            payload = {
-                "coefficients": np.asarray(model.estimator.coef_, dtype="float64").reshape(-1).tolist(),
-                "intercept": float(np.asarray(model.estimator.intercept_).reshape(-1)[0]),
-            }
-        (root / "model.json").write_text(json.dumps(payload, allow_nan=False), encoding="utf-8")
     return root
 
 
@@ -371,14 +415,26 @@ def load_model(path_or_name: str | Path, directory: str | Path | None = None) ->
     """Load a model saved by :func:`save_model` (optionally checking its name)."""
     expected_name = None if directory is None else str(path_or_name)
     root = Path(path_or_name if directory is None else directory)
-    metadata = json.loads((root / "metadata.json").read_text(encoding="utf-8"))
+    metadata = json.loads((root / "model.json").read_text(encoding="utf-8"))
+    if not isinstance(metadata, Mapping):
+        raise ValueError("model metadata must be an object")
     name = metadata.get("name")
     if name not in _ALLOWED or (expected_name is not None and expected_name != name):
         raise ValueError("model metadata has an invalid or unexpected name")
-    columns = tuple(metadata["columns"])
+    raw_columns = metadata.get("columns")
+    if (
+        not isinstance(raw_columns, list)
+        or not raw_columns
+        or any(not isinstance(column, str) or not column for column in raw_columns)
+        or len(set(raw_columns)) != len(raw_columns)
+    ):
+        raise ValueError("model metadata has invalid columns")
+    columns = tuple(raw_columns)
     rounds = metadata.get("rounds")
-    if rounds is not None:
-        rounds = int(rounds)
+    if rounds is not None and (
+        isinstance(rounds, bool) or not isinstance(rounds, int) or rounds < 0
+    ):
+        raise ValueError("model metadata has invalid rounds")
     if name == "lightgbm":
         lgb = require_backends(("lightgbm",))["lightgbm"]
         estimator = lgb.Booster(model_file=str(root / "model.txt"))
@@ -387,12 +443,13 @@ def load_model(path_or_name: str | Path, directory: str | Path | None = None) ->
         estimator = xgb.Booster()
         estimator.load_model(str(root / "model.ubj"))
     else:
-        payload = json.loads((root / "model.json").read_text(encoding="utf-8"))
-        coefficient = np.asarray(payload["coefficients"], dtype="float64")
-        intercept = float(payload["intercept"])
-        if coefficient.ndim != 1 or len(coefficient) != len(columns) or not np.isfinite(coefficient).all():
-            raise ValueError("invalid serialized coefficients")
-        if not np.isfinite(intercept):
-            raise ValueError("invalid serialized intercept")
-        estimator = {"coefficients": coefficient.tolist(), "intercept": intercept}
+        weights = metadata.get("weights")
+        if weights is None and "coefficients" in metadata:
+            weights = {
+                "coefficients": metadata["coefficients"],
+                "intercept": metadata.get("intercept"),
+            }
+        if not isinstance(weights, Mapping):
+            raise ValueError("model metadata is missing linear weights")
+        estimator = _linear_weights(weights, len(columns))
     return Fitted(name, estimator, columns, rounds)
