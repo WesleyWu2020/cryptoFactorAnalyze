@@ -44,9 +44,7 @@ def load_market(provider, start, end, columns):
 
 def backtest_profile(config):
     """Build the fixed, strict daily profile used for candidate validation."""
-    anchor_date = getattr(config, "anchor_date", "2024-01-01")
-    if isinstance(anchor_date, (pd.Timestamp,)) or hasattr(anchor_date, "isoformat"):
-        anchor_date = anchor_date.isoformat()
+    anchor_date = pd.Timestamp(getattr(config, "anchor_date", "2024-01-01")).date().isoformat()
     return resolve_profile(
         "perp_1d",
         {
@@ -146,21 +144,47 @@ def score_validation(
     diagnostics = net.get("diagnostics", {})
     ledger = net.get("ledger")
     liquidation_date = diagnostics.get("liquidation_date")
-    if (
-        net.get("status") != "complete"
-        or not isinstance(ledger, pd.DataFrame)
-        or ledger.empty
-        or not diagnostics.get("liquidation_reached")
-        or liquidation_date is None
-        or pd.Timestamp(liquidation_date) >= retrain
-        or diagnostics.get("final_quantities")
-    ):
+    if net.get("status") != "complete" or not isinstance(ledger, pd.DataFrame) or ledger.empty:
         raise CandidateRejected(
             f"uncertified validation ledger: {diagnostics.get('halt_reason')}"
         )
-    expected_index = pd.date_range(ledger.index[0], ledger.index[-1], name="date")
+    if not isinstance(ledger.index, pd.DatetimeIndex):
+        raise CandidateRejected("certified ledger must use a DatetimeIndex")
+    if ledger.index.tz is not None:
+        raise CandidateRejected("certified ledger index must be timezone-naive")
+    if ledger.index.hasnans:
+        raise CandidateRejected("certified ledger index contains NaT")
+    if not diagnostics.get("liquidation_reached") or liquidation_date is None:
+        raise CandidateRejected("uncertified validation ledger: liquidation not reached")
+    if diagnostics.get("final_quantities"):
+        raise CandidateRejected("uncertified validation ledger: open final positions")
+    if (ledger.index >= retrain).any():
+        raise CandidateRejected("certified ledger contains rows after retrain")
+    expected_index = pd.date_range(
+        ledger.index[0], ledger.index[-1], freq="D", name=ledger.index.name
+    )
     if not ledger.index.equals(expected_index):
-        raise CandidateRejected("internal accounting gap")
+        raise CandidateRejected("certified ledger index must be contiguous daily dates")
+    try:
+        liquidation_ts = pd.Timestamp(liquidation_date)
+    except (TypeError, ValueError, OverflowError):
+        liquidation_ts = pd.NaT
+    if (
+        pd.isna(liquidation_ts)
+        or liquidation_ts.tzinfo is not None
+        or liquidation_ts != liquidation_ts.normalize()
+    ):
+        raise CandidateRejected("invalid diagnostics liquidation_date")
+    if liquidation_ts < calendar[0] or liquidation_ts >= retrain:
+        raise CandidateRejected(
+            "liquidation_date must be within the validation calendar before retrain"
+        )
+    if ledger.index[0] < calendar[0]:
+        raise CandidateRejected("certified ledger starts before the validation calendar")
+    if ledger.index[-1] != liquidation_ts:
+        raise CandidateRejected(
+            "certified ledger last date does not match diagnostics liquidation_date"
+        )
     if "return" not in ledger or not np.isfinite(ledger["return"]).all():
         raise CandidateRejected("nonfinite certified return")
 
@@ -228,7 +252,9 @@ def rank_candidates(records, config=None, *, ic_weight=None, sharpe_weight=None)
     if config is not None:
         ic_weight = config.ic_weight
         sharpe_weight = config.sharpe_weight
-    elif ic_weight is None or sharpe_weight is None:
+    elif (ic_weight is None) != (sharpe_weight is None):
+        raise ValueError("ic_weight and sharpe_weight must be supplied together")
+    elif ic_weight is None and sharpe_weight is None:
         ic_weight = sharpe_weight = 0.5
     table.loc[valid, "selection_score"] = (
         float(ic_weight) * table.loc[valid, "mean_rank_ic_percentile"]
