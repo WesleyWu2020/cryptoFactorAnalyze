@@ -93,6 +93,17 @@ def test_rank_candidates_requires_explicit_weights_as_a_pair():
         rank_candidates([row], ic_weight=0.7)
 
 
+@pytest.mark.parametrize(
+    "ic_weight, sharpe_weight",
+    [(2.0, 3.0), (-0.1, 1.1), (np.nan, 0.5), (np.inf, 0.5), (0.4, 0.5)],
+)
+def test_rank_candidates_rejects_invalid_explicit_weights(ic_weight, sharpe_weight):
+    row = {"candidate_id": "a", "status": "valid", "mean_rank_ic": 0.1, "net_sharpe": 1.0}
+
+    with pytest.raises(ValueError, match="weights"):
+        rank_candidates([row], ic_weight=ic_weight, sharpe_weight=sharpe_weight)
+
+
 def test_score_validation_rejects_uncertified_ledger_boundaries(monkeypatch):
     dates = pd.date_range("2024-01-01", periods=12, freq="D")
     instruments = ["A", "B", "C"]

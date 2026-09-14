@@ -256,6 +256,28 @@ def rank_candidates(records, config=None, *, ic_weight=None, sharpe_weight=None)
         raise ValueError("ic_weight and sharpe_weight must be supplied together")
     elif ic_weight is None and sharpe_weight is None:
         ic_weight = sharpe_weight = 0.5
+    else:
+        try:
+            numeric_ic_weight = float(ic_weight)
+            numeric_sharpe_weight = float(sharpe_weight)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise ValueError(
+                "ic_weight and sharpe_weight must be finite, nonnegative weights summing to one"
+            ) from exc
+        if (
+            isinstance(ic_weight, (bool, np.bool_))
+            or isinstance(sharpe_weight, (bool, np.bool_))
+            or not np.isfinite(numeric_ic_weight)
+            or not np.isfinite(numeric_sharpe_weight)
+            or numeric_ic_weight < 0
+            or numeric_sharpe_weight < 0
+            or numeric_ic_weight + numeric_sharpe_weight != 1.0
+        ):
+            raise ValueError(
+                "ic_weight and sharpe_weight must be finite, nonnegative weights summing to one"
+            )
+        ic_weight = numeric_ic_weight
+        sharpe_weight = numeric_sharpe_weight
     table.loc[valid, "selection_score"] = (
         float(ic_weight) * table.loc[valid, "mean_rank_ic_percentile"]
         + float(sharpe_weight) * table.loc[valid, "net_sharpe_percentile"]
