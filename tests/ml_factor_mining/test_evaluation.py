@@ -54,9 +54,27 @@ def test_manager_params_allowlist_and_iso_dates():
         "end": "2025-03-31",
         "rebalance_days": 5,
         "anchor_date": "2024-01-01",
+        "n_groups": 5,
         "fee_rate": 0.002,
         "slippage": 0.003,
     }
+
+
+def test_manager_params_supports_plan_style_positional_bounds():
+    config = Config()
+    params = manager_params(config, "2025-01-01", "2025-03-31")
+    start, end, overrides = __import__("factor_common.manager", fromlist=["FactorManager"]).FactorManager._split_params(params)
+    from factor_common.profiles import resolve_profile
+    from ML_factor_mining.scoring import backtest_profile
+
+    actual = resolve_profile("perp_1d", overrides)
+    expected = backtest_profile(config)
+    assert start == pd.Timestamp("2025-01-01")
+    assert end == pd.Timestamp("2025-03-31")
+    assert actual.rebalance_days == expected.rebalance_days
+    assert actual.fee_rate == expected.fee_rate
+    assert actual.slippage == expected.slippage
+    assert actual.split_date == "2024-12-31"
 
 
 def test_evaluate_oos_writes_original_tables_and_honest_status(tmp_path):
@@ -77,6 +95,12 @@ def test_evaluate_oos_writes_original_tables_and_honest_status(tmp_path):
 
         def evaluate(self, source, **kwargs):
             assert list(source.columns) == ["date", "instrument", "factor"]
+            assert kwargs["params"] == {
+                "start": "2025-01-01",
+                "end": "2025-01-03",
+                "split_date": "2024-12-31",
+                "n_groups": 5,
+            }
             return {
                 "status": "incomplete",
                 "metadata": {"factor_name": kwargs["factor_name"], "profile_id": "perp_1d"},
@@ -109,10 +133,22 @@ def test_evaluate_oos_writes_original_tables_and_honest_status(tmp_path):
 
     assert result["status"] == "incomplete"
     assert (tmp_path / "factor.parquet").is_file()
+    assert (tmp_path / "factor_oos.parquet").is_file()
     assert (tmp_path / "daily_ic.parquet").is_file()
     assert (tmp_path / "quarterly_metrics.parquet").is_file()
     assert (tmp_path / "all_costs__ledger.parquet").is_file()
+    assert (tmp_path / "daily_ledger.parquet").is_file()
+    assert (tmp_path / "group_forward_return_diagnostics.parquet").is_file()
+    assert (tmp_path / "quarterly.html").is_file()
+    quarterly_html = (tmp_path / "quarterly.html").read_text()
+    assert "quarterly OOS evaluation" in quarterly_html
+    assert "continuous all-costs ledger" in quarterly_html
+    assert "forward-label diagnostics" in quarterly_html
     payload = json.loads((tmp_path / "evaluation.json").read_text())
     assert payload["status"] == "incomplete"
+    assert payload["all_costs_status"] == "incomplete"
+    assert payload["prediction_start"] == "2025-01-01"
+    assert payload["prediction_end"] == "2025-01-03"
     assert payload["scenarios"]["all_costs"]["diagnostics"]["missing_tail"] is True
+    assert "forward-label diagnostics" in payload["group_diagnostics_scope"]
     assert "NaN" not in (tmp_path / "evaluation.json").read_text()

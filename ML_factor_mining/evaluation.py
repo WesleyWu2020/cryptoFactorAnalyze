@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from datetime import date, datetime
+import html
 import json
 import math
 from pathlib import Path
@@ -67,7 +68,7 @@ def _iso_date(value: Any, name: str) -> str:
 
 def manager_params(
     config: Any = None,
-    *,
+    *legacy_bounds: Any,
     start: Any = None,
     end: Any = None,
     **overrides: Any,
@@ -77,7 +78,21 @@ def manager_params(
     ML ``Config`` uses ``holding_days`` while the manager's daily profile uses
     ``rebalance_days``.  Only manager profile fields are emitted; model,
     training, and candidate settings never leak into the manager API.
+
+    ``start`` and ``end`` are keyword-only in the current API.  The positional
+    form is retained for callers following the original Task 7 plan; that
+    form also sets the split immediately before the OOS interval so the
+    standard manager report has the same OOS boundary as the ML stream.
     """
+    if len(legacy_bounds) > 2:
+        raise TypeError("manager_params accepts at most positional start and end bounds")
+    legacy_style = bool(legacy_bounds)
+    if legacy_style:
+        if start is not None or end is not None:
+            raise TypeError("start/end cannot be supplied both positionally and by keyword")
+        start = legacy_bounds[0]
+        end = legacy_bounds[1] if len(legacy_bounds) == 2 else None
+
     unknown = sorted(set(overrides) - _MANAGER_KEYS)
     if unknown:
         raise ValueError(f"Unsupported FactorManager override: {unknown[0]}")
@@ -114,10 +129,14 @@ def manager_params(
     if requested_end is not None:
         params["end"] = _iso_date(requested_end, "end")
 
+    # The ML experiment is intentionally a five-group portfolio, independent
+    # of model/training configuration.  Always send this explicit profile
+    # value so the manager cannot silently fall back to its ten-group default.
+    params["n_groups"] = overrides.get("n_groups", 5)
+
     mapping = (
         ("holding_days", "rebalance_days"),
         ("anchor_date", "anchor_date"),
-        ("n_groups", "n_groups"),
         ("factor_direction", "factor_direction"),
         ("fee_rate", "fee_rate"),
         ("slippage", "slippage"),
@@ -134,6 +153,10 @@ def manager_params(
             params[target_name] = _iso_date(value, target_name)
         else:
             params[target_name] = value
+    if legacy_style and "split_date" not in params and start is not None:
+        params["split_date"] = _iso_date(
+            pd.Timestamp(start) - pd.Timedelta(days=1), "split_date"
+        )
     return params
 
 
@@ -152,6 +175,12 @@ def _validate_ledger(ledger: pd.DataFrame) -> pd.DataFrame:
         raise ValueError("ledger must contain equity and return columns")
     result = ledger.sort_index().copy()
     result.index = result.index.normalize()
+    if result.index.has_duplicates:
+        raise ValueError("ledger index must contain unique calendar dates")
+    if len(result.index) > 1:
+        gaps = result.index.to_series().diff().dropna()
+        if (gaps != pd.Timedelta(days=1)).any():
+            raise ValueError("ledger index must contain a continuous daily calendar")
     return result
 
 
@@ -269,6 +298,36 @@ def _render_html(result: Mapping[str, Any], path: Path) -> None:
         )
 
 
+def _render_quarterly_html(
+    quarterly: pd.DataFrame,
+    *,
+    path: Path,
+    factor_name: str,
+    accounting_status: str,
+) -> None:
+    """Write the ML-specific quarterly view and its interpretation notes."""
+    disclaimer = (
+        "Quarterly portfolio returns are compounded from slices of one "
+        "continuous all-costs ledger. forward-label diagnostics (group "
+        "returns) are not cost-adjusted portfolio profits. Incomplete "
+        "accounting and the final execution tail are shown as unavailable or "
+        "certified-prefix data rather than zero-filled returns."
+    )
+    table_html = quarterly.to_html(index=False, escape=True, na_rep="unavailable")
+    page = (
+        "<!doctype html><html lang='en'><meta charset='utf-8'>"
+        f"<title>{html.escape(factor_name)} — quarterly OOS evaluation</title>"
+        "<style>body{font:15px system-ui;margin:32px}table{border-collapse:collapse}"
+        "td,th{padding:8px;border:1px solid #ddd}th{background:#eee}"
+        ".note{max-width:1000px;line-height:1.5}</style>"
+        f"<h1>{html.escape(factor_name)} — quarterly OOS evaluation</h1>"
+        f"<p class='note'>{html.escape(disclaimer)}</p>"
+        f"<p>All-costs accounting status: {html.escape(str(accounting_status))}</p>"
+        f"{table_html}</html>"
+    )
+    path.write_text(page, encoding="utf-8")
+
+
 def evaluate_oos(
     predictions: pd.DataFrame | str | Path,
     output_dir: str | Path,
@@ -279,6 +338,7 @@ def evaluate_oos(
     manager_cls: Any = None,
     h5_path: str | Path | None = None,
     base_dir: str | Path | None = None,
+    evidence_end: Any = None,
     plot: bool = True,
 ) -> dict[str, Any]:
     """Evaluate and persist one continuous ML OOS prediction stream.
@@ -290,10 +350,39 @@ def evaluate_oos(
     destination = Path(output_dir)
     destination.mkdir(parents=True, exist_ok=True)
     table = _factor_table(predictions)
-    factor_path = destination / "factor.parquet"
-    table.to_parquet(factor_path, index=False)
+    prediction_start = table["date"].min().normalize()
+    prediction_end = table["date"].max().normalize()
+    holding_days = int(getattr(config, "holding_days", 3)) if config is not None else 3
+    if evidence_end is None and isinstance(config, Mapping):
+        evidence_end = config.get("evidence_end")
+    if evidence_end is None and config is not None and hasattr(config, "evidence_end"):
+        evidence_end = getattr(config, "evidence_end")
+    if evidence_end is None:
+        evidence_day = prediction_end + pd.Timedelta(days=holding_days + 1)
+    else:
+        evidence_day = pd.Timestamp(_iso_date(evidence_end, "evidence_end"))
+    evaluation_end = min(
+        prediction_end,
+        evidence_day - pd.Timedelta(days=holding_days + 1),
+    )
+    if evaluation_end < prediction_start:
+        raise ValueError("evidence_end does not leave an executable OOS signal interval")
+    evaluated = table.loc[table["date"].between(prediction_start, evaluation_end)].copy()
 
-    params = manager_params(config)
+    # Keep the canonical name from the written plan and a compatibility alias
+    # used by early callers of this standalone helper.
+    factor_path = destination / "factor_oos.parquet"
+    table.to_parquet(factor_path, index=False)
+    factor_alias = destination / "factor.parquet"
+    table.to_parquet(factor_alias, index=False)
+
+    params = manager_params(
+        config,
+        start=prediction_start,
+        end=evaluation_end,
+        split_date=_iso_date(prediction_start - pd.Timedelta(days=1), "split_date"),
+        n_groups=5,
+    )
     if manager is None:
         if manager_cls is None:
             from factor_common.manager import FactorManager
@@ -309,7 +398,7 @@ def evaluate_oos(
             kwargs["base_dir"] = base_dir
         manager = manager_cls(**kwargs)
     result = manager.evaluate(
-        table,
+        evaluated,
         factor_name=factor_name,
         profile_id="perp_1d",
         params=params,
@@ -318,7 +407,11 @@ def evaluate_oos(
     if not isinstance(result, Mapping):
         raise TypeError("FactorManager.evaluate must return a mapping")
 
-    paths: dict[str, str] = {"factor_parquet": str(factor_path)}
+    paths: dict[str, str] = {
+        "factor_parquet": str(factor_path),
+        "factor_oos": str(factor_path),
+        "factor_alias": str(factor_alias),
+    }
     factor_result = result.get("factor_result", {})
     scenarios = factor_result.get("scenarios", {}) if isinstance(factor_result, Mapping) else {}
     scenario_payload: dict[str, Any] = {}
@@ -353,9 +446,12 @@ def evaluate_oos(
 
     group_returns = result.get("group_returns")
     if isinstance(group_returns, pd.DataFrame):
-        group_path = destination / "group_returns.parquet"
+        group_path = destination / "group_forward_return_diagnostics.parquet"
         _write_table(group_path, group_returns)
-        paths["group_returns"] = str(group_path)
+        group_alias = destination / "group_returns.parquet"
+        _write_table(group_alias, group_returns)
+        paths["group_returns"] = str(group_alias)
+        paths["group_forward_return_diagnostics"] = str(group_path)
     group_diagnostics = result.get("diagnostics", {}).get("grouping", {})
     group_diag_path = destination / "group_diagnostics.json"
     group_diag_path.write_text(json.dumps(_json_safe(group_diagnostics), indent=2, sort_keys=True) + "\n", encoding="utf-8")
@@ -368,20 +464,44 @@ def evaluate_oos(
         html_path.write_text("<html><body><h1>ML OOS evaluation</h1></body></html>", encoding="utf-8")
     paths["html"] = str(html_path)
 
+    quarterly_html_path = destination / "quarterly.html"
+    _render_quarterly_html(
+        quarterly,
+        path=quarterly_html_path,
+        factor_name=factor_name,
+        accounting_status=str(scenario_status),
+    )
+    paths["quarterly_html"] = str(quarterly_html_path)
+
+    if isinstance(all_ledger, pd.DataFrame):
+        daily_ledger_path = destination / "daily_ledger.parquet"
+        _write_table(daily_ledger_path, all_ledger)
+        paths["daily_ledger"] = str(daily_ledger_path)
+
     evaluation = {
         "status": result.get("status"),
+        "all_costs_status": scenario_status,
         "factor_name": factor_name,
+        "prediction_start": prediction_start.date().isoformat(),
+        "prediction_end": prediction_end.date().isoformat(),
+        "evaluation_signal_start": prediction_start.date().isoformat(),
+        "evaluation_signal_end": evaluation_end.date().isoformat(),
+        "evidence_end": evidence_day.date().isoformat(),
         "manager_params": params,
         "metadata": _json_safe(result.get("metadata", {})),
         "factor_performance": _json_safe(result.get("factor_performance", {})),
         "scenarios": scenario_payload,
         "quarterly_metrics": _json_safe(quarterly.to_dict(orient="records")),
         "group_diagnostics": _json_safe(group_diagnostics),
+        "group_diagnostics_scope": (
+            "forward-label diagnostics (group returns) are not "
+            "cost-adjusted portfolio profits."
+        ),
         "paths": paths,
     }
     evaluation_path = destination / "evaluation.json"
-    evaluation_path.write_text(json.dumps(evaluation, indent=2, sort_keys=True, allow_nan=False) + "\n", encoding="utf-8")
     paths["evaluation_json"] = str(evaluation_path)
+    evaluation_path.write_text(json.dumps(evaluation, indent=2, sort_keys=True, allow_nan=False) + "\n", encoding="utf-8")
     return {**evaluation, "paths": paths, "manager_result": result}
 
 
