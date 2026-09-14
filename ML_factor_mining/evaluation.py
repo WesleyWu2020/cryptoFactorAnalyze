@@ -302,12 +302,14 @@ def quarterly_metrics(
             and actual_end is not None
             and actual_end >= quarter.end_time.normalize()
             and (evidence_timestamp is None or evidence_timestamp >= quarter.end_time.normalize())
-            and status == "complete"
         )
-        missing_tail = bool(
-            status != "complete"
-            or piece.empty
-            or (evidence_timestamp is not None and evidence_timestamp < quarter.end_time.normalize())
+        # ``status`` describes the whole all-costs run.  A halt in a later
+        # quarter must not relabel earlier, fully covered quarters.  These
+        # flags are therefore derived solely from this quarter's ledger slice
+        # and the evidence cutoff.
+        missing_tail = not complete_calendar
+        quarter_status = "complete" if complete_calendar else (
+            "insufficient_data" if status == "insufficient_data" else "incomplete"
         )
         rows.append(
             {
@@ -319,7 +321,7 @@ def quarterly_metrics(
                 "ending_equity": ending,
                 "equity_return": equity_return,
                 "reconciled": reconciled,
-                "status": status,
+                "status": quarter_status,
                 "missing_tail": missing_tail,
                 **summary,
                 "mean_rank_ic": mean_rank_ic,
@@ -328,10 +330,10 @@ def quarterly_metrics(
                 "expected_calendar_days": int((quarter.end_time.normalize() - quarter.start_time).days + 1),
                 "coverage_mean": coverage_mean,
                 "complete_calendar_quarter": complete_calendar,
-                "accounting_tail_only": bool(piece.empty and len(quarter_prediction_dates)),
+                "accounting_tail_only": bool(piece.size and not len(quarter_prediction_dates)),
                 "evaluated_through": actual_end.date().isoformat() if actual_end is not None else None,
                 "accounting_status": status,
-                "metrics_scope": "full_run_ledger_slice" if status == "complete" else "certified_prefix_slice",
+                "metrics_scope": "full_run_ledger_slice" if complete_calendar else "certified_prefix_slice",
             }
         )
     return pd.DataFrame(rows, columns=columns)

@@ -62,6 +62,25 @@ def test_quarterly_metrics_keeps_prediction_quarters_after_accounting_halt():
     assert result.loc[result["quarter"].eq("2025Q3"), "missing_tail"].item()
 
 
+def test_quarter_flags_are_local_when_global_accounting_is_incomplete():
+    ledger = _ledger(start="2025-01-01", periods=91)  # complete Q1 plus Apr 1
+    predictions = pd.DataFrame(
+        {"date": pd.to_datetime(["2025-01-01"]), "instrument": "A", "factor": 1.0}
+    )
+
+    result = quarterly_metrics(
+        ledger,
+        predictions=predictions,
+        evidence_end="2025-04-02",
+        status="incomplete",
+    ).set_index("quarter")
+
+    assert result.loc["2025Q1", "complete_calendar_quarter"]
+    assert not result.loc["2025Q1", "missing_tail"]
+    assert result.loc["2025Q2", "missing_tail"]
+    assert result.loc["2025Q2", "accounting_tail_only"]
+
+
 def test_manager_params_allowlist_and_iso_dates():
     config = Config(
         holding_days=5,
@@ -140,7 +159,7 @@ def test_evaluate_oos_writes_original_tables_and_honest_status(tmp_path):
                 },
                 "group_returns": pd.DataFrame({"group_1": [0.1, 0.2, 0.3]}, index=dates),
                 "diagnostics": {"grouping": {"insufficient_dates": []}},
-                "paths": {},
+                "paths": {"report_path": str(tmp_path / "standard.html")},
             }
 
     result = evaluate_oos(
@@ -164,6 +183,7 @@ def test_evaluate_oos_writes_original_tables_and_honest_status(tmp_path):
     assert "quarterly OOS evaluation" in quarterly_html
     assert "continuous all-costs ledger" in quarterly_html
     assert "forward-label diagnostics" in quarterly_html
+    assert "Continuous NAV / standard evaluation report" in quarterly_html
     payload = json.loads((tmp_path / "evaluation.json").read_text())
     assert payload["status"] == "incomplete"
     assert payload["all_costs_status"] == "incomplete"
