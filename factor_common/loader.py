@@ -25,7 +25,7 @@ _SETTING_FIELDS = (
     "params",
     "factor_direction",
 )
-_OPTIONAL_SETTING_FIELDS = ("context_eligible",)
+_OPTIONAL_SETTING_FIELDS = ("context_eligible", "group_tie_policy")
 _RESERVED_CONTEXT_KEYS = frozenset({"__eligible__"})
 _SUPPORTED_PREPROCESSING = frozenset({"none", "mad_rank"})
 _SUPPORTED_FIELDS = frozenset(MARKET_FIELDS) | frozenset(FUNDING_DAILY_FIELDS)
@@ -71,6 +71,8 @@ def _validate_meta(meta: dict[str, Any], factor_id: str) -> None:
 
 
 def _validate_settings(setting: dict[str, Any]) -> None:
+    if setting.get("group_tie_policy", "legacy_instrument") not in {"legacy_instrument", "symmetric_fractional"}:
+        raise ValueError("unsupported SETTING.group_tie_policy")
     unsupported_keys = [
         key for key in setting
         if key not in (*_SETTING_FIELDS, *_OPTIONAL_SETTING_FIELDS, "frequency")
@@ -163,6 +165,11 @@ def load_factor(path: str | Path) -> FactorSpec:
     source = factor_path.read_bytes()
     source_sha256 = hashlib.sha256(source).hexdigest()
     module = _load_module(factor_path, factor_id, source_sha256, source)
+
+    if hasattr(module, "_EXPRESSION_HASH") and hasattr(module, "_AST"):
+        from Genetic_Algorithm.operators import GP_SEMANTICS_VERSION
+        if getattr(module, "_GP_SEMANTICS_VERSION", None) != GP_SEMANTICS_VERSION:
+            raise ValueError("GP semantics version mismatch: re-export under current semantics or use the original runtime")
 
     if getattr(module, "TYPE", None) != "regular":
         raise ValueError("factor TYPE must be 'regular'")

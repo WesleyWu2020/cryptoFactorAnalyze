@@ -1,0 +1,48 @@
+{
+  "run": {
+    "artifacts_dir": "artifacts",
+    "seed": 42
+  },
+  "data": {
+    "universe": "universe_hs300",
+    "returns_field": "ctc_returns",
+    "lag_periods": 2,
+    "quantile": 0.2,
+    "n_trading_days": 243,
+    "exclude_features": []
+  },
+  "split": {
+    "is": ["2017-01-01", "2022-12-31"],
+    "oob": ["2023-01-01", "2025-06-30"]
+  },
+  "gp": {
+    "population": 100,
+    "generations": 10,
+    "hall_of_fame": 30,
+    "n_components": 15,
+    "gp_n_jobs": 4,
+    "oob_weight": 0.25,
+    "elite_size": 5,
+    "init_depth": [1, 4],
+    "p_crossover": 0.25,
+    "p_subtree_mutation": 0.20,
+    "p_hoist_mutation": 0.10,
+    "p_point_mutation": 0.40,
+    "fitness_align_backtest": true
+  },
+  "stream": {
+    "enable": true,
+    "min_is": 0.15,
+    "min_oob": 0.08,
+    "min_oob_is_ratio": 0.40
+  },
+  "final": {
+    "top_n": 10,
+    "min_oob_cagr": 0.0,
+    "min_is_cagr": 0.10,
+    "score_weights": {"oob": 0.7, "is": 0.3}
+  },
+  "refine_window": {
+    "enable": false
+  }
+}

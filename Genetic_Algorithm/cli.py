@@ -26,9 +26,18 @@ from .selection import select_validation
 
 
 def _runtime_hashes() -> dict[str, str]:
+    from .search import _default_code_paths
     package = Path(__file__).resolve().parent
-    names = ("config", "data", "evolution", "evaluator", "expression", "features", "operators", "selection", "replay", "export", "fitness", "cost_fitness")
-    return {f"Genetic_Algorithm/{name}.py": hashlib.sha256((package / f"{name}.py").read_bytes()).hexdigest() for name in names}
+    names = ("config", "data", "evolution", "evaluator", "expression", "features", "operators", "selection", "replay", "export", "fitness", "cost_fitness", "incremental", "research")
+    paths = set(_default_code_paths(package.parent)) | {f"Genetic_Algorithm/{name}.py" for name in names}
+    return {path: hashlib.sha256((package.parent / path).read_bytes()).hexdigest() for path in sorted(paths)}
+
+
+def _verify_training_runtime(provenance: dict[str, Any]) -> None:
+    recorded = provenance.get("selected_code_content_hashes", {})
+    if (provenance.get("backtest_profile", {}).get("group_tie_policy") != "symmetric_fractional"
+            or any(recorded.get(path) != digest for path, digest in _runtime_hashes().items())):
+        raise ValueError("training runtime/semantics mismatch: start a new run or use the original runtime")
 
 
 def _tree(payload: dict[str, Any]) -> Node:
@@ -50,6 +59,28 @@ def _archive_candidates(run_dir: Path) -> list[dict[str, Any]]:
             raise ValueError(f"training candidate {item.get('expression_id')!r} lacks a valid training direction")
         candidates.append({"expression_id": item["expression_id"], "tree": _tree(item["ast"]), "direction": direction, "training_direction": direction, "complexity": 0})
     return candidates
+
+
+def _current_candidates(run_dir: Path) -> list[dict[str, Any]]:
+    """Return only candidates accepted by this run's deduplication step."""
+    candidates = _archive_candidates(run_dir)
+    if not candidates:
+        return []
+    deduplication_path = run_dir / "deduplication.json"
+    if not deduplication_path.is_file():
+        raise FileNotFoundError(f"training deduplication result is missing: {deduplication_path}")
+    with deduplication_path.open(encoding="utf-8") as handle:
+        deduplication = json.load(handle)
+    if not isinstance(deduplication, dict):
+        raise ValueError("training deduplication result is malformed")
+    accepted = deduplication.get("accepted")
+    if not isinstance(accepted, list) or not all(isinstance(item, str) for item in accepted):
+        raise ValueError("training deduplication result is malformed")
+    by_id = {candidate["expression_id"]: candidate for candidate in candidates}
+    missing = [expression_id for expression_id in accepted if expression_id not in by_id]
+    if missing:
+        raise ValueError(f"training deduplication references missing candidates: {missing}")
+    return [by_id[expression_id] for expression_id in accepted]
 
 
 def _write_json(path: Path, payload: dict[str, Any], *, immutable: bool = False) -> Path:
@@ -123,16 +154,43 @@ def _search(args: argparse.Namespace) -> dict[str, Any]:
         raise ValueError("refusing to reuse run directory with a different config")
     fields = sorted(RAW_FIELDS)
     audit_path = run_dir / "audit_train.json"
+    progress_path = getattr(args, "progress", None)
+    search_kwargs = {}
+    if progress_path:
+        progress_target = Path(progress_path)
+        def record_progress(entry):
+            _write_json(progress_target, {
+                "run_dir": str(run_dir), "generation": entry["generation"],
+                "completed_generations": entry["generation"] + 1,
+                "target_generations": config.generations,
+                "attempted_trees": entry["attempted_trees"],
+                "unique_evaluations": entry["unique_evaluations"],
+                "eligible_population": entry["eligible_population"],
+                "parameter_stability_candidates": entry.get(
+                    "parameter_stability_candidates", 0
+                ),
+                "parameter_stability_backtests": entry.get(
+                    "parameter_stability_backtests", 0
+                ),
+                **{name: entry[name] for name in (
+                    "cumulative_evaluations", "cumulative_parameter_stability_candidates",
+                    "cumulative_parameter_stability_backtests", "selected_eligible_population",
+                    "elite_population", "exploration_population", "behavior_cells",
+                    "mutation_statistics", "random_exploration_proposals",
+                ) if name in entry},
+            })
+        search_kwargs["progress_callback"] = record_progress
     result = run_search(
         args.h5, audit_path, stage=STAGES["train"], warmup_days=config.max_history,
         fields=fields,
         search_stage=lambda _audit: evolution_search(load_stage(
             args.h5, STAGES["train"], config.max_history, fields,
             **({"include_accounting": True} if config.fitness_mode == "all_costs_sharpe" else {}),
-        ), config),
+        ), config, **search_kwargs),
         artifact_dir=run_dir, config=asdict(config), repository_root=Path.cwd(),
         selected_code_paths=(), seed=config.seed, experiment_id=run_dir.name,
         backtest_profile={"n_groups": config.n_groups},
+        archive_path=args.archive,
     )
     _write_json(config_path, raw_config, immutable=True)
     if config.fitness_mode == "all_costs_sharpe":
@@ -140,6 +198,8 @@ def _search(args: argparse.Namespace) -> dict[str, Any]:
             "config": asdict(config), "candidates": result.fitness_diagnostics,
         }, immutable=True)
     (run_dir / "generations.jsonl").write_text("".join(json.dumps(entry, sort_keys=True) + "\n" for entry in result.generation_log), encoding="utf-8")
+    if getattr(result, "research_diagnostics", None):
+        _write_json(run_dir / "search_research.json", result.research_diagnostics, immutable=True)
     return {"status": "complete" if result.candidates else "no_candidates", "run_dir": str(run_dir)}
 
 
@@ -148,7 +208,8 @@ def _validate(args: argparse.Namespace) -> dict[str, Any]:
     archive = _verified(run_dir / "training_candidates.json", "training candidate archive")
     provenance = _verified(run_dir / "provenance.json", "provenance")
     config_document = _verified(run_dir / "config.json", "configuration")
-    candidates = _archive_candidates(run_dir)
+    _verify_training_runtime(provenance)
+    candidates = _current_candidates(run_dir)
     if not candidates:
         # A zero-candidate validation still binds the terminal workflow to
         # point-in-time validation data.  This permits an auditable empty
@@ -182,7 +243,15 @@ def _validate(args: argparse.Namespace) -> dict[str, Any]:
             trading_evidence[candidate["expression_id"]] = (returns, positions)
         del training
     stage_data = load_stage(args.h5, STAGES["validation"], config.max_history, sorted(RAW_FIELDS),
-                            **({"include_accounting": True} if (config.validation_stability or config.reference_factor or config.validation_parameter_stability) else {}))
+                            **({"include_accounting": True} if (config.validation_stability or config.reference_factor or config.validation_parameter_stability or config.exposure_residual_mode != "off" or config.horizon_diagnostics) else {}))
+    styles = None
+    if config.exposure_residual_mode != "off":
+        from barra.crypto_barra_exposure import BarraConfig, build_barra_exposures
+        styles = build_barra_exposures(
+            stage_data.opens, h5_path=args.h5,
+            cfg=BarraConfig(min_count=max(2, config.min_pairs)),
+            as_of=STAGES["validation"].end,
+        )
     outcomes: dict[str, Any] = {}
     for candidate in candidates[:config.validation_limit]:
         result = replay(
@@ -196,22 +265,50 @@ def _validate(args: argparse.Namespace) -> dict[str, Any]:
         )
         metrics = result["metrics"]
         evidence = _validation_evidence(candidate, stage_data, config)
+        validation_values = None
+        if config.validation_stability:
+            from .cost_fitness import validation_cost_stability
+            validation_values = evaluate_tree(
+                candidate["tree"], stage_data.features, stage_data.eligible
+            ).loc[stage_data.opens.index]
+            evidence["cost_stability"] = validation_cost_stability(
+                validation_values, stage_data, config, candidate["direction"]
+            )
+        if styles is not None:
+            from .exposure import assess_exposure_residual
+            if validation_values is None:
+                validation_values = evaluate_tree(
+                    candidate["tree"], stage_data.features, stage_data.eligible
+                ).loc[stage_data.opens.index]
+            evidence["exposure_residual"] = assess_exposure_residual(
+                validation_values, stage_data, config, candidate["direction"], styles
+            )
+        if config.horizon_diagnostics:
+            from .horizon import assess_horizon_execution
+            if validation_values is None:
+                validation_values = evaluate_tree(
+                    candidate["tree"], stage_data.features, stage_data.eligible
+                ).loc[stage_data.opens.index]
+            evidence["horizon_execution"] = assess_horizon_execution(
+                validation_values, stage_data, config, candidate["direction"]
+            )
         if config.reference_factor or config.validation_parameter_stability:
             from .incremental import incremental_evidence, parameter_stability
             from .cost_fitness import evaluate_cost_window
             if config.reference_factor:
-                values = evaluate_tree(candidate["tree"], stage_data.features, stage_data.eligible).loc[stage_data.opens.index]
+                values = validation_values if validation_values is not None else evaluate_tree(candidate["tree"], stage_data.features, stage_data.eligible).loc[stage_data.opens.index]
                 _, returns, positions = evaluate_cost_window(
                     values, stage_data, config, candidate["direction"], stage_data.stage.start,
                     stage_data.stage.end, include_positions=True)
-                evidence["incremental"] = incremental_evidence(returns, positions, stage_data, config)
+                best_quarter = (evidence.get("cost_stability") or {}).get("best_quarter")
+                evidence["incremental"] = incremental_evidence(
+                    returns, positions, stage_data, config,
+                    start=stage_data.stage.start, end=stage_data.stage.end,
+                    exclude_period=best_quarter,
+                )
             if config.validation_parameter_stability:
                 evidence["parameter_stability"] = parameter_stability(
                     candidate["tree"], candidate["direction"], stage_data, config)
-        if config.validation_stability:
-            from .cost_fitness import validation_cost_stability
-            values = evaluate_tree(candidate["tree"], stage_data.features, stage_data.eligible).loc[stage_data.opens.index]
-            evidence["cost_stability"] = validation_cost_stability(values, stage_data, config, candidate["direction"])
         outcomes[candidate["expression_id"]] = {
             **evidence,
             "feature_families": sorted(expression_families(candidate["tree"])),
@@ -233,6 +330,7 @@ def _freeze(args: argparse.Namespace) -> dict[str, Any]:
         raise ValueError("validation result is not bound to the current verified training inputs")
     if not isinstance(validation.get("validation_fingerprint"), str) or not validation["validation_fingerprint"]:
         raise ValueError("validation result has no validation data fingerprint")
+    _verify_training_runtime(provenance)
     accepted = set(validation.get("accepted", []))
     candidates = [candidate for candidate in _archive_candidates(run_dir) if candidate["expression_id"] in accepted]
     frozen = freeze_candidates(candidates, training_fingerprint=provenance["stage_content_hashes"]["train"], validation_fingerprint=validation["validation_fingerprint"], config={key: value for key, value in config_document.items() if key != "sha256"}, profile=provenance["backtest_profile"], runtime_source_hashes=_runtime_hashes(), selection_results={"accepted": list(accepted)}, path=run_dir / "frozen.json")
@@ -274,6 +372,8 @@ def _test(args: argparse.Namespace) -> dict[str, Any]:
 
 def _export(args: argparse.Namespace) -> dict[str, Any]:
     frozen = read_verified_manifest(args.manifest)
+    if frozen.get("runtime_source_hashes") != _runtime_hashes():
+        raise ValueError("frozen runtime/semantics mismatch: start a new run or use the original runtime")
     exports = [export_factor({**candidate, "tree": _tree(candidate["ast"])}, args.output_dir, direction=candidate["direction"]) for candidate in frozen.get("candidates", [])]
     return {"status": "complete" if exports else "no_candidates", "exports": [str(item.path) for item in exports]}
 
@@ -283,6 +383,24 @@ def _walk_forward(args):
     return run_walk_forward(args.h5, args.run_dir, load_config(args.config),
                             first_test_start=args.first_test_start, last_test_end=args.last_test_end,
                             allow_2026_test=args.allow_2026_test)
+
+
+def _experiment_init(args):
+    from .experiment import initialize_experiment
+    seeds = [int(item.strip()) for item in args.seeds.split(",") if item.strip()]
+    return initialize_experiment(
+        args.config, args.h5, args.experiment_dir, seeds, archive_path=args.archive,
+    )
+
+
+def _experiment_merge(args):
+    from .experiment import merge_seed_runs
+    return merge_seed_runs(args.experiment_dir)
+
+
+def _experiment_status(args):
+    from .experiment import update_experiment_progress
+    return update_experiment_progress(args.experiment_dir)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -298,11 +416,24 @@ def build_parser() -> argparse.ArgumentParser:
                       help="record one explicit 2026 walk-forward repeat evaluation")
     walk.set_defaults(handler=_walk_forward)
     audit = commands.add_parser("audit"); audit.add_argument("--stage", required=True, choices=sorted(STAGES)); audit.add_argument("--h5", required=True); audit.add_argument("--output", required=True); audit.add_argument("--warmup-days", type=int, default=180); audit.set_defaults(handler=_audit)
-    search = commands.add_parser("search"); search.add_argument("--config", required=True); search.add_argument("--h5", required=True); search.add_argument("--run-dir", required=True); search.set_defaults(handler=_search)
+    search = commands.add_parser("search"); search.add_argument("--config", required=True); search.add_argument("--h5", required=True); search.add_argument("--run-dir", required=True); search.add_argument("--archive"); search.add_argument("--progress"); search.set_defaults(handler=_search)
     validate = commands.add_parser("validate"); validate.add_argument("--run-dir", required=True); validate.add_argument("--h5", required=True); validate.set_defaults(handler=_validate)
     freeze = commands.add_parser("freeze"); freeze.add_argument("--run-dir", required=True); freeze.set_defaults(handler=_freeze)
     test = commands.add_parser("test"); test.add_argument("--manifest", required=True); test.add_argument("--h5", required=True); test.set_defaults(handler=_test)
     export = commands.add_parser("export"); export.add_argument("--manifest", required=True); export.add_argument("--output-dir", required=True); export.set_defaults(handler=_export)
+    experiment_init = commands.add_parser("experiment-init")
+    experiment_init.add_argument("--config", required=True)
+    experiment_init.add_argument("--h5", required=True)
+    experiment_init.add_argument("--experiment-dir", required=True)
+    experiment_init.add_argument("--seeds", required=True)
+    experiment_init.add_argument("--archive")
+    experiment_init.set_defaults(handler=_experiment_init)
+    experiment_merge = commands.add_parser("experiment-merge")
+    experiment_merge.add_argument("--experiment-dir", required=True)
+    experiment_merge.set_defaults(handler=_experiment_merge)
+    experiment_status = commands.add_parser("experiment-status")
+    experiment_status.add_argument("--experiment-dir", required=True)
+    experiment_status.set_defaults(handler=_experiment_status)
     return parser
 
 

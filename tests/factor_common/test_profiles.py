@@ -15,6 +15,7 @@ def test_daily_defaults_include_strict_funding():
         "signal_delay_days": 1,
         "price_field": "open",
         "n_groups": 10,
+        "group_tie_policy": "legacy_instrument",
         "factor_direction": 1,
         "initial_equity": 1.0,
         "gross_exposure": 1.0,

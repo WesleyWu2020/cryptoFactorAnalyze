@@ -1,0 +1,96 @@
+{
+  "action": "rebalance",
+  "data_cutoff": "2026-08-03",
+  "execute_after": "2026-08-04T00:00:00Z",
+  "execution_date": "2026-08-04",
+  "expires_at": "2026-08-05T00:00:00Z",
+  "generated_at": "2026-09-21T08:54:56.734740+00:00",
+  "run_id": "20260921T085456769360Z_34edea36",
+  "schema_version": 1,
+  "signal_date": "2026-08-03",
+  "signal_id": "41e314b314659bb7ae0896f5",
+  "strategy_id": "composite_portfolio_pruned8",
+  "strategy_version": 1,
+  "targets": [
+    {
+      "instrument": "ADAUSDT",
+      "target_weight": 0.024999999999999994
+    },
+    {
+      "instrument": "ARBUSDT",
+      "target_weight": 0.024999999999999994
+    },
+    {
+      "instrument": "BEATUSDT",
+      "target_weight": -0.024999999999999994
+    },
+    {
+      "instrument": "BTCUSDT",
+      "target_weight": 0.024999999999999994
+    },
+    {
+      "instrument": "CAKEUSDT",
+      "target_weight": -0.024999999999999994
+    },
+    {
+      "instrument": "DASHUSDT",
+      "target_weight": -0.024999999999999994
+    },
+    {
+      "instrument": "DOTUSDT",
+      "target_weight": 0.024999999999999994
+    },
+    {
+      "instrument": "ETCUSDT",
+      "target_weight": 0.024999999999999994
+    },
+    {
+      "instrument": "ETHUSDT",
+      "target_weight": 0.024999999999999994
+    },
+    {
+      "instrument": "INJUSDT",
+      "target_weight": -0.024999999999999994
+    },
+    {
+      "instrument": "LITUSDT",
+      "target_weight": -0.024999999999999994
+    },
+    {
+      "instrument": "LTCUSDT",
+      "target_weight": 0.024999999999999994
+    },
+    {
+      "instrument": "MUSDT",
+      "target_weight": -0.024999999999999994
+    },
+    {
+      "instrument": "SOLUSDT",
+      "target_weight": 0.024999999999999994
+    },
+    {
+      "instrument": "TRXUSDT",
+      "target_weight": 0.024999999999999994
+    },
+    {
+      "instrument": "VVVUSDT",
+      "target_weight": -0.024999999999999994
+    },
+    {
+      "instrument": "WLDUSDT",
+      "target_weight": -0.024999999999999994
+    },
+    {
+      "instrument": "XRPUSDT",
+      "target_weight": 0.024999999999999994
+    },
+    {
+      "instrument": "ZECUSDT",
+      "target_weight": -0.024999999999999994
+    },
+    {
+      "instrument": "币安人生USDT",
+      "target_weight": -0.024999999999999994
+    }
+  ]
+}

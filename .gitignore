@@ -82,3 +82,4 @@ reports/*
 portfolio/output/
 Genetic_Algorithm/runs/
 .worktrees/
+outputs/daily_pipeline/

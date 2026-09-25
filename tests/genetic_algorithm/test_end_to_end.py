@@ -74,6 +74,7 @@ def test_synthetic_no_candidate_cli_lifecycle_retains_audit_validation_and_basel
     from dataclasses import asdict
     from Genetic_Algorithm.artifacts import write_artifact
     from Genetic_Algorithm.config import SearchConfig
+    from Genetic_Algorithm.cli import _runtime_hashes
 
     run_dir = tmp_path / "no_candidates"; run_dir.mkdir()
     audit = subprocess.run([sys.executable, "-m", "Genetic_Algorithm", "audit", "--stage", "train", "--h5", str(gp_h5), "--output", str(run_dir / "audit_train.json"), "--warmup-days", "180"], text=True, capture_output=True)
@@ -81,7 +82,11 @@ def test_synthetic_no_candidate_cli_lifecycle_retains_audit_validation_and_basel
     config = asdict(SearchConfig(population=2, generations=1))
     write_artifact(run_dir / "config.json", config, immutable=True)
     write_artifact(run_dir / "training_candidates.json", {"candidates": []}, immutable=True)
-    write_artifact(run_dir / "provenance.json", {"stage_content_hashes": {"train": "synthetic-train"}, "backtest_profile": {}}, immutable=True)
+    write_artifact(run_dir / "provenance.json", {
+        "stage_content_hashes": {"train": "synthetic-train"},
+        "selected_code_content_hashes": _runtime_hashes(),
+        "backtest_profile": {"group_tie_policy": "symmetric_fractional"},
+    }, immutable=True)
     validate = subprocess.run([sys.executable, "-m", "Genetic_Algorithm", "validate", "--run-dir", str(run_dir), "--h5", str(gp_h5)], text=True, capture_output=True)
     assert validate.returncode == 0, validate.stderr
     validation = json.loads((run_dir / "validation.json").read_text())

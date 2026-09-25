@@ -1,0 +1,55 @@
+{
+  "GP_0006a47b612eaf9b": {
+    "compute": {
+      "factor_cache": "hit"
+    },
+    "direction": -1
+  },
+  "GP_064185107a8f267e": {
+    "compute": {
+      "factor_cache": "hit"
+    },
+    "direction": -1
+  },
+  "GP_3eaff470cdb222f5": {
+    "compute": {
+      "factor_cache": "hit"
+    },
+    "direction": 1
+  },
+  "GP_77282e814dac81a8": {
+    "compute": {
+      "factor_cache": "hit"
+    },
+    "direction": -1
+  },
+  "GP_7d96363e567c2813": {
+    "compute": {
+      "factor_cache": "hit"
+    },
+    "direction": 1
+  },
+  "GP_a37c60cf4492e9f1": {
+    "compute": {
+      "factor_cache": "hit"
+    },
+    "direction": -1
+  },
+  "GP_ed2c09f43439ff39": {
+    "compute": {
+      "factor_cache": "hit"
+    },
+    "direction": 1
+  },
+  "Retail_Friction_Illiquidity_Factor": {
+    "compute": {
+      "factor_cache": "hit"
+    },
+    "direction": -1
+  },
+  "composite": {
+    "reason": "valid",
+    "valid_count": 47,
+    "valid_signal": true
+  }
+}

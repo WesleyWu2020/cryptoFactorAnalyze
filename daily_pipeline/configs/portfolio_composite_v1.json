@@ -1,0 +1,58 @@
+{
+  "strategy_id": "composite_portfolio_pruned8",
+  "strategy_version": 1,
+  "combine_mode": "composite",
+  "use_factor_cache": true,
+  "parallel_workers": 4,
+  "source_report": "reports/portfolio/20260920T080140Z_756193dec1b9",
+  "source_report_config_sha256": "718cb9f26576ae0e39fa7fc79dc0e8483d9f81f1d6b21d79c44edb1fe01f2167",
+  "h5_path": "data/crypto_quant.h5",
+  "calculation_start": "2024-01-01",
+  "anchor_date": "2024-01-01",
+  "rebalance_days": 1,
+  "signal_delay_days": 1,
+  "n_groups": 5,
+  "min_valid_instruments": 10,
+  "gross_limit": 0.5,
+  "long_limit": 0.25,
+  "short_limit": 0.25,
+  "single_limit": 0.05,
+  "net_limit": 0.05,
+  "factors": [
+    {
+      "path": "factor_analyse/factor_mining/GP_Factor/GP_0006a47b612eaf9b.py",
+      "allocation": 0.14285714285714324,
+      "sha256": "6a2689fe4aa4e6beef1de1272687991190fbdd174bbb88a5134ada06a1dd2984"
+    },
+    {
+      "path": "factor_analyse/factor_mining/GP_Factor/GP_064185107a8f267e.py",
+      "allocation": 0.1428571428571428,
+      "sha256": "0eee892eab7ba7c671dc93beeae5946d3b0316a12f004bca2b11c595daae8444"
+    },
+    {
+      "path": "factor_analyse/factor_mining/GP_Factor/GP_3eaff470cdb222f5.py",
+      "allocation": 0.1428571428571428,
+      "sha256": "e78de1a4833cfe8b05d753d96a6ba6839eb4b02e52bac5989eec982501bc448a"
+    },
+    {
+      "path": "factor_analyse/factor_mining/GP_Factor/GP_77282e814dac81a8.py",
+      "allocation": 0.1428571428571428,
+      "sha256": "8ad057185e0ce3beed1310dee05b5ed1eefdff92e2f8d8d8e667b5fbc8c64fee"
+    },
+    {
+      "path": "factor_analyse/factor_mining/GP_Factor/GP_a37c60cf4492e9f1.py",
+      "allocation": 0.1428571428571428,
+      "sha256": "d6df4a40b28b2e6cb1f21bed8554c649ad5f79ae61e2acb407f6a4473b32a733"
+    },
+    {
+      "path": "factor_analyse/factor_mining/GP_Factor/GP_ed2c09f43439ff39.py",
+      "allocation": 0.1428571428571428,
+      "sha256": "83f16963e7031e79a20481342bfcc97738bda340f376ac34e5ec52ce1c3e9cc0"
+    },
+    {
+      "path": "factor_analyse/factor_mining/Retail_Friction_Illiquidity_Factor.py",
+      "allocation": 0.1428571428571428,
+      "sha256": "74a7eef6417c9b21261c9c6112d11f6a6e411b33fb8c080f75779c981401cbef"
+    }
+  ]
+}

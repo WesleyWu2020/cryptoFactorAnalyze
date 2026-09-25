@@ -1,0 +1,92 @@
+{
+  "action": "rebalance",
+  "data_cutoff": "2026-03-10",
+  "execute_after": "2026-03-11T00:00:00Z",
+  "execution_date": "2026-03-11",
+  "expires_at": "2026-03-12T00:00:00Z",
+  "generated_at": "2026-09-21T07:52:04.716491+00:00",
+  "run_id": "20260921T075204781071Z_15273fea",
+  "schema_version": 1,
+  "signal_date": "2026-03-10",
+  "signal_id": "07e789c543751dcda46fcbcd",
+  "strategy_id": "composite_portfolio_pruned8",
+  "strategy_version": 1,
+  "targets": [
+    {
+      "instrument": "APTUSDT",
+      "target_weight": -0.024999999999999994
+    },
+    {
+      "instrument": "ARBUSDT",
+      "target_weight": 0.02777777777777777
+    },
+    {
+      "instrument": "BNBUSDT",
+      "target_weight": 0.02777777777777777
+    },
+    {
+      "instrument": "BSVUSDT",
+      "target_weight": -0.024999999999999994
+    },
+    {
+      "instrument": "BTCUSDT",
+      "target_weight": 0.02777777777777777
+    },
+    {
+      "instrument": "DASHUSDT",
+      "target_weight": -0.024999999999999994
+    },
+    {
+      "instrument": "ETHUSDT",
+      "target_weight": 0.02777777777777777
+    },
+    {
+      "instrument": "JUPUSDT",
+      "target_weight": -0.024999999999999994
+    },
+    {
+      "instrument": "LTCUSDT",
+      "target_weight": 0.02777777777777777
+    },
+    {
+      "instrument": "MORPHOUSDT",
+      "target_weight": -0.024999999999999994
+    },
+    {
+      "instrument": "MUSDT",
+      "target_weight": -0.024999999999999994
+    },
+    {
+      "instrument": "PIPPINUSDT",
+      "target_weight": -0.024999999999999994
+    },
+    {
+      "instrument": "POLUSDT",
+      "target_weight": -0.024999999999999994
+    },
+    {
+      "instrument": "SOLUSDT",
+      "target_weight": 0.02777777777777777
+    },
+    {
+      "instrument": "TRUMPUSDT",
+      "target_weight": 0.02777777777777777
+    },
+    {
+      "instrument": "TRXUSDT",
+      "target_weight": 0.02777777777777777
+    },
+    {
+      "instrument": "XRPUSDT",
+      "target_weight": 0.02777777777777777
+    },
+    {
+      "instrument": "ZECUSDT",
+      "target_weight": -0.024999999999999994
+    },
+    {
+      "instrument": "ZROUSDT",
+      "target_weight": -0.024999999999999994
+    }
+  ]
+}

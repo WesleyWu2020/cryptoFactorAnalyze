@@ -3,7 +3,15 @@ from datetime import date
 import pandas as pd
 import pytest
 
-from data.crypto_quant.universe import UniverseBuildError, build_monthly_universe
+from data.crypto_quant.universe import (
+    HISTORICAL_CONTRACT_END_DATES,
+    UniverseBuildError,
+    build_monthly_universe,
+)
+
+
+def test_eos_futures_settlement_date_matches_exchange_lifecycle():
+    assert HISTORICAL_CONTRACT_END_DATES["EOSUSDT"] == pd.Timestamp("2025-05-21")
 
 
 @pytest.fixture

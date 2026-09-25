@@ -87,10 +87,33 @@ class SearchConfig:
     validation_cost_multiplier: float = 1.5
     reference_factor: str | None = None
     reference_similarity_penalty: float = 1.0
+    training_reference_objective: str = "similarity_penalty"
     validation_parameter_stability: bool = False
+    exposure_residual_mode: str = "off"
+    horizon_diagnostics: bool = False
+    prediction_horizons: tuple[int, ...] = (1, 3, 7, 14)
+    execution_intervals: tuple[int, ...] = (1, 3, 7)
     parameter_perturbation: float = 0.20
     parameter_min_positive_fraction: float = 0.75
+    training_parameter_stability: bool = False
+    training_parameter_stability_top_k: int = 5
+    training_parameter_stability_penalty: float = 1.0
     validation_min_incremental_sharpe: float = 0.0
+    stability_mode: str = "legacy_quarters"
+    concentration_penalty: float = 0.5
+    leave_best_out_penalty: float = 0.5
+    validation_min_remaining_return: float = 0.0
+    validation_min_remaining_sharpe: float = 0.0
+    structured_mutation: bool = False
+    mutation_weights: tuple[float, ...] = (0.35, 0.25, 0.15, 0.25)
+    semantic_generation: bool = False
+    dimensionless_probability: float = 0.75
+    behavior_diversity: bool = False
+    behavior_cell_capacity: int = 2
+    layered_elites: bool = False
+    exploration_fraction: float = 0.30
+    dsr_diagnostics: bool = False
+    dsr_effective_trials: tuple[int, ...] = (1, 10, 100)
 
     def __init__(self, **overrides: Any) -> None:
         unknown = set(overrides) - set(self.__dataclass_fields__)
@@ -99,7 +122,8 @@ class SearchConfig:
             raise TypeError(f"Unknown configuration keys: {names}")
         for name, field in self.__dataclass_fields__.items():
             value = overrides.get(name, field.default)
-            if name in {"windows", "lags", "initial_trees"}:
+            if name in {"windows", "lags", "initial_trees", "mutation_weights", "dsr_effective_trials",
+                        "prediction_horizons", "execution_intervals"}:
                 if not isinstance(value, (list, tuple)):
                     raise TypeError(f"{name} must be a list or tuple")
                 value = tuple(value)
@@ -107,20 +131,86 @@ class SearchConfig:
         self._validate()
 
     def _validate(self) -> None:
+        for name in ("structured_mutation", "semantic_generation", "behavior_diversity",
+                     "layered_elites", "dsr_diagnostics", "horizon_diagnostics"):
+            if type(getattr(self, name)) is not bool:
+                raise TypeError(f"{name} must be boolean")
+        if len(self.mutation_weights) != 4 or any(
+            type(v) is not float or not math.isfinite(v) or v < 0
+            for v in self.mutation_weights
+        ) or not math.isclose(sum(self.mutation_weights), 1.0):
+            raise ValueError("mutation_weights must be four nonnegative floats summing to 1")
+        for name in ("dimensionless_probability", "exploration_fraction"):
+            value = getattr(self, name)
+            if type(value) is not float or not math.isfinite(value) or not 0 <= value <= 1:
+                raise ValueError(f"{name} must be a finite probability")
+        if type(self.behavior_cell_capacity) is not int or self.behavior_cell_capacity < 1:
+            raise ValueError("behavior_cell_capacity must be a positive integer")
+        if not self.dsr_effective_trials or any(type(n) is not int or n < 1 for n in self.dsr_effective_trials):
+            raise ValueError("dsr_effective_trials must contain positive integers")
+        if (self.behavior_diversity or self.layered_elites or self.dsr_diagnostics) and self.fitness_mode != "all_costs_sharpe":
+            raise ValueError("research search options require all_costs_sharpe")
+        if self.layered_elites and (not self.training_parameter_stability
+                                   or not 0 < self.exploration_fraction < 1
+                                   or self.population < 2):
+            raise ValueError("layered_elites requires stability checks, population >= 2 and exploration_fraction in (0, 1)")
         if self.reference_factor not in (None, "064185107a8f267e",
-                                         "064185107a8f267e+a37c60cf4492e9f1"):
+                                         "064185107a8f267e+a37c60cf4492e9f1",
+                                         "064185107a8f267e+a37c60cf4492e9f1+0006a47b612eaf9b"):
             raise ValueError("unsupported reference_factor")
         required_reference_history = (166 if self.reference_factor and "a37c60cf4492e9f1" in self.reference_factor else 116)
         if self.reference_factor and (type(self.max_history) is not int or self.max_history < required_reference_history):
             raise ValueError(f"reference_factor requires max_history >= {required_reference_history}")
-        if type(self.validation_parameter_stability) is not bool:
-            raise TypeError("validation_parameter_stability must be boolean")
+        for name in ("validation_parameter_stability", "training_parameter_stability"):
+            if type(getattr(self, name)) is not bool:
+                raise TypeError(f"{name} must be boolean")
         if (self.reference_factor or self.validation_parameter_stability) and self.fitness_mode != "all_costs_sharpe":
             raise ValueError("incremental research requires all_costs_sharpe")
-        for name in ("reference_similarity_penalty", "validation_min_incremental_sharpe"):
+        if self.training_parameter_stability and self.fitness_mode != "all_costs_sharpe":
+            raise ValueError("training parameter stability requires all_costs_sharpe")
+        if self.training_reference_objective not in {
+            "similarity_penalty", "portfolio_incremental_sharpe"
+        }:
+            raise ValueError(
+                "training_reference_objective must be similarity_penalty or "
+                "portfolio_incremental_sharpe"
+            )
+        if self.stability_mode not in {"legacy_quarters", "continuous_leave_best_out"}:
+            raise ValueError(
+                "stability_mode must be legacy_quarters or continuous_leave_best_out"
+            )
+        if self.exposure_residual_mode not in {"off", "diagnostic", "gate"}:
+            raise ValueError("exposure_residual_mode must be off, diagnostic or gate")
+        if self.exposure_residual_mode != "off" and self.fitness_mode != "all_costs_sharpe":
+            raise ValueError("Barra residual validation requires all_costs_sharpe")
+        if self.horizon_diagnostics and self.fitness_mode != "all_costs_sharpe":
+            raise ValueError("horizon diagnostics require all_costs_sharpe")
+        for name in ("prediction_horizons", "execution_intervals"):
+            horizons = getattr(self, name)
+            if (not horizons or len(horizons) > 8 or horizons[0] != 1
+                    or any(type(day) is not int or not 1 <= day <= 30 for day in horizons)
+                    or tuple(sorted(set(horizons))) != horizons):
+                raise ValueError(f"{name} must be sorted unique days in [1, 30], starting at 1")
+        if (
+            self.training_reference_objective == "portfolio_incremental_sharpe"
+            and not self.reference_factor
+        ):
+            raise ValueError(
+                "training_reference_objective=portfolio_incremental_sharpe requires "
+                "reference_factor"
+            )
+        for name in (
+            "reference_similarity_penalty", "validation_min_incremental_sharpe",
+            "concentration_penalty", "leave_best_out_penalty",
+            "training_parameter_stability_penalty",
+        ):
             value = getattr(self, name)
             if type(value) is not float or not math.isfinite(value) or value < 0:
                 raise ValueError(f"{name} must be finite and non-negative")
+        for name in ("validation_min_remaining_return", "validation_min_remaining_sharpe"):
+            value = getattr(self, name)
+            if type(value) is not float or not math.isfinite(value):
+                raise ValueError(f"{name} must be a finite float")
         for name in ("parameter_perturbation", "parameter_min_positive_fraction"):
             value = getattr(self, name)
             if type(value) is not float or not math.isfinite(value) or not 0 < value < 1:
@@ -153,6 +243,7 @@ class SearchConfig:
             "max_history", "min_pairs", "min_quarter_days", "min_overlap_days",
             "validation_limit", "frozen_limit", "n_groups", "cache_bytes", "max_attempts",
             "tournament_size", "hold_days",
+            "training_parameter_stability_top_k",
         }
         for name in integer_fields:
             value = getattr(self, name)
@@ -163,6 +254,7 @@ class SearchConfig:
             "population", "generations", "max_nodes", "max_history", "min_pairs",
             "min_quarter_days", "min_overlap_days", "validation_limit", "frozen_limit", "n_groups",
             "cache_bytes", "max_attempts", "tournament_size", "hold_days",
+            "training_parameter_stability_top_k",
         }
         for name in positive_fields:
             if getattr(self, name) <= 0:

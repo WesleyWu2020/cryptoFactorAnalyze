@@ -5,7 +5,10 @@ import pandas as pd
 import pytest
 
 from Genetic_Algorithm.config import SearchConfig, Stage, STAGES, load_config
-from Genetic_Algorithm.cost_fitness import aggregate_cost_score, evaluate_cost_window, score_all_costs
+from Genetic_Algorithm.cost_fitness import (
+    aggregate_cost_score, evaluate_cost_window, score_all_costs,
+    summarize_net_stability, training_parameter_stability,
+)
 from Genetic_Algorithm.data import load_stage
 from Genetic_Algorithm.evaluator import evaluate_tree
 from Genetic_Algorithm.evolution import search, Candidate, _cost_key
@@ -38,6 +41,118 @@ def test_sharpe_is_primary_and_unstable_or_losing_scores_are_rejected():
     assert _cost_key(Candidate(Node("close"), "a", stable)) < _cost_key(Candidate(Node("close"), "b", weak))
 
 
+def test_continuous_stability_reconciles_profit_and_removes_best_quarter():
+    index = pd.date_range("2025-01-01", "2025-12-31", freq="D")
+    returns = pd.Series(np.tile([0.0004, 0.0, 0.0002], 122)[:len(index)], index=index)
+    returns.loc[returns.index.quarter == 4] += 0.002
+    result = summarize_net_stability(returns, min_quarter_days=45)
+
+    assert result["best_quarter"] == "2025Q4"
+    assert result["positive_quarters"] == 4
+    assert abs(result["profit_contribution_reconciliation"]) < 1e-12
+    assert result["leave_best_quarter_out_days"] == 273
+    assert result["leave_best_quarter_out"]["total_return"] > 0
+
+
+def test_continuous_score_penalizes_excess_concentration():
+    c = config(stability_mode="continuous_leave_best_out")
+    stable = {
+        "positive_quarter_profit_concentration": 0.40,
+        "leave_best_quarter_out": {"sharpe": 1.0},
+    }
+    concentrated = {
+        "positive_quarter_profit_concentration": 0.90,
+        "leave_best_quarter_out": {"sharpe": 1.0},
+    }
+    stable_score, _ = aggregate_cost_score([metric()] * 3, metric(), c, 3, stability=stable)
+    concentrated_score, _ = aggregate_cost_score(
+        [metric()] * 3, metric(), c, 3, stability=concentrated,
+    )
+    assert stable_score[0] > concentrated_score[0]
+
+
+def test_training_parameter_stability_uses_2024_and_fixed_direction(monkeypatch):
+    from types import SimpleNamespace
+    from Genetic_Algorithm import cost_fitness
+
+    dates = pd.date_range("2024-01-01", "2024-12-31", freq="D")
+    data = SimpleNamespace(
+        stage=STAGES["train"], features={}, eligible=None,
+        opens=pd.DataFrame(index=dates),
+    )
+    monkeypatch.setattr(cost_fitness, "evaluate_tree", None, raising=False)
+    from Genetic_Algorithm import evaluator
+    monkeypatch.setattr(
+        evaluator, "evaluate_tree", lambda *args, **kwargs: pd.DataFrame({"x": 1.0}, index=dates),
+    )
+    calls = []
+    metrics = [
+        {"total_return": 0.10, "sharpe": 1.0},
+        {"total_return": -0.10, "sharpe": -1.0},
+    ]
+    def evaluate(values, stage, cfg, direction, start, end):
+        assert direction == -1
+        assert start == STAGES["train"].start and end == STAGES["train"].end
+        item = metrics[len(calls)]
+        calls.append(item)
+        return item, pd.Series(0.0, index=dates)
+    monkeypatch.setattr(cost_fitness, "evaluate_cost_window", evaluate)
+
+    result = training_parameter_stability(
+        Node("rolling_mean", (Node("close"),), window=10), -1, data,
+        config(parameter_perturbation=0.20, parameter_min_positive_fraction=0.75),
+        {"total_return": 0.20, "sharpe": 2.0},
+    )
+
+    assert result["variant_count"] == 2
+    assert result["backtest_count"] == 2
+    assert result["positive_fraction"] == 0.5
+    assert result["return_degradation"] == pytest.approx(0.20)
+    assert result["sharpe_degradation"] == pytest.approx(2.0)
+    assert result["positive_fraction_shortfall"] == pytest.approx(0.25)
+    assert result["penalty_units"] == pytest.approx(2.45)
+
+
+def test_training_parameter_stability_checks_only_top_k_without_changing_formula_budget(monkeypatch):
+    from types import SimpleNamespace
+    from Genetic_Algorithm import cost_fitness
+    from Genetic_Algorithm.expression import expression_hash
+
+    trees = (
+        Node("rolling_mean", (Node("close"),), window=10),
+        Node("rolling_mean", (Node("open"),), window=10),
+    )
+    diagnostics = {
+        expression_hash(tree): {"full_training_period": {"total_return": .2, "sharpe": 2.0}}
+        for tree in trees
+    }
+    stage = SimpleNamespace(stage=None, opens=None, fitness_diagnostics=diagnostics)
+    calls = []
+    def evaluate(tree, data, labels, cfg):
+        return {"score": ((2.0 if tree.children[0].op == "close" else 1.0), .5, -1),
+                "eligible": True, "direction": 1}
+    def stability(tree, direction, data, cfg, baseline):
+        calls.append(tree.children[0].op)
+        return {"penalty_units": .4, "backtest_count": 2}
+    monkeypatch.setattr(cost_fitness, "training_parameter_stability", stability)
+
+    result = search(stage, config(
+        population=2, generations=1, max_attempts=2, max_depth=1, max_nodes=2,
+        initial_trees=trees, evaluate_candidate=evaluate,
+        training_parameter_stability=True,
+        training_parameter_stability_top_k=1,
+        training_parameter_stability_penalty=1.0,
+    ))
+
+    assert result.evaluations == 2
+    assert calls == ["close"]
+    assert result.generation_log[0]["parameter_stability_candidates"] == 1
+    assert result.generation_log[0]["parameter_stability_backtests"] == 2
+    evidence = diagnostics[expression_hash(trees[0])]["training_parameter_stability"]
+    assert evidence["base_score"][0] == 2.0
+    assert evidence["adjusted_score"][0] == pytest.approx(1.6)
+
+
 def test_cost_mode_population_can_evolve_without_filling_profitable_quota():
     counter = []
     def evaluate(tree, stage, labels, c):
@@ -47,6 +162,18 @@ def test_cost_mode_population_can_evolve_without_filling_profitable_quota():
                               max_depth=0, initial_trees=(Node("close"), Node("open")), evaluate_candidate=evaluate))
     assert result.generation_log[0]["attempted_trees"] == 2
     assert all(c.eligible for c in result.candidates)
+
+
+def test_search_reports_each_completed_generation():
+    records = []
+    def evaluate(tree, stage, labels, c):
+        return {"score": (0.3, 0.2, -1), "eligible": True, "direction": 1}
+    search(
+        {}, config(population=2, generations=2, max_attempts=10, max_depth=0,
+                   initial_trees=(Node("close"), Node("open")), evaluate_candidate=evaluate),
+        progress_callback=records.append,
+    )
+    assert [record["generation"] for record in records] == [0, 1]
 
 
 def test_cost_deduplication_prioritizes_primary_sharpe_objective():

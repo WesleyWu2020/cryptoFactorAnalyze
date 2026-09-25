@@ -1,0 +1,96 @@
+{
+  "action": "rebalance",
+  "data_cutoff": "2026-06-03",
+  "execute_after": "2026-06-04T00:00:00Z",
+  "execution_date": "2026-06-04",
+  "expires_at": "2026-06-05T00:00:00Z",
+  "generated_at": "2026-09-21T05:32:09.757559+00:00",
+  "run_id": "20260921T053209799331Z_49812fb1",
+  "schema_version": 1,
+  "signal_date": "2026-06-03",
+  "signal_id": "2e8775f68d7a56ceb0eb3ac3",
+  "strategy_id": "composite_portfolio_pruned8",
+  "strategy_version": 1,
+  "targets": [
+    {
+      "instrument": "ARBUSDT",
+      "target_weight": 0.024999999999999994
+    },
+    {
+      "instrument": "ATOMUSDT",
+      "target_weight": 0.024999999999999994
+    },
+    {
+      "instrument": "BNBUSDT",
+      "target_weight": 0.024999999999999994
+    },
+    {
+      "instrument": "BTCUSDT",
+      "target_weight": 0.024999999999999994
+    },
+    {
+      "instrument": "DASHUSDT",
+      "target_weight": -0.024999999999999994
+    },
+    {
+      "instrument": "DOGEUSDT",
+      "target_weight": 0.024999999999999994
+    },
+    {
+      "instrument": "FETUSDT",
+      "target_weight": -0.024999999999999994
+    },
+    {
+      "instrument": "HBARUSDT",
+      "target_weight": 0.024999999999999994
+    },
+    {
+      "instrument": "HUSDT",
+      "target_weight": -0.024999999999999994
+    },
+    {
+      "instrument": "INJUSDT",
+      "target_weight": -0.024999999999999994
+    },
+    {
+      "instrument": "JSTUSDT",
+      "target_weight": -0.024999999999999994
+    },
+    {
+      "instrument": "LTCUSDT",
+      "target_weight": 0.024999999999999994
+    },
+    {
+      "instrument": "NIGHTUSDT",
+      "target_weight": -0.024999999999999994
+    },
+    {
+      "instrument": "ONDOUSDT",
+      "target_weight": -0.024999999999999994
+    },
+    {
+      "instrument": "SOLUSDT",
+      "target_weight": 0.024999999999999994
+    },
+    {
+      "instrument": "STABLEUSDT",
+      "target_weight": -0.024999999999999994
+    },
+    {
+      "instrument": "TRXUSDT",
+      "target_weight": 0.024999999999999994
+    },
+    {
+      "instrument": "VVVUSDT",
+      "target_weight": -0.024999999999999994
+    },
+    {
+      "instrument": "XRPUSDT",
+      "target_weight": 0.024999999999999994
+    },
+    {
+      "instrument": "币安人生USDT",
+      "target_weight": -0.024999999999999994
+    }
+  ]
+}

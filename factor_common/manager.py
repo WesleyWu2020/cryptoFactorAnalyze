@@ -40,7 +40,7 @@ from data.crypto_quant.store import CryptoQuantStore
 
 from .backtest import SCENARIOS, run_backtest
 from .data_provider import DataProvider
-from .grouping import assign_groups
+from .grouping import assign_groups, group_weights
 from .labels import make_labels
 from .loader import _validate_identifier
 from .loader import create_template as _create_template
@@ -65,6 +65,7 @@ _PROFILE_PARAM_KEYS = frozenset({
     "rebalance_days",
     "anchor_date",
     "n_groups",
+    "group_tie_policy",
     "factor_direction",
     "fee_rate",
     "slippage",
@@ -383,6 +384,8 @@ class FactorManager:
 
         if spec is not None and "factor_direction" not in overrides:
             overrides["factor_direction"] = spec.setting["factor_direction"]
+        if spec is not None and "group_tie_policy" not in overrides:
+            overrides["group_tie_policy"] = spec.setting.get("group_tie_policy", "legacy_instrument")
         profile = resolve_profile(profile_id, overrides)
 
         # Snapshot the input store ahead of the first value-phase read;
@@ -576,15 +579,24 @@ class FactorManager:
         labels = make_labels(opens, profile.rebalance_days).loc[start:end]
         performance = evaluate_metrics(values, labels, accounting, profile)
 
-        groups, grouping_diag = assign_groups(values, profile.n_groups)
-        group_returns = pd.DataFrame(
-            {
-                f"group_{group_id}": labels.where(groups == group_id).mean(axis=1)
-                for group_id in range(1, profile.n_groups + 1)
-            },
-            dtype="float64",
-        )
+        if profile.group_tie_policy == "symmetric_fractional":
+            fractional, grouping_diag = group_weights(values, profile.n_groups, profile.group_tie_policy)
+            group_returns = pd.DataFrame({
+                name: (weight * labels).sum(axis=1, min_count=1)
+                / weight.where(labels.notna()).sum(axis=1, min_count=1).replace(0, np.nan)
+                for name, weight in fractional.items()
+            })
+        else:
+            groups, grouping_diag = assign_groups(values, profile.n_groups)
+            group_returns = pd.DataFrame(
+                {
+                    f"group_{group_id}": labels.where(groups == group_id).mean(axis=1)
+                    for group_id in range(1, profile.n_groups + 1)
+                },
+                dtype="float64",
+            )
         group_returns.index.name = "date"
+        grouping_diag["group_tie_policy"] = profile.group_tie_policy
 
         benchmark = self._load_benchmark()
 
@@ -636,6 +648,7 @@ class FactorManager:
             "profile_id": profile.profile_id,
             "factor_direction": profile.factor_direction,
             "n_groups": profile.n_groups,
+            "group_tie_policy": profile.group_tie_policy,
             "signal_start": _iso(start),
             "signal_end": _iso(end),
             "source_type": source_type,

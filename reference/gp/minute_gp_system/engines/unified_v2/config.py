@@ -1,0 +1,1913 @@
+"""Parameter space for crypto parametric factor mining v2.
+
+v2 improvements over v1:
+- Temporal composition layer (delta, pct_change, ts_zscore, ts_rank, ts_accel, ts_decay)
+- Cross-sectional composition (cs_rank, cs_zscore, cs_demean, cs_scale)
+- GPU indicator caching: precompute once, reuse across generations
+
+Design philosophy: the default evolution profile starts with cross-sectional
+rankicir and complements it with deployability metrics such as net sharpe,
+turnover pressure, novelty, and drawdown resilience. Experimental objective
+profiles may add causal in-sample sub-period robustness; holdout and formal
+replay remain post-search validation layers.
+"""
+
+import hashlib
+import json
+import os
+from pathlib import Path
+import typing
+
+import numpy as np
+
+from gp.minute_gp_system.registry import resolve_default_h5_path
+
+# ---------------------------------------------------------------------------
+# Base HDF5 fields (OHLCV)
+# ---------------------------------------------------------------------------
+BASE_FIELDS = ['open', 'high', 'low', 'close', 'volume']
+
+# ---------------------------------------------------------------------------
+# Crypto-native raw fields from h5 — orthogonal to OHLCV (derivatives pricing,
+# OI flow, basis, turnover). MUST BE PRESERVED across refactors; see memory
+# note "dont_drop_crypto_native_indicators". Without these, GP search collapses
+# to OHLCV-only residual_std variants (phenotype |rho| median ≥ 0.96).
+# ---------------------------------------------------------------------------
+EXTRA_RAW_FIELDS = [
+    'funding', 'open_interest', 'premium_close',
+    'mark_close', 'index_close', 'turnover',
+]
+
+ORDER_FLOW_RAW_FIELDS = (
+    'trade_count',
+    'taker_buy_volume',
+    'taker_buy_quote_volume',
+)
+ORDER_FLOW_INDICATOR_NAMES = (
+    *ORDER_FLOW_RAW_FIELDS,
+    'taker_buy_ratio',
+    'taker_quote_ratio',
+    'avg_trade_size',
+    'taker_pressure',
+)
+XBINANCE_ORDER_FLOW_RAW_FIELDS = (
+    'xbinance_quote_volume',
+    'xbinance_trade_count',
+    'xbinance_taker_buy_volume',
+    'xbinance_taker_buy_quote_volume',
+)
+XBINANCE_ORDER_FLOW_INDICATOR_NAMES = (
+    *XBINANCE_ORDER_FLOW_RAW_FIELDS,
+    'xbinance_taker_quote_ratio',
+    'xbinance_avg_trade_size',
+    'xbinance_taker_pressure',
+)
+STYLE_RESIDUAL_INDICATOR_NAMES = (
+    'turnover_resid_style',
+    'rv_20d_resid_style',
+    'rv_ratio_5_20_resid_style',
+    'funding_z20_resid_style',
+    'oi_z20_resid_style',
+)
+
+# ---------------------------------------------------------------------------
+# Indicator library.
+#   slots 0..19: derived from OHLCV
+#   slots 20..25: passthrough from EXTRA_RAW_FIELDS (same order)
+#   slot 26: derived intraday path-shape field
+#   slots 27..: appended-only extensions; do not reorder, old genomes rely on
+#               numeric indicator ids.
+# ---------------------------------------------------------------------------
+DIRECTIONAL_STATE_INDICATOR_NAMES = (
+    "up_volume_pressure",
+    "down_volume_pressure",
+    "new_long_pressure",
+    "new_short_pressure",
+    "short_cover_pressure",
+    "long_liquidation_pressure",
+)
+
+INDICATOR_NAMES = [
+    'open', 'high', 'low', 'close', 'volume',
+    'returns', 'log_volume', 'spread', 'mid_price', 'typical_price',
+    'body', 'upper_shadow', 'lower_shadow', 'price_range_pct', 'return_abs',
+    'vwap_proxy', 'volume_intensity', 'cum_return', 'close_position', 'money_flow',
+] + EXTRA_RAW_FIELDS + [
+    'path_efficiency',
+    'high_time_frac',
+    'low_time_frac',
+    'high_before_low',
+    'am_return',
+    'pm_return',
+    'am_pm_return_diff',
+    'late_volume_share',
+    'late_range_share',
+    'volume_burst_share',
+    'intraday_reversal',
+    'market_cum_return',
+    'market_vol_intensity',
+    'oi_change_intraday',
+    'premium_change_intraday',
+    'mark_index_spread',
+    'mark_index_spread_change',
+    'oi_price_alignment',
+    'funding_abs',
+    'cm_log_mcap_lag1',
+    'cm_mcap_pct_lag1',
+    'cm_mcap_z20_lag1',
+    'cm_turnover_to_mcap_lag1',
+    'funding_z20',
+    'funding_persistence_20d',
+    'funding_ma_diff_3_30',
+    'funding_vol_30d',
+    'oi_z20',
+    'oi_change_5d',
+    'oi_change_decay_20d',
+    'funding_oi_joint_5d',
+    'beta_btc_60d',
+    'resid_return_btc_20d',
+    'idio_vol_btc_20d',
+    'corr_btc_20d',
+    'relative_strength_btc_5d',
+    'amihud_illiq',
+    'volume_zscore_60d',
+    'rv_5d',
+    'rv_20d',
+    'rv_ratio_5_20',
+    'vol_of_vol_20d',
+    'dollar_volume_rank',
+    *ORDER_FLOW_INDICATOR_NAMES,
+    *XBINANCE_ORDER_FLOW_INDICATOR_NAMES,
+    *STYLE_RESIDUAL_INDICATOR_NAMES,
+    *DIRECTIONAL_STATE_INDICATOR_NAMES,
+]
+
+N_INDICATORS = len(INDICATOR_NAMES)
+INDICATOR_INDEX = {name: i for i, name in enumerate(INDICATOR_NAMES)}
+PAIR_A_FAMILY_MAP = {
+    'returns': 'return_family',
+    'return_abs': 'return_family',
+    'price_range_pct': 'return_family',
+    'volume_intensity': 'flow_family',
+    'up_volume_pressure': 'flow_family',
+    'down_volume_pressure': 'flow_family',
+    'money_flow': 'flow_family',
+    'turnover': 'flow_family',
+    'dollar_volume_rank': 'flow_family',
+    'relative_strength_btc_5d': 'cross_family',
+    'mark_index_spread': 'cross_family',
+    'funding_oi_joint_5d': 'cross_family',
+    'rv_20d': 'cross_family',
+    'corr_btc_20d': 'cross_family',
+    'beta_btc_60d': 'cross_family',
+    'open_interest': 'oi_family',
+    'funding': 'oi_family',
+    'new_long_pressure': 'oi_family',
+    'new_short_pressure': 'oi_family',
+    'short_cover_pressure': 'oi_family',
+    'long_liquidation_pressure': 'oi_family',
+    'open': 'price_family',
+    'close': 'price_family',
+    'mark_close': 'price_family',
+    'index_close': 'price_family',
+    'typical_price': 'price_family',
+}
+PAIR_A_FAMILY_DEFAULT_MAX_SHARE = {
+    'return_family': 0.30,
+    'flow_family': 0.40,
+    'cross_family': 0.50,
+    'oi_family': 0.30,
+    'price_family': 0.20,
+}
+
+
+def pair_a_family_of_field(field_name):
+    if not field_name:
+        return None
+    return PAIR_A_FAMILY_MAP.get(str(field_name), 'other_family')
+
+
+FUNDAMENTAL_INDICATOR_NAMES = (
+    'cm_log_mcap_lag1',
+    'cm_mcap_pct_lag1',
+    'cm_mcap_z20_lag1',
+    'cm_turnover_to_mcap_lag1',
+)
+CROSS_PERIOD_INDICATOR_NAMES = (
+    'funding_z20',
+    'funding_persistence_20d',
+    'funding_ma_diff_3_30',
+    'funding_vol_30d',
+    'oi_z20',
+    'oi_change_5d',
+    'oi_change_decay_20d',
+    'funding_oi_joint_5d',
+    'beta_btc_60d',
+    'resid_return_btc_20d',
+    'idio_vol_btc_20d',
+    'corr_btc_20d',
+    'relative_strength_btc_5d',
+    'amihud_illiq',
+    'volume_zscore_60d',
+    'rv_5d',
+    'rv_20d',
+    'rv_ratio_5_20',
+    'vol_of_vol_20d',
+    'dollar_volume_rank',
+    *STYLE_RESIDUAL_INDICATOR_NAMES,
+)
+ADVANCED_PERIOD_SEARCH_FIELDS = (
+    'funding_z20',
+    'funding_persistence_20d',
+    'funding_ma_diff_3_30',
+    'funding_vol_30d',
+    'oi_z20',
+    'oi_change_5d',
+    'funding_oi_joint_5d',
+    'beta_btc_60d',
+    'resid_return_btc_20d',
+    'corr_btc_20d',
+    'relative_strength_btc_5d',
+    'amihud_illiq',
+    'volume_zscore_60d',
+    'rv_5d',
+    'rv_20d',
+    'rv_ratio_5_20',
+    'dollar_volume_rank',
+    *STYLE_RESIDUAL_INDICATOR_NAMES,
+)
+MODE4_A_INTRADAY_FIELD_NAMES = (
+    'returns',
+    'price_range_pct',
+    'return_abs',
+    'volume_intensity',
+    'cum_return',
+    'close_position',
+    'money_flow',
+    'up_volume_pressure',
+    'down_volume_pressure',
+    'mark_index_spread',
+)
+DEFAULT_FUNDAMENTAL_PANEL_PATH = (
+    "/root/crypto-research/common/data/factor_platform/fundamentals/"
+    "coinmetrics_cap_mrkt_est_daily.npz"
+)
+
+# ---------------------------------------------------------------------------
+# Period configuration
+# ---------------------------------------------------------------------------
+MINUTES_PER_PERIOD = 1440
+MINUTES_PER_DAY = 1440
+PERIODS_PER_DAY = MINUTES_PER_DAY // MINUTES_PER_PERIOD
+
+# ---------------------------------------------------------------------------
+# Window / Slice / Mask (same as v1)
+# ---------------------------------------------------------------------------
+WINDOW_CHOICES = [15, 30, 45, 60, 90, 120, 180, 240]
+SLICE_CHOICES = [None, 0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]
+MASK_RULES = [
+    'none',
+    'high_0.3', 'high_0.5', 'high_0.6', 'high_0.7', 'high_0.8',
+    'low_0.3', 'low_0.5', 'low_0.7',
+]
+
+# ---------------------------------------------------------------------------
+# Mode 1 operators (single-variable)
+#
+# MODE*_OPS is the compatibility registry: old archived parameter vectors
+# reference these integer indices. The active search interface is the named
+# profile below, not the registry order. Do not infer "searchable" from this
+# list alone.
+# ---------------------------------------------------------------------------
+MODE1_OPS = [
+    'mean', 'std', 'skew', 'kurt', 'median', 'sum', 'max', 'min',
+    'zscore',          # (A[last] - mean(A,w)) / std(A,w)   — Bollinger-like
+    'momentum',        # A[last] / A[first] - 1              — window return
+    'range_position',  # (A[last] - min) / (max - min)       — stochastic-K
+    'range', 'first', 'last', 'ret', 'autocorr', 'entropy', 'zero_cross',
+]
+
+# ---------------------------------------------------------------------------
+# Mode 2 operators (dual-variable). Same compatibility-registry convention as
+# MODE1; the production profile is the only active search contract.
+# ---------------------------------------------------------------------------
+MODE2_OPS = [
+    'corr', 'slope', 'residual_std', 'ratio_mean', 'diff_mean', 'cov',
+    'intercept', 'r2', 'euc_dist', 'cos_sim', 'wmean', 'rank_corr',
+    'beta', 'diff_std', 'ratio_std',
+]
+
+MODE3_OPS = [
+    'mean_ratio',
+    'std_ratio',
+    'mean_diff',
+    'zscore_anchor',
+    'std_normalized_diff',
+]
+
+MODE4_OPS = [
+    'group_slope',
+    'group_dispersion',
+    'group_early_late_diff',
+    'group_top_share',
+    'group_corr',
+    'group_beta',
+    'group_skew',
+    'group_path_length',
+    'group_jump_ratio',
+    'group_first_last_diff',
+    'group_dispersion_vclock',
+    'group_slope_vclock',
+    'group_path_length_vclock',
+    'group_early_late_diff_vclock',
+]
+
+# Causality contract:
+# - Factors are computed only after the full bar (24h) closes.
+# - Positions are taken on the next bar in the formal replay / trading stack.
+# Under this closed-bar contract, negative minute lags are allowed because they only
+# reference later minutes inside an already-complete bar. If execution is ever moved
+# to intrabar/live-before-close, this search space must be tightened to lag >= 0.
+B_SHIFT_CHOICES = [-5, -3, -2, -1, 0, 1, 2, 3, 5]
+INTRADAY_GROUP_CHOICES = [4, 6, 12, 24]
+
+# ---------------------------------------------------------------------------
+# NEW: Temporal composition operators (applied to factor output across periods)
+# ---------------------------------------------------------------------------
+TS_COMP_OPS = [
+    'none',         # identity — no temporal composition
+    'delta',        # f(t) - f(t-w)
+    'pct_change',   # f(t) / f(t-w) - 1
+    'ts_zscore',    # (f(t) - rolling_mean) / rolling_std
+    'ts_rank',      # rolling percentile rank within window
+    'ts_accel',     # delta of delta
+    'ts_decay',     # exponential weighted mean (alpha = 2/(w+1))
+    'ewm_residual',
+    'fast_slow_diff',
+    'rolling_tstat',
+    'robust_zscore',
+    'persistence_ratio',
+    'event_count',
+    'drawup',
+    'drawdown',
+    'half_life_decay',
+]
+
+TS_COMP_WINDOWS = [1, 2, 3, 5, 10, 20, 30]
+
+# ---------------------------------------------------------------------------
+# NEW: Cross-sectional composition operators (applied per period across coins)
+# ---------------------------------------------------------------------------
+CS_COMP_OPS = [
+    'none',         # identity
+    'cs_rank',      # percentile rank across coins
+    'cs_zscore',    # z-score across coins
+    'cs_demean',    # subtract cross-sectional mean
+    'cs_scale',     # divide by cross-sectional std
+    'cs_robust_zscore',
+    'cs_winsor_zscore',
+    'cs_neutralize_mcap',
+    'cs_neutralize_liquidity',
+    'cs_group_rank_mcap',
+    'cs_group_rank_liquidity',
+    'cs_tail_rank',
+]
+
+CS_COMP_DEPENDENCY_FIELDS = {
+    'cs_neutralize_mcap': ('cm_mcap_pct_lag1',),
+    'cs_group_rank_mcap': ('cm_mcap_pct_lag1',),
+    'cs_neutralize_liquidity': ('dollar_volume_rank',),
+    'cs_group_rank_liquidity': ('dollar_volume_rank',),
+}
+
+# ---------------------------------------------------------------------------
+# Extended parameter names and bounds
+# ---------------------------------------------------------------------------
+PARAM_NAMES = [
+    'A', 'B', 'window', 'slice', 'mask_field', 'mask_rule',
+    'mode', 'mode1_op', 'mode2_op', 'B_shift_lag',
+    'ts_comp_op', 'ts_comp_window', 'cs_comp_op',
+    'mode3_op', 'intraday_group_count',
+]
+
+PARAM_BOUNDS_LOWER = [0] * len(PARAM_NAMES)
+PARAM_BOUNDS_UPPER = [
+    N_INDICATORS - 1,
+    N_INDICATORS - 1,
+    len(WINDOW_CHOICES) - 1,
+    len(SLICE_CHOICES) - 1,
+    N_INDICATORS - 1,
+    len(MASK_RULES) - 1,
+    3,
+    len(MODE1_OPS) - 1,
+    len(MODE2_OPS) - 1,
+    len(B_SHIFT_CHOICES) - 1,
+    len(TS_COMP_OPS) - 1,
+    len(TS_COMP_WINDOWS) - 1,
+    len(CS_COMP_OPS) - 1,
+    len(MODE3_OPS) - 1,
+    len(INTRADAY_GROUP_CHOICES) - 1,
+]
+
+N_PARAMS = len(PARAM_NAMES)
+
+# ---------------------------------------------------------------------------
+# NSGA-III / Evolution
+# ---------------------------------------------------------------------------
+POPULATION_SIZE = 500
+N_GENERATIONS = 15
+N_OBJECTIVES = 5
+OBJECTIVE_NAMES = [
+    'rankicir', 'ls_net_sharpe', 'neg_turnover', 'novelty', 'ls_1-maxdd',
+]
+SHORTCOMING_PERCENTILE = 10
+
+# Fitness sharing (Goldberg 1987, Deb 1989): dilute positive fitness by
+# log(niche density) so NSGA-III can't collapse to a single op/A basin.
+# niche = (mode, op_in_mode, A_family). Only obj[0]=rankicir & obj[1]=sharpe
+# are diluted; turnover/novelty/maxdd already carry natural niche spread.
+NICHE_SHARING_ALPHA = 0.5  # seed35-39 showed 1.5 over-diluted IS signal; 0.5 preserves transfer while limiting basin collapse.
+
+# ---------------------------------------------------------------------------
+# Data / evaluation
+# ---------------------------------------------------------------------------
+DEFAULT_H5_PATH = resolve_default_h5_path()
+CHUNK_PERIODS = 300
+TOP_QUANTILE = 0.1
+LAG_PERIODS = 1
+PERIODS_PER_YEAR = PERIODS_PER_DAY * 365
+TRADING_COST = 0.0015
+TURNOVER_HINGE_TARGET = float(os.environ.get("GP_TURNOVER_HINGE_TARGET", "0.5"))
+ROLLING_IC_WINDOW = 30
+MIN_SIGNAL_COVERAGE = 0.75
+MIN_EFFECTIVE_BARS = 120
+MIN_EFFECTIVE_BAR_RATIO = 0.25
+MIN_IC_VALID_BARS = 100
+MIN_RANKICIR = 2.0
+MIN_IC_POSITIVE_RATE = 0.5
+MIN_LS_POSITIVE_RATE = 0.5
+MAX_LS_TURNOVER = 1.5
+MAX_LONG_TURNOVER = 1.5
+GPU_EVAL_WORKERS = 4
+GPU_GROUP_TARGET_INDIVIDUALS = 384
+PERF_PROFILE = False
+
+# ---------------------------------------------------------------------------
+# Phenotype diversity
+# ---------------------------------------------------------------------------
+DIVERSITY_MAX_PERIODS = 200     # max sampled periods for phenotype vectors
+
+# ---------------------------------------------------------------------------
+# Indicator niche preservation (evolution-time)
+# ---------------------------------------------------------------------------
+NICHE_INDICATOR_MAX_SHARE = 0.15  # max pop fraction per base indicator A
+NICHE_MIN_GENERATION = 3          # skip first N gens (let search explore freely)
+
+# ---------------------------------------------------------------------------
+# Final result slate sizing
+# ---------------------------------------------------------------------------
+RESULT_TARGET_MIN = 32
+RESULT_TARGET_MAX = 48
+FINAL_CANDIDATE_POOL_SIZE = 160
+
+# ---------------------------------------------------------------------------
+# NEW: GPU caching
+# ---------------------------------------------------------------------------
+CACHE_DTYPE = 'float16'
+
+# ---------------------------------------------------------------------------
+# Evaluation batch size
+# ---------------------------------------------------------------------------
+EVAL_BATCH_SIZE = 48
+
+# ---------------------------------------------------------------------------
+# High-quality search-space control
+# ---------------------------------------------------------------------------
+#
+# Goal:
+# - Keep the production mining space focused on fields/operators that have
+#   already shown stable formal performance.
+# - Preserve a non-trivial explore pool so the system still discovers new
+#   structures, but without reopening the full noisy combinatorial space.
+#
+# Philosophy:
+# - "primary" = main production budget
+# - "explore" = smaller adjacent space with plausible semantics
+#
+DEFAULT_SEARCH_SPACE_PROFILE = "production_stable_v2"
+
+SEARCH_SPACE_PROFILE = {
+    "single_fields_primary": (
+        "price_range_pct",
+        "return_abs",
+        "money_flow",
+        "turnover",
+        "dollar_volume_rank",
+        "mark_close",
+        "index_close",
+        "typical_price",
+    ),
+    "single_fields_explore": (
+        "returns",
+        "spread",
+        "open_interest",
+        "premium_close",
+        "volume_intensity",
+        "close_position",
+        "path_efficiency",
+        "high_time_frac",
+        "low_time_frac",
+        "high_before_low",
+        "am_return",
+        "pm_return",
+        "am_pm_return_diff",
+        "late_volume_share",
+        "late_range_share",
+        "volume_burst_share",
+        "intraday_reversal",
+        "market_cum_return",
+        "market_vol_intensity",
+        "oi_change_intraday",
+        "premium_change_intraday",
+        "mark_index_spread",
+        "mark_index_spread_change",
+        "oi_price_alignment",
+        "funding_abs",
+        "funding_z20",
+        "funding_persistence_20d",
+        "funding_ma_diff_3_30",
+        "funding_vol_30d",
+        "oi_z20",
+        "oi_change_5d",
+        "funding_oi_joint_5d",
+        "beta_btc_60d",
+        "resid_return_btc_20d",
+        "corr_btc_20d",
+        "relative_strength_btc_5d",
+        "amihud_illiq",
+        "volume_zscore_60d",
+        "rv_5d",
+        "rv_20d",
+        "rv_ratio_5_20",
+        "trade_count",
+        "taker_buy_volume",
+        "taker_buy_quote_volume",
+        "taker_buy_ratio",
+        "taker_quote_ratio",
+        "avg_trade_size",
+        "taker_pressure",
+        "xbinance_quote_volume",
+        "xbinance_trade_count",
+        "xbinance_taker_buy_volume",
+        "xbinance_taker_buy_quote_volume",
+        "xbinance_taker_quote_ratio",
+        "xbinance_avg_trade_size",
+        "xbinance_taker_pressure",
+        "cm_log_mcap_lag1",
+        "cm_mcap_pct_lag1",
+        "cm_mcap_z20_lag1",
+        "cm_turnover_to_mcap_lag1",
+        *STYLE_RESIDUAL_INDICATOR_NAMES,
+        *DIRECTIONAL_STATE_INDICATOR_NAMES,
+    ),
+    "pair_a_fields_primary": (
+        "price_range_pct",
+        "return_abs",
+        "money_flow",
+        "turnover",
+        "dollar_volume_rank",
+        "mark_close",
+        "index_close",
+        "typical_price",
+    ),
+    "pair_a_fields_explore": (
+        "returns",
+        "spread",
+        "open_interest",
+        "premium_close",
+        "volume_intensity",
+        "close_position",
+        "path_efficiency",
+        "high_time_frac",
+        "low_time_frac",
+        "high_before_low",
+        "am_pm_return_diff",
+        "late_volume_share",
+        "late_range_share",
+        "volume_burst_share",
+        "intraday_reversal",
+        "market_cum_return",
+        "market_vol_intensity",
+        "oi_change_intraday",
+        "premium_change_intraday",
+        "mark_index_spread",
+        "mark_index_spread_change",
+        "oi_price_alignment",
+        "funding_z20",
+        "funding_persistence_20d",
+        "funding_ma_diff_3_30",
+        "funding_vol_30d",
+        "oi_z20",
+        "oi_change_5d",
+        "funding_oi_joint_5d",
+        "beta_btc_60d",
+        "resid_return_btc_20d",
+        "corr_btc_20d",
+        "relative_strength_btc_5d",
+        "amihud_illiq",
+        "volume_zscore_60d",
+        "rv_5d",
+        "rv_20d",
+        "rv_ratio_5_20",
+        "trade_count",
+        "taker_buy_volume",
+        "taker_buy_quote_volume",
+        "taker_buy_ratio",
+        "taker_quote_ratio",
+        "avg_trade_size",
+        "taker_pressure",
+        "xbinance_quote_volume",
+        "xbinance_trade_count",
+        "xbinance_taker_buy_volume",
+        "xbinance_taker_buy_quote_volume",
+        "xbinance_taker_quote_ratio",
+        "xbinance_avg_trade_size",
+        "xbinance_taker_pressure",
+        "funding_abs",
+        "cm_log_mcap_lag1",
+        "cm_mcap_pct_lag1",
+        "cm_mcap_z20_lag1",
+        "cm_turnover_to_mcap_lag1",
+        *STYLE_RESIDUAL_INDICATOR_NAMES,
+        *DIRECTIONAL_STATE_INDICATOR_NAMES,
+    ),
+    "pair_b_fields_primary": (
+        "mark_close",
+        "index_close",
+        "turnover",
+        "dollar_volume_rank",
+        "money_flow",
+        "typical_price",
+        "close",
+    ),
+    "pair_b_fields_explore": (
+        "mid_price",
+        "open_interest",
+        "premium_close",
+        "volume_intensity",
+        "returns",
+        "path_efficiency",
+        "late_volume_share",
+        "late_range_share",
+        "volume_burst_share",
+        "intraday_reversal",
+        "market_cum_return",
+        "market_vol_intensity",
+        "oi_change_intraday",
+        "premium_change_intraday",
+        "mark_index_spread",
+        "mark_index_spread_change",
+        "oi_price_alignment",
+        "funding_z20",
+        "funding_persistence_20d",
+        "funding_ma_diff_3_30",
+        "funding_vol_30d",
+        "oi_z20",
+        "oi_change_5d",
+        "funding_oi_joint_5d",
+        "beta_btc_60d",
+        "resid_return_btc_20d",
+        "corr_btc_20d",
+        "relative_strength_btc_5d",
+        "amihud_illiq",
+        "volume_zscore_60d",
+        "rv_5d",
+        "rv_20d",
+        "rv_ratio_5_20",
+        "trade_count",
+        "taker_buy_volume",
+        "taker_buy_quote_volume",
+        "taker_buy_ratio",
+        "taker_quote_ratio",
+        "avg_trade_size",
+        "taker_pressure",
+        "xbinance_quote_volume",
+        "xbinance_trade_count",
+        "xbinance_taker_buy_volume",
+        "xbinance_taker_buy_quote_volume",
+        "xbinance_taker_quote_ratio",
+        "xbinance_avg_trade_size",
+        "xbinance_taker_pressure",
+        "cm_log_mcap_lag1",
+        "cm_mcap_pct_lag1",
+        "cm_mcap_z20_lag1",
+        "cm_turnover_to_mcap_lag1",
+        *STYLE_RESIDUAL_INDICATOR_NAMES,
+        *DIRECTIONAL_STATE_INDICATOR_NAMES,
+    ),
+    "mode1_ops_primary": (
+        "std",
+        "kurt",
+        "momentum",
+        "range_position",
+    ),
+    "mode1_ops_explore": (
+        "zscore",
+        "mean",
+    ),
+    "mode2_ops_primary": (
+        "ratio_mean",
+        "slope",
+        "cov",
+        "ratio_std",
+    ),
+    "mode2_ops_explore": (
+        "residual_std",
+        "corr",
+        "diff_mean",
+    ),
+    "mode3_ops_primary": (
+        "std_ratio",
+        "zscore_anchor",
+    ),
+    "mode3_ops_explore": (
+        "std_normalized_diff",
+    ),
+    "mode4_ops_primary": (
+        "group_slope",
+        "group_early_late_diff",
+        "group_skew",
+        "group_path_length",
+    ),
+    "mode4_ops_explore": (
+        "group_dispersion",
+        "group_top_share",
+        "group_corr",
+        "group_beta",
+        "group_jump_ratio",
+        "group_first_last_diff",
+    ),
+    "mask_pairs_primary": (
+        ("open", "none"),
+        ("funding", "high_0.8"),
+        ("funding", "high_0.5"),
+        ("funding", "low_0.7"),
+        ("open_interest", "high_0.8"),
+        ("turnover", "high_0.8"),
+        ("turnover", "none"),
+        ("dollar_volume_rank", "low_0.3"),
+        ("return_abs", "high_0.8"),
+        ("price_range_pct", "high_0.7"),
+        ("price_range_pct", "low_0.5"),
+        ("money_flow", "high_0.6"),
+    ),
+    "mask_pairs_explore": (
+        ("open_interest", "low_0.5"),
+        ("funding", "high_0.3"),
+        ("turnover", "high_0.6"),
+        ("dollar_volume_rank", "high_0.8"),
+        ("money_flow", "high_0.3"),
+        ("return_abs", "low_0.3"),
+        ("market_cum_return", "high_0.8"),
+        ("market_cum_return", "low_0.3"),
+        ("market_vol_intensity", "high_0.8"),
+        ("market_vol_intensity", "low_0.3"),
+        ("mark_index_spread", "high_0.8"),
+        ("mark_index_spread", "low_0.3"),
+        ("funding_z20", "high_0.8"),
+        ("funding_z20", "low_0.3"),
+        ("funding_vol_30d", "high_0.8"),
+        ("funding_oi_joint_5d", "high_0.8"),
+        ("funding_oi_joint_5d", "low_0.3"),
+        ("oi_z20", "high_0.8"),
+        ("amihud_illiq", "high_0.8"),
+        ("volume_zscore_60d", "high_0.8"),
+        ("rv_5d", "high_0.8"),
+        ("rv_20d", "high_0.8"),
+        ("trade_count", "high_0.8"),
+        ("taker_buy_ratio", "high_0.8"),
+        ("taker_buy_ratio", "low_0.3"),
+        ("taker_pressure", "high_0.8"),
+        ("taker_pressure", "low_0.3"),
+        ("avg_trade_size", "high_0.8"),
+        ("xbinance_taker_quote_ratio", "high_0.8"),
+        ("xbinance_taker_quote_ratio", "low_0.3"),
+        ("xbinance_taker_pressure", "high_0.8"),
+        ("xbinance_taker_pressure", "low_0.3"),
+        ("xbinance_avg_trade_size", "high_0.8"),
+        ("corr_btc_20d", "high_0.8"),
+        ("corr_btc_20d", "low_0.3"),
+        ("rv_ratio_5_20", "high_0.8"),
+        ("cm_mcap_pct_lag1", "high_0.8"),
+        ("cm_mcap_pct_lag1", "low_0.3"),
+        ("cm_turnover_to_mcap_lag1", "high_0.8"),
+    ),
+    "single_windows_primary": (120, 180, 240),
+    "single_windows_explore": (60, 90),
+    "pair_windows_primary": (120, 180, 240),
+    "pair_windows_explore": (60, 90),
+    "single_slices_primary": (None, 0.3),
+    "single_slices_explore": (0.5,),
+    "pair_slices_primary": (None, 0.3),
+    "pair_slices_explore": (0.5,),
+    "lags_primary": (0, 1, 2, 3),
+    "lags_explore": (5,),
+    "ts_comp_ops": ("none", "ts_decay", "ts_zscore", "delta"),
+    "ts_comp_windows": (1, 5, 10, 20),
+    "path_shape_ts_windows": (10, 20),
+    "cs_comp_ops": ("none", "cs_zscore"),
+    "allow_negative_lag": False,
+    "single_share": 0.08,
+    "compound_share": 0.01,
+    "intraday_share": 0.05,
+    "composition_share": 0.12,
+    "composition_cs_share": 0.65,
+    "primary_share": 0.46,
+    "adjacent_explore_share": 0.10,
+    "structural_explore_share": 0.08,
+    "path_shape_share": 0.12,
+    "proven_relation_share": 0.10,
+    "order_flow_share": 0.14,
+    "proven_relation_ts_zscore_share": 0.25,
+    "proven_relation_cs_zscore_share": 0.10,
+    "structural_mode3_share": 0.40,
+    "feedback_primary_blend": 0.85,
+    "feedback_explore_blend": 0.60,
+    "use_feedback_crowd_penalty": True,
+}
+
+_SEARCH_SPACE_STATE_CACHE: dict[str, dict[str, object]] = {}
+
+_SEARCH_SPACE_OVERRIDES: typing.Optional[dict[str, object]] = None
+
+
+def set_search_space_overrides(overrides: typing.Optional[dict[str, object]]) -> None:
+    """Set runtime overrides for search-space profile values.
+
+    Call this before any ``build_search_space_state()`` invocation
+    (e.g. at the top of ``run_evolution``) so that *all* subsequent
+    calls—initialisation, mutation, candidate-slate construction, etc.—
+    see the overridden shares / operator lists.
+    """
+    global _SEARCH_SPACE_OVERRIDES
+    _SEARCH_SPACE_OVERRIDES = overrides
+    _SEARCH_SPACE_STATE_CACHE.clear()
+
+
+def decode_individual(params):
+    mode_raw = int(params[6])
+    short_window = WINDOW_CHOICES[params[2]]
+    long_mult = TS_COMP_WINDOWS[params[11]]
+    long_window = min(short_window * long_mult, MINUTES_PER_PERIOD)
+    mode3_op = MODE3_OPS[params[13]] if len(params) > 13 and mode_raw == 2 else None
+    mode4_op = MODE4_OPS[params[13]] if len(params) > 13 and mode_raw == 3 else None
+    group_count = INTRADAY_GROUP_CHOICES[params[14]] if len(params) > 14 and mode_raw == 3 else None
+    return {
+        'A': INDICATOR_NAMES[params[0]],
+        'B': INDICATOR_NAMES[params[1]],
+        'window': short_window,
+        'slice': SLICE_CHOICES[params[3]],
+        'mask_field': INDICATOR_NAMES[params[4]],
+        'mask_rule': MASK_RULES[params[5]],
+        'mode': mode_raw + 1,
+        'mode1_op': MODE1_OPS[params[7]] if mode_raw == 0 else None,
+        'mode2_op': MODE2_OPS[params[8]] if mode_raw == 1 else None,
+        'mode3_op': mode3_op,
+        'mode4_op': mode4_op,
+        'intraday_group_count': group_count,
+        'long_window': long_window if mode_raw == 2 else None,
+        'B_shift_lag': B_SHIFT_CHOICES[params[9]],
+        'ts_comp_op': TS_COMP_OPS[params[10]],
+        'ts_comp_window': TS_COMP_WINDOWS[params[11]],
+        'cs_comp_op': CS_COMP_OPS[params[12]],
+    }
+
+
+def formula_string(params):
+    d = decode_individual(params)
+    if d['mode'] == 1:
+        base = (f"{d['mode1_op']}(A={d['A']}, w={d['window']}, "
+                f"sl={d['slice']}, mask={d['mask_field']}:{d['mask_rule']})")
+    elif d['mode'] == 2:
+        base = (f"{d['mode2_op']}(A={d['A']}, B={d['B']}, w={d['window']}, "
+                f"sl={d['slice']}, mask={d['mask_field']}:{d['mask_rule']}, "
+                f"lag={d['B_shift_lag']})")
+    elif d['mode'] == 3:
+        base = (f"{d['mode3_op']}(A={d['A']}, w_s={d['window']}, w_l={d['long_window']}, "
+                f"sl={d['slice']}, mask={d['mask_field']}:{d['mask_rule']})")
+    else:
+        base = (f"{d['mode4_op']}(A={d['A']}, B={d['B']}, w={d['window']}, "
+                f"groups={d['intraday_group_count']}, sl={d['slice']}, "
+                f"mask={d['mask_field']}:{d['mask_rule']})")
+    if d['cs_comp_op'] != 'none':
+        base = f"{d['cs_comp_op']}({base})"
+    if d['ts_comp_op'] != 'none':
+        base = f"{d['ts_comp_op']}({base}, w={d['ts_comp_window']})"
+    return base
+
+
+def get_search_space_profile() -> dict[str, object]:
+    return SEARCH_SPACE_PROFILE
+
+
+def fundamental_search_enabled() -> bool:
+    raw = os.environ.get("GP_ENABLE_FUNDAMENTALS", "").strip().lower()
+    if raw in {"0", "false", "no", "off"}:
+        return False
+    if raw in {"1", "true", "yes", "on"}:
+        return True
+    panel_path = os.environ.get("GP_FUNDAMENTAL_PANEL", "").strip()
+    return bool(panel_path) and Path(panel_path).exists()
+
+
+def fundamental_required_enabled() -> bool:
+    return os.environ.get("GP_REQUIRE_FUNDAMENTAL", "").strip().lower() in {
+        "1", "true", "yes", "on",
+    }
+
+
+def advanced_period_search_enabled() -> bool:
+    return os.environ.get("GP_ENABLE_ADVANCED_PERIOD_FIELDS", "").strip().lower() in {
+        "1", "true", "yes", "on",
+    }
+
+
+def order_flow_search_enabled() -> bool:
+    raw = os.environ.get("GP_ENABLE_ORDER_FLOW", "").strip().lower()
+    if raw in {"0", "false", "no", "off"}:
+        return False
+    h5_path = Path(os.environ.get("GP_H5_PATH", DEFAULT_H5_PATH)).expanduser()
+    if not h5_path.exists():
+        return False
+    manifest_path = Path(os.environ.get("GP_H5_MANIFEST_PATH", str(h5_path.with_suffix(".manifest.json"))))
+    required = set(ORDER_FLOW_RAW_FIELDS)
+    try:
+        import h5py
+
+        with h5py.File(h5_path, "r") as h5:
+            if any(field not in h5 for field in required):
+                return False
+    except Exception:
+        return False
+    if raw in {"1", "true", "yes", "on"}:
+        return True
+    if not manifest_path.exists():
+        return True
+    try:
+        payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+        nan_frac = (
+            payload.get("extra_field_tradable_nan_fraction")
+            or payload.get("extra_field_listed_nan_fraction")
+            or payload.get("extra_field_nan_fraction", {})
+        )
+    except Exception:
+        return True
+    try:
+        min_finite = float(os.environ.get("GP_ORDER_FLOW_MIN_FINITE_FRAC", "0.20"))
+    except ValueError:
+        min_finite = 0.20
+    for field in required:
+        value = nan_frac.get(field)
+        if value is None:
+            continue
+        try:
+            if 1.0 - float(value) < min_finite:
+                return False
+        except (TypeError, ValueError):
+            continue
+    return True
+
+
+def xbinance_order_flow_search_enabled() -> bool:
+    raw = os.environ.get("GP_ENABLE_XBINANCE_ORDER_FLOW", "").strip().lower()
+    if raw in {"0", "false", "no", "off"}:
+        return False
+    h5_path = Path(os.environ.get("GP_H5_PATH", DEFAULT_H5_PATH)).expanduser()
+    if not h5_path.exists():
+        return False
+    required = set(XBINANCE_ORDER_FLOW_RAW_FIELDS)
+    try:
+        import h5py
+
+        with h5py.File(h5_path, "r") as h5:
+            if any(field not in h5 for field in required):
+                return False
+    except Exception:
+        return False
+    if raw in {"1", "true", "yes", "on"}:
+        return True
+    manifest_path = Path(os.environ.get("GP_H5_MANIFEST_PATH", str(h5_path.with_suffix(".manifest.json"))))
+    if not manifest_path.exists():
+        return True
+    try:
+        payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+        nan_frac = (
+            payload.get("extra_field_tradable_nan_fraction")
+            or payload.get("extra_field_listed_nan_fraction")
+            or payload.get("extra_field_nan_fraction", {})
+        )
+    except Exception:
+        return True
+    try:
+        min_finite = float(os.environ.get("GP_XBINANCE_ORDER_FLOW_MIN_FINITE_FRAC", "0.20"))
+    except ValueError:
+        min_finite = 0.20
+    for field in required:
+        value = nan_frac.get(field)
+        if value is None:
+            continue
+        try:
+            if 1.0 - float(value) < min_finite:
+                return False
+        except (TypeError, ValueError):
+            continue
+    return True
+
+
+def _fundamental_required_profile(profile: dict[str, object]) -> dict[str, object]:
+    filtered = dict(profile)
+    cap_fields = tuple(name for name in FUNDAMENTAL_INDICATOR_NAMES if name in INDICATOR_INDEX)
+    if not cap_fields:
+        return filtered
+    cap_core = tuple(
+        name for name in (
+            "cm_mcap_pct_lag1",
+            "cm_mcap_z20_lag1",
+            "cm_log_mcap_lag1",
+            "cm_turnover_to_mcap_lag1",
+        )
+        if name in INDICATOR_INDEX
+    )
+    liquid_base = tuple(
+        name for name in (
+            "price_range_pct",
+            "return_abs",
+            "money_flow",
+            "turnover",
+            "late_range_share",
+            "path_efficiency",
+            "intraday_reversal",
+        )
+        if name in INDICATOR_INDEX
+    )
+    filtered.update({
+        "single_fields_primary": cap_core,
+        "single_fields_explore": liquid_base,
+        "pair_a_fields_primary": liquid_base,
+        "pair_a_fields_explore": cap_core,
+        "pair_b_fields_primary": cap_core,
+        "pair_b_fields_explore": ("turnover", "money_flow", "returns"),
+        "mode1_ops_primary": ("mean", "std", "zscore", "momentum"),
+        "mode1_ops_explore": ("range_position",),
+        "mode2_ops_primary": ("ratio_mean", "ratio_std", "slope"),
+        "mode2_ops_explore": ("cov", "diff_mean"),
+        "mode3_ops_primary": ("zscore_anchor", "std_normalized_diff"),
+        "mode3_ops_explore": ("std_ratio",),
+        "mask_pairs_primary": (
+            ("open", "none"),
+            ("cm_mcap_pct_lag1", "high_0.8"),
+            ("cm_mcap_pct_lag1", "low_0.3"),
+            ("cm_mcap_z20_lag1", "high_0.8"),
+            ("cm_mcap_z20_lag1", "low_0.3"),
+            ("cm_turnover_to_mcap_lag1", "high_0.8"),
+        ),
+        "mask_pairs_explore": (
+            ("cm_mcap_pct_lag1", "high_0.5"),
+            ("cm_log_mcap_lag1", "high_0.8"),
+            ("cm_log_mcap_lag1", "low_0.3"),
+        ),
+        "single_windows_primary": (60, 90, 120),
+        "single_windows_explore": (180, 240),
+        "pair_windows_primary": (60, 90, 120),
+        "pair_windows_explore": (180,),
+        "single_slices_primary": (None, 0.3),
+        "single_slices_explore": (0.5,),
+        "pair_slices_primary": (None, 0.3),
+        "pair_slices_explore": (0.5,),
+        "lags_primary": (0, 1, 2),
+        "lags_explore": (3,),
+        "ts_comp_ops": ("none", "ts_decay", "ts_zscore", "delta"),
+        "ts_comp_windows": (1, 5, 10, 20),
+        "cs_comp_ops": ("none", "cs_zscore"),
+        "single_share": 0.25,
+        "compound_share": 0.10,
+        "composition_share": 0.20,
+        "composition_cs_share": 0.55,
+        "adjacent_explore_share": 0.20,
+        "structural_explore_share": 0.15,
+        "path_shape_share": 0.0,
+        "proven_relation_share": 0.0,
+        "use_feedback_crowd_penalty": False,
+    })
+    return filtered
+
+
+def _without_fundamental_fields(profile: dict[str, object]) -> dict[str, object]:
+    if fundamental_search_enabled():
+        return profile
+    filtered = dict(profile)
+    blocked = set(FUNDAMENTAL_INDICATOR_NAMES)
+    return _without_indicator_fields(filtered, blocked)
+
+
+def _without_advanced_period_fields(profile: dict[str, object]) -> dict[str, object]:
+    if advanced_period_search_enabled():
+        return _without_indicator_fields(
+            profile,
+            set(CROSS_PERIOD_INDICATOR_NAMES) - set(ADVANCED_PERIOD_SEARCH_FIELDS),
+        )
+    return _without_indicator_fields(profile, set(CROSS_PERIOD_INDICATOR_NAMES))
+
+
+def _without_order_flow_fields(profile: dict[str, object]) -> dict[str, object]:
+    if order_flow_search_enabled():
+        return profile
+    return _without_indicator_fields(profile, set(ORDER_FLOW_INDICATOR_NAMES))
+
+
+def _without_xbinance_order_flow_fields(profile: dict[str, object]) -> dict[str, object]:
+    if xbinance_order_flow_search_enabled():
+        return profile
+    return _without_indicator_fields(profile, set(XBINANCE_ORDER_FLOW_INDICATOR_NAMES))
+
+
+def _without_indicator_fields(profile: dict[str, object], blocked: set[str]) -> dict[str, object]:
+    filtered = dict(profile)
+    for key in (
+        "single_fields_primary",
+        "single_fields_explore",
+        "pair_a_fields_primary",
+        "pair_a_fields_explore",
+        "pair_b_fields_primary",
+        "pair_b_fields_explore",
+    ):
+        filtered[key] = tuple(x for x in profile.get(key, ()) if x not in blocked)
+    for key in ("mask_pairs_primary", "mask_pairs_explore"):
+        filtered[key] = tuple((field, rule) for field, rule in profile.get(key, ()) if field not in blocked)
+    return filtered
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return int(default)
+    try:
+        return int(raw)
+    except ValueError:
+        return int(default)
+
+
+def _env_float_optional(name: str):
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return None
+    try:
+        return float(raw)
+    except ValueError:
+        return None
+
+
+def _apply_search_share_overrides(profile: dict[str, object]) -> dict[str, object]:
+    order_flow_share = _env_float_optional("GP_ORDER_FLOW_SHARE")
+    if order_flow_share is None:
+        return profile
+    out = dict(profile)
+    non_order_explore = sum(
+        float(out.get(key, 0.0))
+        for key in (
+            "adjacent_explore_share",
+            "structural_explore_share",
+            "path_shape_share",
+            "proven_relation_share",
+        )
+    )
+    max_order_flow = max(0.0, 1.0 - non_order_explore)
+    out["order_flow_share"] = float(np.clip(order_flow_share, 0.0, max_order_flow))
+    out["primary_share"] = max(0.0, 1.0 - non_order_explore - out["order_flow_share"])
+    return out
+
+
+def _field_slate_enabled() -> bool:
+    raw = os.environ.get("GP_FIELD_SLATE_MODE", "seeded").strip().lower()
+    return raw not in {"0", "false", "no", "off", "none", "all"}
+
+
+def _field_slate_seed() -> int:
+    return _env_int("GP_FIELD_SLATE_SEED", _env_int("GP_RUN_SEED", 0))
+
+
+def _field_slate_target_size() -> int:
+    return max(0, _env_int("GP_FIELD_SLATE_SIZE", 36))
+
+
+def _field_slate_extra_keep() -> tuple[str, ...]:
+    raw = os.environ.get("GP_FIELD_SLATE_KEEP_FIELDS", "").strip()
+    if not raw:
+        return ()
+    return tuple(name.strip() for name in raw.split(",") if name.strip() in INDICATOR_INDEX)
+
+
+def _field_slate_min_order_flow_fields() -> int:
+    return max(0, _env_int("GP_FIELD_SLATE_MIN_ORDER_FLOW_FIELDS", 2))
+
+
+def _field_slate_min_family_fields() -> dict[str, int]:
+    raw = os.environ.get("GP_FIELD_SLATE_MIN_FAMILY_FIELDS", "").strip()
+    if raw.lower() in {"0", "false", "no", "off", "none"}:
+        return {}
+    defaults = {
+        "xbinance_order_flow": 3,
+        "intraday_path": 2,
+        "btc_relative": 2,
+        "period_funding": 2,
+        "period_oi": 1,
+        "realized_vol": 2,
+        "period_liquidity": 2,
+    }
+    if not raw:
+        return defaults
+    out: dict[str, int] = {}
+    for part in raw.split(","):
+        item = part.strip()
+        if not item:
+            continue
+        if ":" in item:
+            name, value = item.split(":", 1)
+        elif "=" in item:
+            name, value = item.split("=", 1)
+        else:
+            continue
+        try:
+            out[name.strip()] = max(0, int(value.strip()))
+        except ValueError:
+            continue
+    return out
+
+
+def _profile_field_names(profile: dict[str, object], *, primary_only: bool = False) -> tuple[str, ...]:
+    suffixes = ("primary",) if primary_only else ("primary", "explore")
+    fields: list[str] = []
+    for base in ("single_fields", "pair_a_fields", "pair_b_fields"):
+        for suffix in suffixes:
+            fields.extend(profile.get(f"{base}_{suffix}", ()))
+    for suffix in suffixes:
+        fields.extend(field for field, _ in profile.get(f"mask_pairs_{suffix}", ()))
+    return _unique_tuple(name for name in fields if name in INDICATOR_INDEX)
+
+
+def _field_family(name: str) -> str:
+    if name in FUNDAMENTAL_INDICATOR_NAMES:
+        return "fundamental"
+    if name in ORDER_FLOW_INDICATOR_NAMES:
+        return "order_flow"
+    if name in XBINANCE_ORDER_FLOW_INDICATOR_NAMES:
+        return "xbinance_order_flow"
+    if name in CROSS_PERIOD_INDICATOR_NAMES:
+        if name.startswith("funding"):
+            return "period_funding"
+        if name.startswith("oi_") or name == "funding_oi_joint_5d":
+            return "period_oi"
+        if "btc" in name:
+            return "btc_relative"
+        if name.startswith("rv_") or name == "vol_of_vol_20d":
+            return "realized_vol"
+        return "period_liquidity"
+    if name in {
+        "path_efficiency", "high_time_frac", "low_time_frac", "high_before_low",
+        "am_return", "pm_return", "am_pm_return_diff", "late_volume_share",
+        "late_range_share", "volume_burst_share", "intraday_reversal",
+    }:
+        return "intraday_path"
+    if name in {
+        "funding", "open_interest", "premium_close", "mark_close", "index_close",
+        "turnover", "oi_change_intraday", "premium_change_intraday",
+        "mark_index_spread", "mark_index_spread_change", "oi_price_alignment",
+        "funding_abs",
+        "new_long_pressure", "new_short_pressure",
+        "short_cover_pressure", "long_liquidation_pressure",
+    }:
+        return "derivatives_native"
+    if name in BASE_FIELDS or name in {
+        "returns", "log_volume", "spread", "mid_price", "typical_price",
+        "body", "upper_shadow", "lower_shadow", "price_range_pct",
+        "return_abs", "vwap_proxy", "volume_intensity", "cum_return",
+        "close_position", "money_flow",
+        "up_volume_pressure", "down_volume_pressure",
+    }:
+        return "ohlcv"
+    return "other"
+
+
+def _stable_slate_key(seed: int, name: str) -> int:
+    raw = f"{seed}:{name}".encode("utf-8")
+    return int.from_bytes(hashlib.blake2b(raw, digest_size=8).digest(), "little")
+
+
+def _select_field_slate(profile: dict[str, object]) -> tuple[str, ...]:
+    all_fields = set(_profile_field_names(profile))
+    if not all_fields or not _field_slate_enabled():
+        return tuple(sorted(all_fields, key=lambda name: INDICATOR_INDEX[name]))
+    target = _field_slate_target_size()
+    if target <= 0 or len(all_fields) <= target:
+        return tuple(sorted(all_fields, key=lambda name: INDICATOR_INDEX[name]))
+
+    locked = set(_profile_field_names(profile, primary_only=True))
+    locked.update(_field_slate_extra_keep())
+    locked.intersection_update(all_fields)
+    remaining = max(0, target - len(locked))
+    selected = set(locked)
+    seed = _field_slate_seed()
+
+    groups: dict[str, list[str]] = {}
+    for name in sorted(all_fields - locked, key=lambda item: INDICATOR_INDEX[item]):
+        groups.setdefault(_field_family(name), []).append(name)
+    for bucket in groups.values():
+        bucket.sort(key=lambda name: _stable_slate_key(seed, name))
+
+    def reserve_family(family_names: tuple[str, ...], min_count: int) -> None:
+        nonlocal remaining
+        if min_count <= 0 or remaining <= 0:
+            return
+        current = sum(1 for name in selected if _field_family(name) in family_names)
+        need = max(0, min_count - current)
+        if need <= 0:
+            return
+        candidates: list[tuple[int, str, str]] = []
+        for family_name in family_names:
+            for name in groups.get(family_name, ()):
+                candidates.append((_stable_slate_key(seed, name), family_name, name))
+        candidates.sort()
+        for _, family_name, name in candidates:
+            if need <= 0 or remaining <= 0:
+                break
+            bucket = groups.get(family_name)
+            if not bucket or name not in bucket:
+                continue
+            selected.add(name)
+            bucket.remove(name)
+            need -= 1
+            remaining -= 1
+
+    reserve_family(("order_flow", "xbinance_order_flow"), _field_slate_min_order_flow_fields())
+    for family_name, min_count in sorted(
+        _field_slate_min_family_fields().items(),
+        key=lambda item: _stable_slate_key(seed, f"reserve:{item[0]}"),
+    ):
+        reserve_family((family_name,), int(min_count))
+
+    families = sorted(groups, key=lambda fam: _stable_slate_key(seed, f"family:{fam}"))
+    while remaining > 0 and families:
+        next_families: list[str] = []
+        for family in families:
+            bucket = groups.get(family, [])
+            if not bucket:
+                continue
+            if remaining <= 0:
+                next_families.append(family)
+                continue
+            selected.add(bucket.pop(0))
+            remaining -= 1
+            if bucket:
+                next_families.append(family)
+        families = next_families
+
+    return tuple(sorted(selected, key=lambda name: INDICATOR_INDEX[name]))
+
+
+def _apply_field_slate(profile: dict[str, object]) -> tuple[dict[str, object], tuple[str, ...]]:
+    slate = _select_field_slate(profile)
+    if not slate:
+        return profile, slate
+    selected = set(slate)
+    filtered = dict(profile)
+    for key in (
+        "single_fields_primary",
+        "single_fields_explore",
+        "pair_a_fields_primary",
+        "pair_a_fields_explore",
+        "pair_b_fields_primary",
+        "pair_b_fields_explore",
+    ):
+        filtered[key] = tuple(name for name in profile.get(key, ()) if name in selected)
+    for key in ("mask_pairs_primary", "mask_pairs_explore"):
+        filtered[key] = tuple((field, rule) for field, rule in profile.get(key, ()) if field in selected)
+    return filtered, slate
+
+
+def _require_known_values(label, values, allowed):
+    unknown = sorted({value for value in values if value not in allowed})
+    if unknown:
+        raise ValueError(f"{label} contains unknown values: {unknown}")
+
+
+def _validate_search_space_profile(profile):
+    _require_known_values(
+        "single_fields",
+        (*profile.get("single_fields_primary", ()), *profile.get("single_fields_explore", ())),
+        set(INDICATOR_NAMES),
+    )
+    _require_known_values(
+        "pair_a_fields",
+        (*profile.get("pair_a_fields_primary", ()), *profile.get("pair_a_fields_explore", ())),
+        set(INDICATOR_NAMES),
+    )
+    _require_known_values(
+        "pair_b_fields",
+        (*profile.get("pair_b_fields_primary", ()), *profile.get("pair_b_fields_explore", ())),
+        set(INDICATOR_NAMES),
+    )
+    _require_known_values(
+        "mode1_ops",
+        (*profile.get("mode1_ops_primary", ()), *profile.get("mode1_ops_explore", ())),
+        set(MODE1_OPS),
+    )
+    _require_known_values(
+        "mode2_ops",
+        (*profile.get("mode2_ops_primary", ()), *profile.get("mode2_ops_explore", ())),
+        set(MODE2_OPS),
+    )
+    _require_known_values(
+        "mode3_ops",
+        (*profile.get("mode3_ops_primary", ()), *profile.get("mode3_ops_explore", ())),
+        set(MODE3_OPS),
+    )
+    _require_known_values(
+        "mode4_ops",
+        (*profile.get("mode4_ops_primary", ()), *profile.get("mode4_ops_explore", ())),
+        set(MODE4_OPS),
+    )
+    _require_known_values("ts_comp_ops", profile.get("ts_comp_ops", ()), set(TS_COMP_OPS))
+    _require_known_values("path_shape_ts_windows", profile.get("path_shape_ts_windows", ()), set(TS_COMP_WINDOWS))
+    _require_known_values("cs_comp_ops", profile.get("cs_comp_ops", ()), set(CS_COMP_OPS))
+    for key in (
+        "primary_share",
+        "adjacent_explore_share",
+        "structural_explore_share",
+        "path_shape_share",
+        "proven_relation_share",
+        "order_flow_share",
+    ):
+        value = float(profile.get(key, 0.0))
+        if value < 0.0 or value > 1.0:
+            raise ValueError(f"{key} must be in [0, 1], got {value}")
+    for key in ("pair_a_family_max_share_primary", "pair_a_family_max_share_explore"):
+        value = profile.get(key, PAIR_A_FAMILY_DEFAULT_MAX_SHARE)
+        if not isinstance(value, dict):
+            raise ValueError(f"{key} must be a dict, got {type(value).__name__}")
+        for family, share in value.items():
+            share_value = float(share)
+            if share_value <= 0.0 or share_value > 1.0:
+                raise ValueError(f"{key}[{family!r}] must be in (0, 1], got {share_value}")
+    temperature = float(profile.get("pair_a_family_softmax_temperature", 1.0))
+    if temperature <= 0.0 or temperature > 1.0:
+        raise ValueError(f"pair_a_family_softmax_temperature must be in (0, 1], got {temperature}")
+    lane_sum = (
+        float(profile.get("primary_share", 0.0))
+        + float(profile.get("adjacent_explore_share", 0.0))
+        + float(profile.get("structural_explore_share", 0.0))
+        + float(profile.get("path_shape_share", 0.0))
+        + float(profile.get("proven_relation_share", 0.0))
+        + float(profile.get("order_flow_share", 0.0))
+    )
+    if lane_sum <= 0.0 or lane_sum > 1.000001:
+        raise ValueError(f"sampling lane shares must sum to (0, 1], got {lane_sum}")
+
+
+def _unique_tuple(values):
+    seen = set()
+    ordered = []
+    for value in values:
+        if value in seen:
+            continue
+        ordered.append(value)
+        seen.add(value)
+    return tuple(ordered)
+
+
+def _name_tuple_to_indices(names):
+    return tuple(INDICATOR_INDEX[name] for name in _unique_tuple(names))
+
+
+def _value_tuple_to_window_indices(values):
+    return tuple(WINDOW_CHOICES.index(int(value)) for value in _unique_tuple(values))
+
+
+def _value_tuple_to_slice_indices(values):
+    return tuple(SLICE_CHOICES.index(value) for value in _unique_tuple(values))
+
+
+def _value_tuple_to_mask_indices(values):
+    return tuple(MASK_RULES.index(value) for value in _unique_tuple(values))
+
+
+def _value_tuple_to_mode1_indices(values):
+    return tuple(MODE1_OPS.index(value) for value in _unique_tuple(values))
+
+
+def _value_tuple_to_mode2_indices(values):
+    return tuple(MODE2_OPS.index(value) for value in _unique_tuple(values))
+
+
+def _value_tuple_to_mode3_indices(values):
+    return tuple(MODE3_OPS.index(value) for value in _unique_tuple(values))
+
+
+def _value_tuple_to_mode4_indices(values):
+    return tuple(MODE4_OPS.index(value) for value in _unique_tuple(values))
+
+
+def _value_tuple_to_lag_indices(values):
+    return tuple(B_SHIFT_CHOICES.index(int(value)) for value in _unique_tuple(values))
+
+
+def _value_tuple_to_ts_indices(values):
+    return tuple(TS_COMP_OPS.index(value) for value in values)
+
+
+def _value_tuple_to_ts_window_indices(values):
+    return tuple(TS_COMP_WINDOWS.index(int(value)) for value in _unique_tuple(values))
+
+
+def _value_tuple_to_cs_indices(values):
+    return tuple(CS_COMP_OPS.index(value) for value in _unique_tuple(values))
+
+
+def build_search_space_state() -> dict[str, object]:
+    fundamental_enabled = fundamental_search_enabled()
+    fundamental_required = fundamental_required_enabled()
+    advanced_enabled = advanced_period_search_enabled()
+    order_flow_enabled = order_flow_search_enabled()
+    xbinance_order_flow_enabled = xbinance_order_flow_search_enabled()
+    slate_enabled = _field_slate_enabled()
+    slate_seed = _field_slate_seed()
+    slate_size = _field_slate_target_size()
+    overrides = _SEARCH_SPACE_OVERRIDES
+    cache_key = (
+        f"{DEFAULT_SEARCH_SPACE_PROFILE}|fundamental={fundamental_enabled}"
+        f"|required={fundamental_required}|advanced={advanced_enabled}"
+        f"|order_flow={order_flow_enabled}"
+        f"|xbinance_order_flow={xbinance_order_flow_enabled}"
+        f"|slate={slate_enabled}:{slate_seed}:{slate_size}:{_field_slate_extra_keep()}"
+        f"|slate_order_flow_min={_field_slate_min_order_flow_fields()}"
+        f"|slate_family_min={json.dumps(_field_slate_min_family_fields(), sort_keys=True)}"
+        f"|ovr={json.dumps(overrides, sort_keys=True) if overrides else 'none'}"
+    )
+    cached = _SEARCH_SPACE_STATE_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+
+    if fundamental_required and not fundamental_enabled:
+        raise ValueError("GP_REQUIRE_FUNDAMENTAL=1 requires a valid GP_FUNDAMENTAL_PANEL")
+    profile = get_search_space_profile()
+    if overrides:
+        profile = dict(profile)
+        for key, value in overrides.items():
+            if value is not None:
+                profile[key] = value
+    if fundamental_required:
+        profile = _fundamental_required_profile(profile)
+    profile = _without_fundamental_fields(profile)
+    profile = _without_advanced_period_fields(profile)
+    profile = _without_order_flow_fields(profile)
+    profile = _without_xbinance_order_flow_fields(profile)
+    profile = _apply_search_share_overrides(profile)
+    profile, field_slate_names = _apply_field_slate(profile)
+    active_fields = set(_profile_field_names(profile))
+    has_order_flow_fields = bool(
+        active_fields.intersection(ORDER_FLOW_INDICATOR_NAMES)
+        or active_fields.intersection(XBINANCE_ORDER_FLOW_INDICATOR_NAMES)
+    )
+    if not has_order_flow_fields and float(profile.get("order_flow_share", 0.0)) > 0.0:
+        profile = dict(profile)
+        profile["order_flow_share"] = 0.0
+    _validate_search_space_profile(profile)
+    state = {
+        "profile_name": DEFAULT_SEARCH_SPACE_PROFILE,
+        "fundamental_required": bool(fundamental_required),
+        "advanced_period_enabled": bool(advanced_enabled),
+        "order_flow_enabled": bool(order_flow_enabled),
+        "xbinance_order_flow_enabled": bool(xbinance_order_flow_enabled),
+        "field_slate_enabled": bool(slate_enabled),
+        "field_slate_seed": int(slate_seed),
+        "field_slate_target_size": int(slate_size),
+        "field_slate_names": field_slate_names,
+        "field_slate_min_family_fields": _field_slate_min_family_fields(),
+        "single_share": float(profile.get("single_share", 0.5)),
+        "compound_share": float(profile.get("compound_share", 0.20)),
+        "intraday_share": float(profile.get("intraday_share", 0.0)),
+        "composition_share": float(profile.get("composition_share", 0.0)),
+        "composition_cs_share": float(profile.get("composition_cs_share", 0.5)),
+        "primary_share": float(profile.get("primary_share", 0.8)),
+        "adjacent_explore_share": float(profile.get("adjacent_explore_share", 0.0)),
+        "structural_explore_share": float(profile.get("structural_explore_share", 0.0)),
+        "path_shape_share": float(profile.get("path_shape_share", 0.0)),
+        "proven_relation_share": float(profile.get("proven_relation_share", 0.0)),
+        "order_flow_share": float(profile.get("order_flow_share", 0.0)),
+        "proven_relation_ts_zscore_share": float(profile.get("proven_relation_ts_zscore_share", 0.0)),
+        "proven_relation_cs_zscore_share": float(profile.get("proven_relation_cs_zscore_share", 0.0)),
+        "structural_mode3_share": float(profile.get("structural_mode3_share", 0.5)),
+        "feedback_primary_blend": float(profile.get("feedback_primary_blend", 0.70)),
+        "feedback_explore_blend": float(profile.get("feedback_explore_blend", 0.35)),
+        "pair_a_family_max_share_primary": dict(profile.get("pair_a_family_max_share_primary", PAIR_A_FAMILY_DEFAULT_MAX_SHARE)),
+        "pair_a_family_max_share_explore": dict(profile.get("pair_a_family_max_share_explore", PAIR_A_FAMILY_DEFAULT_MAX_SHARE)),
+        "pair_a_family_softmax_temperature": float(profile.get("pair_a_family_softmax_temperature", 1.0)),
+        "allow_negative_lag": bool(profile.get("allow_negative_lag", False)),
+        "use_feedback_crowd_penalty": bool(profile.get("use_feedback_crowd_penalty", True)),
+        "single_field_primary": _name_tuple_to_indices(profile.get("single_fields_primary", ())),
+        "single_field_all": _name_tuple_to_indices(
+            (*profile.get("single_fields_primary", ()), *profile.get("single_fields_explore", ()))
+        ),
+        "pair_a_field_primary": _name_tuple_to_indices(profile.get("pair_a_fields_primary", ())),
+        "pair_a_field_all": _name_tuple_to_indices(
+            (*profile.get("pair_a_fields_primary", ()), *profile.get("pair_a_fields_explore", ()))
+        ),
+        "pair_b_field_primary": _name_tuple_to_indices(profile.get("pair_b_fields_primary", ())),
+        "pair_b_field_all": _name_tuple_to_indices(
+            (*profile.get("pair_b_fields_primary", ()), *profile.get("pair_b_fields_explore", ()))
+        ),
+        "mode4_a_field_primary": _name_tuple_to_indices(
+            tuple(
+                name for name in profile.get("pair_a_fields_primary", ())
+                if name in MODE4_A_INTRADAY_FIELD_NAMES
+            )
+        ) or _name_tuple_to_indices(MODE4_A_INTRADAY_FIELD_NAMES),
+        "mode4_a_field_all": _name_tuple_to_indices(
+            tuple(
+                name for name in (
+                    *profile.get("pair_a_fields_primary", ()),
+                    *profile.get("pair_a_fields_explore", ()),
+                )
+                if name in MODE4_A_INTRADAY_FIELD_NAMES
+            )
+        ) or _name_tuple_to_indices(MODE4_A_INTRADAY_FIELD_NAMES),
+        "mode1_op_primary": _value_tuple_to_mode1_indices(profile.get("mode1_ops_primary", ())),
+        "mode1_op_all": _value_tuple_to_mode1_indices(
+            (*profile.get("mode1_ops_primary", ()), *profile.get("mode1_ops_explore", ()))
+        ),
+        "mode2_op_primary": _value_tuple_to_mode2_indices(profile.get("mode2_ops_primary", ())),
+        "mode2_op_all": _value_tuple_to_mode2_indices(
+            (*profile.get("mode2_ops_primary", ()), *profile.get("mode2_ops_explore", ()))
+        ),
+        "mode3_op_primary": _value_tuple_to_mode3_indices(
+            profile.get("mode3_ops_primary", MODE3_OPS)
+        ),
+        "mode3_op_all": _value_tuple_to_mode3_indices(
+            (
+                *profile.get("mode3_ops_primary", MODE3_OPS),
+                *profile.get("mode3_ops_explore", ()),
+            )
+        ),
+        "mode4_op_primary": _value_tuple_to_mode4_indices(profile.get("mode4_ops_primary", ())),
+        "mode4_op_all": _value_tuple_to_mode4_indices(
+            (*profile.get("mode4_ops_primary", ()), *profile.get("mode4_ops_explore", ()))
+        ),
+        "single_window_primary": _value_tuple_to_window_indices(profile.get("single_windows_primary", ())),
+        "single_window_all": _value_tuple_to_window_indices(
+            (*profile.get("single_windows_primary", ()), *profile.get("single_windows_explore", ()))
+        ),
+        "pair_window_primary": _value_tuple_to_window_indices(profile.get("pair_windows_primary", ())),
+        "pair_window_all": _value_tuple_to_window_indices(
+            (*profile.get("pair_windows_primary", ()), *profile.get("pair_windows_explore", ()))
+        ),
+        "single_slice_primary": _value_tuple_to_slice_indices(profile.get("single_slices_primary", (None,))),
+        "single_slice_all": _value_tuple_to_slice_indices(
+            (*profile.get("single_slices_primary", (None,)), *profile.get("single_slices_explore", ()))
+        ),
+        "pair_slice_primary": _value_tuple_to_slice_indices(profile.get("pair_slices_primary", (None,))),
+        "pair_slice_all": _value_tuple_to_slice_indices(
+            (*profile.get("pair_slices_primary", (None,)), *profile.get("pair_slices_explore", ()))
+        ),
+        "lag_primary": _value_tuple_to_lag_indices(profile.get("lags_primary", (0,))),
+        "lag_all": _value_tuple_to_lag_indices(
+            (*profile.get("lags_primary", (0,)), *profile.get("lags_explore", ()))
+        ),
+        "ts_comp_op_all": _value_tuple_to_ts_indices(profile.get("ts_comp_ops", ("none",))),
+        "ts_comp_window_all": _value_tuple_to_ts_window_indices(profile.get("ts_comp_windows", (1,))),
+        "path_shape_ts_window": _value_tuple_to_ts_window_indices(
+            profile.get("path_shape_ts_windows", (10, 20))
+        ),
+        "cs_comp_op_all": _value_tuple_to_cs_indices(profile.get("cs_comp_ops", ("none",))),
+    }
+    mask_pairs_primary = tuple(
+        (INDICATOR_INDEX[field], MASK_RULES.index(rule))
+        for field, rule in _unique_tuple(profile.get("mask_pairs_primary", ()))
+    )
+    mask_pairs_all = tuple(
+        (INDICATOR_INDEX[field], MASK_RULES.index(rule))
+        for field, rule in _unique_tuple(
+            (*profile.get("mask_pairs_primary", ()), *profile.get("mask_pairs_explore", ()))
+        )
+    )
+    state["mask_pairs_primary"] = mask_pairs_primary
+    state["mask_pairs_all"] = mask_pairs_all
+    state["nonzero_lag_all"] = tuple(
+        idx for idx in state["lag_all"] if B_SHIFT_CHOICES[idx] != 0
+    )
+
+    _SEARCH_SPACE_STATE_CACHE[cache_key] = state
+    return state
+
+
+def search_space_indicator_indices() -> np.ndarray:
+    """Indicator columns that the active production search can reference."""
+    state = build_search_space_state()
+    fields = set()
+    for key in ("single_field_all", "pair_a_field_all", "pair_b_field_all"):
+        fields.update(int(x) for x in state.get(key, ()))
+    fields.update(int(field) for field, _ in state.get("mask_pairs_all", ()))
+    # Composition dependency fields must remain in the projected cache.
+    for dependency_names in CS_COMP_DEPENDENCY_FIELDS.values():
+        fields.update(INDICATOR_INDEX[name] for name in dependency_names if name in INDICATOR_INDEX)
+    if not fields:
+        return np.arange(N_INDICATORS, dtype=np.intp)
+    return np.asarray(sorted(fields), dtype=np.intp)
+
+
+def _project_by_mod(raw_idx: int, allowed: tuple[int, ...]) -> int:
+    if not allowed:
+        return int(raw_idx)
+    raw_idx = int(raw_idx)
+    if raw_idx in allowed:
+        return raw_idx
+    return allowed[raw_idx % len(allowed)]
+
+
+def _project_window_idx(raw_idx: int, allowed: tuple[int, ...]) -> int:
+    if not allowed:
+        return int(raw_idx)
+    raw_idx = int(raw_idx)
+    if raw_idx in allowed:
+        return raw_idx
+    raw_value = WINDOW_CHOICES[max(0, min(len(WINDOW_CHOICES) - 1, raw_idx))]
+    return min(allowed, key=lambda idx: abs(WINDOW_CHOICES[idx] - raw_value))
+
+
+def _project_slice_idx(raw_idx: int, allowed: tuple[int, ...]) -> int:
+    if not allowed:
+        return int(raw_idx)
+    raw_idx = int(raw_idx)
+    if raw_idx in allowed:
+        return raw_idx
+    raw_value = SLICE_CHOICES[max(0, min(len(SLICE_CHOICES) - 1, raw_idx))]
+    if raw_value is None:
+        return SLICE_CHOICES.index(None) if SLICE_CHOICES.index(None) in allowed else allowed[0]
+    numeric_allowed = [idx for idx in allowed if SLICE_CHOICES[idx] is not None]
+    if not numeric_allowed:
+        return allowed[0]
+    return min(numeric_allowed, key=lambda idx: abs(float(SLICE_CHOICES[idx]) - float(raw_value)))
+
+
+def _project_lag_idx(raw_idx: int, allowed: tuple[int, ...]) -> int:
+    if not allowed:
+        return int(raw_idx)
+    raw_idx = int(raw_idx)
+    if raw_idx in allowed:
+        return raw_idx
+    raw_value = B_SHIFT_CHOICES[max(0, min(len(B_SHIFT_CHOICES) - 1, raw_idx))]
+    return min(allowed, key=lambda idx: abs(B_SHIFT_CHOICES[idx] - raw_value))
+
+
+def _project_mask_pair(field_idx: int, rule_idx: int, allowed_pairs: tuple[tuple[int, int], ...]) -> tuple[int, int]:
+    if not allowed_pairs:
+        return int(field_idx), int(rule_idx)
+    current = (int(field_idx), int(rule_idx))
+    if current in allowed_pairs:
+        return current
+    return allowed_pairs[(current[0] + current[1]) % len(allowed_pairs)]
+
+
+def project_population_to_search_space(pop):
+    if pop is None:
+        return pop
+    pop = np.asarray(pop, dtype=np.int32)
+    if pop.size == 0:
+        return pop
+    if pop.ndim == 1:
+        pop = pop.reshape(1, -1)
+    state = build_search_space_state()
+
+    typical_idx = INDICATOR_INDEX.get("typical_price")
+    vwap_idx = INDICATOR_INDEX.get("vwap_proxy")
+    if typical_idx is not None and vwap_idx is not None:
+        for field_idx in (0, 1, 4):
+            pop[:, field_idx] = np.where(pop[:, field_idx] == vwap_idx, typical_idx, pop[:, field_idx])
+
+    zero_lag_idx = B_SHIFT_CHOICES.index(0)
+    none_slice_idx = SLICE_CHOICES.index(None)
+    none_mask_idx = MASK_RULES.index("none")
+    none_ts_idx = TS_COMP_OPS.index("none")
+    none_cs_idx = CS_COMP_OPS.index("none")
+    slope_idx = MODE2_OPS.index("slope")
+    beta_idx = MODE2_OPS.index("beta")
+
+    long_mult_ge2 = [i for i in range(len(TS_COMP_WINDOWS)) if TS_COMP_WINDOWS[i] >= 2] or [0]
+    for row in pop:
+        raw_mode = int(row[6]) % 4
+        if raw_mode == 3:
+            mode = 3
+        elif raw_mode == 2:
+            mode = 2
+        elif raw_mode == 0:
+            mode = 0
+        else:
+            mode = 1
+        row[6] = mode
+        row[12] = _project_by_mod(row[12], state["cs_comp_op_all"])
+        if mode != 2:
+            row[10] = _project_by_mod(row[10], state["ts_comp_op_all"])
+            row[11] = _project_by_mod(row[11], state["ts_comp_window_all"])
+            if row[10] == none_ts_idx:
+                row[11] = 0
+        else:
+            row[10] = none_ts_idx
+            row[11] = int(row[11]) % len(TS_COMP_WINDOWS)
+            if row[11] not in long_mult_ge2:
+                row[11] = long_mult_ge2[int(row[11]) % len(long_mult_ge2)]
+        if row[12] == none_cs_idx:
+            row[12] = none_cs_idx
+        if mode == 3:
+            row[13] = _project_by_mod(row[13], state.get("mode4_op_all", tuple(range(len(MODE4_OPS)))))
+            row[14] = int(row[14]) % len(INTRADAY_GROUP_CHOICES)
+        else:
+            row[13] = _project_by_mod(row[13], state["mode3_op_all"])
+
+        if mode == 0:
+            row[0] = _project_by_mod(row[0], state["single_field_all"])
+            row[1] = row[0]
+            row[7] = _project_by_mod(row[7], state["mode1_op_all"])
+            row[8] = 0
+            row[9] = zero_lag_idx
+            row[2] = _project_window_idx(row[2], state["single_window_all"])
+            if WINDOW_CHOICES[int(row[2])] >= MINUTES_PER_PERIOD:
+                row[3] = none_slice_idx
+            else:
+                row[3] = _project_slice_idx(row[3], state["single_slice_all"])
+            row[4], row[5] = _project_mask_pair(row[4], row[5], state["mask_pairs_all"])
+        elif mode == 2:
+            row[0] = _project_by_mod(row[0], state["single_field_all"])
+            row[1] = row[0]
+            row[7] = 0
+            row[8] = 0
+            row[9] = zero_lag_idx
+            row[2] = _project_window_idx(row[2], state["single_window_all"])
+            if WINDOW_CHOICES[int(row[2])] >= MINUTES_PER_PERIOD:
+                row[3] = none_slice_idx
+            else:
+                row[3] = _project_slice_idx(row[3], state["single_slice_all"])
+            row[4], row[5] = _project_mask_pair(row[4], row[5], state["mask_pairs_all"])
+        elif mode == 3:
+            row[0] = _project_by_mod(row[0], state["mode4_a_field_all"])
+            row[1] = _project_by_mod(row[1], state["pair_b_field_all"])
+            row[7] = 0
+            row[8] = 0
+            row[9] = zero_lag_idx
+            row[2] = _project_window_idx(row[2], state["pair_window_all"])
+            if WINDOW_CHOICES[int(row[2])] >= MINUTES_PER_PERIOD:
+                row[3] = none_slice_idx
+            else:
+                row[3] = _project_slice_idx(row[3], state["pair_slice_all"])
+            row[4], row[5] = _project_mask_pair(row[4], row[5], state["mask_pairs_all"])
+        else:
+            row[0] = _project_by_mod(row[0], state["pair_a_field_all"])
+            row[1] = _project_by_mod(row[1], state["pair_b_field_all"])
+            row[7] = 0
+            row[8] = _project_by_mod(row[8], state["mode2_op_all"])
+            row[2] = _project_window_idx(row[2], state["pair_window_all"])
+            if WINDOW_CHOICES[int(row[2])] >= MINUTES_PER_PERIOD:
+                row[3] = none_slice_idx
+            else:
+                row[3] = _project_slice_idx(row[3], state["pair_slice_all"])
+            row[4], row[5] = _project_mask_pair(row[4], row[5], state["mask_pairs_all"])
+            row[9] = _project_lag_idx(row[9], state["lag_all"])
+            if not state["allow_negative_lag"] and B_SHIFT_CHOICES[int(row[9])] < 0:
+                row[9] = _project_lag_idx(zero_lag_idx, state["lag_all"])
+            if (
+                int(row[0]) == int(row[1])
+                and int(B_SHIFT_CHOICES[int(row[9])]) == 0
+                and MODE2_OPS[int(row[8])] in {
+                    "corr",
+                    "slope",
+                    "intercept",
+                    "r2",
+                    "euc_dist",
+                    "cos_sim",
+                    "rank_corr",
+                    "beta",
+                    "residual_std",
+                    "diff_mean",
+                    "diff_std",
+                    "ratio_mean",
+                    "ratio_std",
+                }
+            ):
+                nonzero = state["nonzero_lag_all"]
+                if nonzero:
+                    row[9] = nonzero[(int(row[1]) + int(row[8])) % len(nonzero)]
+                else:
+                    alternatives = [idx for idx in state["pair_b_field_all"] if idx != int(row[0])]
+                    if alternatives:
+                        row[1] = alternatives[int(row[0]) % len(alternatives)]
+
+        if int(row[5]) == none_mask_idx:
+            row[4] = 0
+    return pop

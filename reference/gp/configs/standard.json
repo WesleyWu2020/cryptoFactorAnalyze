@@ -1,0 +1,63 @@
+{
+  "run": {
+    "artifacts_dir": "artifacts",
+    "seed": 42
+  },
+  "data": {
+    "universe": "universe_hs300",
+    "returns_field": "ctc_returns",
+    "lag_periods": 2,
+    "quantile": 0.2,
+    "n_trading_days": 243,
+    "exclude_features": []
+  },
+  "split": {
+    "is": ["2017-01-01", "2022-12-31"],
+    "oob": ["2023-01-01", "2025-06-30"]
+  },
+  "gp": {
+    "population": 500,
+    "generations": 30,
+    "hall_of_fame": 100,
+    "n_components": 40,
+    "gp_n_jobs": 6,
+    "oob_weight": 0.25,
+    "elite_size": 10,
+    "diversity_weight": 0.5,
+    "diversity_decay_start": 0.5,
+    "init_depth": [1, 5],
+    "p_crossover": 0.25,
+    "p_subtree_mutation": 0.20,
+    "p_hoist_mutation": 0.10,
+    "p_point_mutation": 0.40,
+    "fitness_align_backtest": true,
+    "decorr_max_points": 200000
+  },
+  "stream": {
+    "enable": true,
+    "min_is": 0.15,
+    "min_oob": 0.08,
+    "min_oob_is_ratio": 0.40
+  },
+  "final": {
+    "top_n": 30,
+    "min_oob_cagr": 0.05,
+    "min_is_cagr": 0.15,
+    "min_oob_is_ratio": 0.40,
+    "score_weights": {"oob": 0.7, "is": 0.3}
+  },
+  "refine_window": {
+    "enable": true,
+    "window": ["2023-01-01", "2025-06-30"],
+    "seed_top_k": 20,
+    "mutate_param_variants": 6,
+    "mutate_leaf_per_pos": 2,
+    "mutate_structure_take": 40,
+    "per_seed_cap": 300,
+    "candidate_cap": 3000,
+    "keep_by": "cagr",
+    "min_improve": 0.0,
+    "keep_top_n": 15,
+    "n_jobs": 6
+  }
+}

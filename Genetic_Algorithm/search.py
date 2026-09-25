@@ -37,7 +37,8 @@ Result = TypeVar("Result")
 
 
 def _resolve_backtest_profile(overrides: Mapping[str, Any] | None) -> dict[str, Any]:
-    profile = resolve_profile("perp_1d", {} if overrides is None else overrides)
+    from .replay import _REPLAY_OVERRIDES
+    profile = resolve_profile("perp_1d", {**_REPLAY_OVERRIDES, **(overrides or {})})
     return asdict(profile)
 
 
@@ -63,7 +64,7 @@ def run_search(
     selected_code_paths: Iterable[str | Path] = (),
     package_names: Iterable[str] = (),
     seed: int | None = None,
-    operator_version: str = "daily-gp-search-v1",
+    operator_version: str = "daily-gp-search-v2",
     backtest_profile: Mapping[str, Any] | None = None,
     experiment_id: str = "training-search",
     validation_attempts: int = 0,
@@ -353,12 +354,17 @@ def _load_archive(
 def _default_code_paths(repository_root: str | Path) -> tuple[str, ...]:
     candidates = (
         "Genetic_Algorithm/data.py",
+        "Genetic_Algorithm/export.py", "Genetic_Algorithm/cli.py", "Genetic_Algorithm/experiment.py",
+        "factor_common/loader.py", "factor_common/manager.py", "factor_common/reporting.py",
         "Genetic_Algorithm/artifacts.py", "Genetic_Algorithm/search.py",
         "Genetic_Algorithm/selection.py", "Genetic_Algorithm/evolution.py",
         "Genetic_Algorithm/expression.py", "Genetic_Algorithm/evaluator.py",
         "Genetic_Algorithm/fitness.py", "Genetic_Algorithm/operators.py",
         "Genetic_Algorithm/cost_fitness.py", "Genetic_Algorithm/walk_forward.py",
         "Genetic_Algorithm/incremental.py",
+        "Genetic_Algorithm/exposure.py", "barra/crypto_barra_exposure.py",
+        "Genetic_Algorithm/horizon.py",
+        "Genetic_Algorithm/research.py",
         "Genetic_Algorithm/replay.py", "factor_common/backtest.py",
         "factor_common/funding.py", "factor_common/grouping.py",
         "factor_common/metrics.py", "factor_common/profiles.py",
@@ -703,9 +709,8 @@ def _copy_archive_value_artifacts(
         return
     reserved_names = {
         "deduplication.json", "training_candidates.json", "training_values.json",
-        "training_values_archive.json",
         "provenance.json", "config.json", "audit_train.json", "validation.json",
-        "frozen.json", "generations.jsonl", "progress.json",
+        "frozen.json", "generations.jsonl", "progress.json", "search_research.json",
         _publish_journal_path(destination).name,
     }
     references: list[tuple[Path, Path]] = []
@@ -849,7 +854,14 @@ def _write_training_artifacts(
         )
         value_artifact_path = staging / "training_values_archive.json"
         if value_artifact_path.exists():
-            value_artifact_path = staging / "training_values.new.json"
+            index = 1
+            while True:
+                suffix = "" if index == 1 else str(index)
+                candidate_path = staging / f"training_values.new{suffix}.json"
+                if not candidate_path.exists():
+                    value_artifact_path = candidate_path
+                    break
+                index += 1
         value_artifact = write_value_artifact(value_artifact_path, value_panels)
         write_artifact(staging / "provenance.json", provenance, immutable=True)
         new_archive = [

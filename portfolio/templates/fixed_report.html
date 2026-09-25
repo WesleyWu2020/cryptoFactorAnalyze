@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>$page_title</title>
+<script type="text/javascript" src="https://assets.pyecharts.org/assets/v5/echarts.min.js"></script>
+<style>
+body { font-family: -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; margin: 24px; color: #1f2933; }
+h1 { font-size: 22px; }
+h2 { font-size: 17px; margin-top: 32px; border-bottom: 1px solid #d9e2ec; padding-bottom: 4px; }
+h3 { font-size: 14px; margin-top: 20px; }
+table { border-collapse: collapse; margin: 8px 0; font-size: 13px; }
+th, td { border: 1px solid #cbd2d9; padding: 4px 10px; text-align: right; }
+th { background: #f0f4f8; text-align: left; }
+td:first-child { text-align: left; }
+.banner { padding: 10px 14px; border-radius: 4px; margin: 12px 0; font-size: 14px; }
+.banner.complete { background: #e3f2e5; border: 1px solid #7ba889; }
+.banner.incomplete { background: #fdecea; border: 1px solid #d98080; }
+.null { color: #9aa5b1; font-style: italic; }
+.unavailable { color: #7b8794; background: #f5f7fa; border: 1px dashed #cbd2d9; padding: 10px 14px; border-radius: 4px; font-size: 13px; margin: 8px 0; }
+.chart { width: 100%; height: 420px; }
+.note { color: #52606d; font-size: 12px; }
+pre { overflow-x: auto; background: #f5f7fa; padding: 12px; border: 1px solid #d9e2ec; }
+</style>
+</head>
+<body>
+<h1>$page_title</h1>
+$status_banner
+$summary_section
+<h2>组合三情景绩效</h2>
+$scenario_metrics_section
+<h2>组合净值</h2>
+$nav_section
+<h2>累计成本分解</h2>
+$cost_section
+<h2>换手率</h2>
+$turnover_section
+<h2>风险约束实际使用情况</h2>
+$risk_section
+<h2>单位总敞口单因子基准</h2>
+$baseline_section
+<h2>基准净收益相关性（至少 20 个共同日）</h2>
+$correlation_section
+<h3>共同有效日数</h3>
+$counts_section
+<h2>成员目标同向持仓重合度</h2>
+$overlap_section
+<p class="note">相关性和重合度仅用于事后诊断，未用于选择成员或调整权重。</p>
+<h2>终止合约结算</h2>
+$settlement_section
+<h2>目标缩放摘要</h2>
+$scaling_section
+<h2>实际持仓敞口摘要（含漂移与扣费影响）</h2>
+$exposure_summary
+<h2>配置与版本</h2>
+<pre>$config_section</pre>
+<h2>账本诊断</h2>
+<pre>$diagnostics_section</pre>
+<p class="note">所有日期均为 UTC 日频边界。图表仅由已保存的优化结果生成；不重读市场数据、不重跑组合优化。</p>
+<p><a href="manifest.json">Manifest</a> · <a href="metrics.json">Metrics</a> · <a href="scenarios/all_costs/ledger.parquet">净账本</a></p>
+</body>
+</html>

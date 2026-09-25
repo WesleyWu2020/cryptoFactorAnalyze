@@ -16,7 +16,7 @@
   - `./.venv/bin/python data/update_crypto_quant.py update`
   - `./.venv/bin/python data/update_crypto_quant.py validate`
   - `python factor_analyse/main.py --list`
-  - `python factor_analyse/main.py <factor_path> [rebalance_days]`（`factor_path` 为因子模块 .py 的完整路径）
+  - `python factor_analyse/main.py <factor_path> [rebalance_days] [--groups N]`（`factor_path` 为因子模块 .py 的完整路径；factor-mine skill 口径固定 `--groups 5`，缺省 10）
 - test: 当前仓库未配置统一测试入口；如新增逻辑需补充最小可复现验证脚本或测试用例
 - lint: 当前仓库未配置统一 lint 工具；提交前至少保证改动脚本可运行并通过基础语法检查
 - build: 无独立构建步骤，执行 `factor_analyse/main.py` 后在 `reports/` 产出报告

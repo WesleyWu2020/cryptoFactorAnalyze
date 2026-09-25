@@ -1,6 +1,8 @@
 {
   "fitness_mode": "all_costs_sharpe",
-  "reference_factor": "064185107a8f267e+a37c60cf4492e9f1",
+  "exposure_residual_mode": "diagnostic",
+  "horizon_diagnostics": true,
+  "reference_factor": "064185107a8f267e+a37c60cf4492e9f1+0006a47b612eaf9b",
   "reference_similarity_penalty": 1.0,
   "validation_parameter_stability": true,
   "parameter_perturbation": 0.20,
@@ -15,7 +17,7 @@
   "validation_cost_multiplier": 1.5,
   "return_correlation_limit": 0.8,
   "position_overlap_limit": 0.7,
-  "seed": 43,
+  "seed": 44,
   "population": 200,
   "generations": 20,
   "max_depth": 4,

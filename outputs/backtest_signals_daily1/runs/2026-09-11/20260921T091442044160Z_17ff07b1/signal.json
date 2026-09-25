@@ -1,0 +1,96 @@
+{
+  "action": "rebalance",
+  "data_cutoff": "2026-09-11",
+  "execute_after": "2026-09-12T00:00:00Z",
+  "execution_date": "2026-09-12",
+  "expires_at": "2026-09-13T00:00:00Z",
+  "generated_at": "2026-09-21T09:14:41.992716+00:00",
+  "run_id": "20260921T091442044160Z_17ff07b1",
+  "schema_version": 1,
+  "signal_date": "2026-09-11",
+  "signal_id": "171469ba148bd07254b97ef0",
+  "strategy_id": "composite_portfolio_pruned8",
+  "strategy_version": 1,
+  "targets": [
+    {
+      "instrument": "ATOMUSDT",
+      "target_weight": 0.024999999999999994
+    },
+    {
+      "instrument": "BNBUSDT",
+      "target_weight": 0.024999999999999994
+    },
+    {
+      "instrument": "BTCUSDT",
+      "target_weight": 0.024999999999999994
+    },
+    {
+      "instrument": "DASHUSDT",
+      "target_weight": -0.024999999999999994
+    },
+    {
+      "instrument": "DOGEUSDT",
+      "target_weight": 0.024999999999999994
+    },
+    {
+      "instrument": "ENAUSDT",
+      "target_weight": -0.024999999999999994
+    },
+    {
+      "instrument": "ETHUSDT",
+      "target_weight": 0.024999999999999994
+    },
+    {
+      "instrument": "HBARUSDT",
+      "target_weight": 0.024999999999999994
+    },
+    {
+      "instrument": "JUPUSDT",
+      "target_weight": -0.024999999999999994
+    },
+    {
+      "instrument": "LINKUSDT",
+      "target_weight": 0.024999999999999994
+    },
+    {
+      "instrument": "LITUSDT",
+      "target_weight": -0.024999999999999994
+    },
+    {
+      "instrument": "LTCUSDT",
+      "target_weight": 0.024999999999999994
+    },
+    {
+      "instrument": "MORPHOUSDT",
+      "target_weight": -0.024999999999999994
+    },
+    {
+      "instrument": "MUSDT",
+      "target_weight": -0.024999999999999994
+    },
+    {
+      "instrument": "SOLUSDT",
+      "target_weight": 0.024999999999999994
+    },
+    {
+      "instrument": "STXUSDT",
+      "target_weight": -0.024999999999999994
+    },
+    {
+      "instrument": "TRUMPUSDT",
+      "target_weight": -0.024999999999999994
+    },
+    {
+      "instrument": "TRXUSDT",
+      "target_weight": 0.024999999999999994
+    },
+    {
+      "instrument": "VVVUSDT",
+      "target_weight": -0.024999999999999994
+    },
+    {
+      "instrument": "WLDUSDT",
+      "target_weight": -0.024999999999999994
+    }
+  ]
+}

@@ -184,6 +184,7 @@ def test_run_search_second_archive_is_cumulative_and_preserves_prior_value_refer
     )
     first = Candidate(Node("close"), "first", (1.0, 1.0, -1))
     second = Candidate(Node("open"), "second", (1.0, 1.0, -1))
+    third = Candidate(Node("high"), "third", (1.0, 1.0, -1))
     results = iter(
         (
             SearchResult((first,), (), 1, values_by_id={"first": {"values": values}}),
@@ -198,8 +199,20 @@ def test_run_search_second_archive_is_cumulative_and_preserves_prior_value_refer
                         )
                     }
                 },
-            ),
-        )
+                ),
+                SearchResult(
+                    (third,), (), 1,
+                    values_by_id={
+                        "third": {
+                            "values": pd.DataFrame(
+                                np.random.default_rng(8).normal(size=(120, 24)),
+                                index=dates,
+                                columns=values.columns,
+                            )
+                        }
+                    },
+                ),
+            )
     )
     monkeypatch.setattr(search_module, "run_training_audit", lambda *args, **kwargs: audit_path)
 
@@ -215,15 +228,23 @@ def test_run_search_second_archive_is_cumulative_and_preserves_prior_value_refer
     first_document = json.loads((run_dir / "training_candidates.json").read_text(encoding="utf-8"))
     first_entry = first_document["candidates"][0]
     second_dir = tmp_path / "second"
-    safe_archive = tmp_path / "safe-archive.json"
-    _repack_archive_with_safe_value_name(run_dir / "training_candidates.json", safe_archive)
-    run(second_dir, safe_archive)
+    run(second_dir, run_dir / "training_candidates.json")
 
     document = json.loads((second_dir / "training_candidates.json").read_text(encoding="utf-8"))
     assert [entry["expression_id"] for entry in document["candidates"]] == ["first", "second"]
     assert document["candidates"][0]["value_artifact"] == {
-        "path": "prior-values.json", "sha256": first_entry["value_artifact"]["sha256"]
+        "path": "training_values_archive.json",
+        "sha256": first_entry["value_artifact"]["sha256"],
     }
+    assert document["candidates"][1]["value_artifact"]["path"] == "training_values.new.json"
+
+    third_dir = tmp_path / "third"
+    run(third_dir, second_dir / "training_candidates.json")
+    third_document = json.loads((third_dir / "training_candidates.json").read_text(encoding="utf-8"))
+    assert [entry["expression_id"] for entry in third_document["candidates"]] == [
+        "first", "second", "third"
+    ]
+    assert third_document["candidates"][2]["value_artifact"]["path"] == "training_values.new2.json"
 
 
 def test_load_archive_rejects_duplicate_expression_ids(tmp_path):
@@ -873,7 +894,6 @@ def test_run_search_rejects_archive_artifact_path_outside_archive_directory(tmp_
     "deduplication.json",
     "training_candidates.json",
     "training_values.json",
-    "training_values_archive.json",
     "provenance.json",
     ".run.publish.json",
 ])

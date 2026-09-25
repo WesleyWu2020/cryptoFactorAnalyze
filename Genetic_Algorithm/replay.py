@@ -40,6 +40,7 @@ class ReplayEvaluationError(RuntimeError):
 
 
 _REPLAY_OVERRIDES = {
+    "group_tie_policy": "symmetric_fractional",
     "rebalance_days": 1,
     "fee_rate": 0.0005,
     "slippage": 0.001,
@@ -104,6 +105,12 @@ def replay(
         persist_evaluations=True,
         as_of=stage.end,
     )
+    _, available_end = manager.dp.get_time_range()
+    if available_end is None or available_end < stage.end:
+        raise ReplayEvaluationError(
+            f"stage {stage.name!r} replay requires market data through {_iso(stage.end)}; "
+            f"available end is {available_end}"
+        )
     result = manager.evaluate(
         str(exported.path),
         params={

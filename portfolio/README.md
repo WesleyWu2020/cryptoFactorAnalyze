@@ -1,4 +1,44 @@
-# Portfolio Layer
+# Portfolio Research
+
+日频固定组合的新入口是 `./.venv/bin/python -m portfolio.main_fixed`。
+它按明确模块路径加载因子，合并各成员的方向多空目标，使用共享严格账本。
+仅支持永续多空研究；不接实盘下单，也不模拟保证金和强平。
+`freeze`、`run`、`audit` 均应在新 Python 进程执行；修改代码后不能沿用 notebook
+已缓存的旧模块来宣称运行了新代码，必须重启解释器并重新冻结。
+
+流程为 `freeze` → `run` → `audit`。`freeze` 记录代码版本和固定资本权重，
+不执行因子选择；任何代码变化都需要生成新配置，旧配置不会被覆盖。
+所有成员使用同一日频调仓日历，信号日 t 的目标在 t+1 open 基准执行。
+缺失成员不沿用过期信号，也不把其预算重新分配给其他成员。
+
+结果写入 `reports/portfolio/<run_id>/`。检查 `manifest.json` 的运行状态、
+`metrics.json` 的各情景状态、订单/资金费/风险诊断，再查看 HTML。
+`artifact_complete.json` 仅表示落盘完成；cutoff 审计以独立 audit JSON 为凭证，
+必须核对其中 `configuration`、`code_hashes`、`source_stat` 与运行 manifest 一致。
+
+固定组合结果中的 `artifact_complete` 表示文件集已经写完，`strategy_certified`
+始终表示尚未通过实盘策略认证；两者不是同一个状态。研究账本不连接交易所 API，
+也不模拟保证金、强平、最小订单、数量精度或盘口冲击。
+
+最小流程示例（只生成配置，不自动运行大型 H5 回测）：
+
+```bash
+./.venv/bin/python -m portfolio.main_fixed freeze \
+  --h5 data/crypto_quant.h5 --factor path/to/factor.py --allocation 1 \
+  --start 2024-01-01 --end 2024-01-31 --as-of 2024-02-02 \
+  --output reports/portfolio/frozen.json
+./.venv/bin/python -m portfolio.main_fixed run \
+  --config reports/portfolio/frozen.json --output-root reports/portfolio
+./.venv/bin/python -m portfolio.main_fixed audit \
+  --config reports/portfolio/frozen.json --cutoff 2024-01-15 \
+  --output reports/portfolio/audit.json
+```
+
+旧 `main.py`、`main_hedged.py`、`main_pathB.py` 仅用于 legacy research 历史复现。
+它们与新入口具有不同的持仓、计费、时间和异常数据规则，结果不可直接拼接。
+旧测试通过不代表可用于实盘；旧入口不属于新固定组合的验收范围。
+
+## Legacy research
 
 Multi-factor portfolio construction, backtesting, and reporting for Crypto assets.
 

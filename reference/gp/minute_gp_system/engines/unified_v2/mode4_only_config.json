@@ -1,0 +1,26 @@
+
+{
+    "single_share": 0.0,
+    "compound_share": 0.0,
+    "intraday_share": 1.0,
+    "structural_explore_share": 0.0,
+    "path_shape_share": 0.0,
+    "proven_relation_share": 0.0,
+    "order_flow_share": 0.0,
+    "adjacent_explore_share": 0.0,
+    "primary_share": 0.50,
+    "mode4_ops_primary": [
+      "group_slope",
+      "group_early_late_diff",
+      "group_skew",
+      "group_path_length"
+    ],
+    "mode4_ops_explore": [
+      "group_dispersion",
+      "group_top_share",
+      "group_corr",
+      "group_beta",
+      "group_jump_ratio",
+      "group_first_last_diff"
+    ]
+  }

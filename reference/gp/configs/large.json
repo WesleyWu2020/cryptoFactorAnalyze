@@ -1,0 +1,70 @@
+{
+  "run": {
+    "artifacts_dir": "artifacts",
+    "seed": 42
+  },
+  "data": {
+    "universe": "universe_hs300",
+    "returns_field": "ctc_returns",
+    "lag_periods": 2,
+    "quantile": 0.1,
+    "n_trading_days": 243,
+    "exclude_features": []
+  },
+  "split": {
+    "is": ["2017-01-01", "2022-12-31"],
+    "oob": ["2023-01-01", "2025-06-30"]
+  },
+  "gp": {
+    "population": 2000,
+    "generations": 50,
+    "hall_of_fame": 200,
+    "n_components": 80,
+    "gp_n_jobs": 8,
+    "oob_weight": 0.3,
+    "elite_size": 20,
+    "diversity_weight": 0.8,
+    "diversity_decay_start": 0.4,
+    "diversity_decay_min_ratio": 0.1,
+    "monotonic_best": true,
+    "init_depth": [1, 6],
+    "p_crossover": 0.25,
+    "p_subtree_mutation": 0.25,
+    "p_hoist_mutation": 0.10,
+    "p_point_mutation": 0.35,
+    "structure_penalty_weight": 1.5,
+    "fitness_align_backtest": true,
+    "decorr_max_points": 500000,
+    "quality_min_valid_frac": 0.3,
+    "quality_min_valid_day_frac": 0.7,
+    "quality_min_top_frac": 0.6,
+    "quality_min_top_day_frac": 0.8
+  },
+  "stream": {
+    "enable": true,
+    "min_is": 0.20,
+    "min_oob": 0.10,
+    "min_oob_is_ratio": 0.45
+  },
+  "final": {
+    "top_n": 50,
+    "min_oob_cagr": 0.08,
+    "min_is_cagr": 0.18,
+    "min_oob_is_ratio": 0.45,
+    "score_weights": {"oob": 0.7, "is": 0.3}
+  },
+  "refine_window": {
+    "enable": true,
+    "window": ["2023-01-01", "2025-06-30"],
+    "seed_top_k": 30,
+    "mutate_param_variants": 8,
+    "mutate_leaf_per_pos": 3,
+    "mutate_structure_take": 60,
+    "per_seed_cap": 500,
+    "candidate_cap": 5000,
+    "keep_by": "cagr",
+    "min_improve": 0.0,
+    "keep_top_n": 25,
+    "n_jobs": 8
+  }
+}

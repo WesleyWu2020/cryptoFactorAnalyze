@@ -31,7 +31,7 @@ NESTED_RANK_TREE = Node(
             "add",
             (
                 Node("rank", (Node("rolling_mean", (Node("close"),), window=2),)),
-                Node("open"),
+                Node("rank", (Node("open"),)),
             ),
         ),
     ),

@@ -61,4 +61,3 @@ def test_three_day_holding_fees_slippage_and_funding_reconcile():
     assert net["ledger"]["slippage"].sum() == pytest.approx(0.002)
     assert net["funding"]["cashflow"].sum() == pytest.approx(-0.0005)
     assert net["positions"].iloc[-1].abs().sum() == 0
-

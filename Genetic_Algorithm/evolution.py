@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections import Counter
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Iterable, Sequence
 
 import numpy as np
@@ -11,10 +11,10 @@ import numpy as np
 from factor_common.labels import make_labels
 
 from .evaluator import evaluate_tree
-from .expression import Node, canonical_tree, expression_hash, node_count, validate_tree
+from .expression import Node, canonical_tree, expression_dimension, expression_hash, node_count, validate_tree
 from .features import TERMINAL_FIELDS, FEATURE_FAMILIES, expression_families
 from .fitness import score_training
-from .operators import OPERATOR_ARITY, WINDOW_OPERATORS
+from .operators import MIN_OPERATOR_WINDOW, OPERATOR_ARITY, TERMINAL_DIMENSIONS, WINDOW_OPERATORS
 
 
 @dataclass(frozen=True)
@@ -34,6 +34,7 @@ class SearchResult:
     evaluations: int
     values_by_id: dict[str, Any] = field(default_factory=dict)
     fitness_diagnostics: dict[str, Any] = field(default_factory=dict)
+    research_diagnostics: dict[str, Any] = field(default_factory=dict)
 
 
 class SearchFormationError(RuntimeError):
@@ -237,7 +238,7 @@ def _replace(node: Node, path: tuple[int, ...], replacement: Node) -> Node:
     return Node(node.op, tuple(children), node.field, node.window)
 
 
-def _random_tree(rng: np.random.Generator, config: Any, depth: int = 0, family=None) -> Node:
+def _random_tree_raw(rng: np.random.Generator, config: Any, depth: int = 0, family=None) -> Node:
     if family is None and _value(config, "family_diversity", False):
         family = str(rng.choice(sorted(FEATURE_FAMILIES)))
     terminals = sorted(FEATURE_FAMILIES[family] if family else TERMINAL_FIELDS)
@@ -246,14 +247,106 @@ def _random_tree(rng: np.random.Generator, config: Any, depth: int = 0, family=N
         return Node(str(rng.choice(terminals)))
     operators = sorted(OPERATOR_ARITY)
     op = str(rng.choice(operators))
-    children = tuple(_random_tree(rng, config, depth + 1, family) for _ in range(OPERATOR_ARITY[op]))
+    children = tuple(_random_tree_raw(rng, config, depth + 1, family) for _ in range(OPERATOR_ARITY[op]))
     window = None
     if op in WINDOW_OPERATORS:
         values = tuple(_value(config, "windows", (3, 5, 10, 20, 40, 60)))
         if op in {"lag", "delta"}:
             values = tuple(_value(config, "lags", values))
+        minimum = MIN_OPERATOR_WINDOW.get(op)
+        if minimum is not None:
+            values = tuple(value for value in values if value >= minimum)
+        if not values:
+            return Node(str(rng.choice(terminals)))
         window = int(rng.choice(values))
     return Node(op, children, window=window)
+
+
+def _semantic_valid(tree, config):
+    validate_tree(tree, config)
+    if _value(config, "semantic_generation", False):
+        for path in _paths(tree):
+            if expression_dimension(_at_path(tree, path)) == "mixed":
+                raise ValueError("semantic generation excludes mixed dimensions")
+
+
+def _random_tree(rng: np.random.Generator, config: Any, depth: int = 0, family=None,
+                 required_dimension=None) -> Node:
+    if not _value(config, "semantic_generation", False) and required_dimension is None:
+        return _random_tree_raw(rng, config, depth, family)
+    if family is None and _value(config, "family_diversity", False):
+        family = str(rng.choice(sorted(FEATURE_FAMILIES)))
+    desired = required_dimension
+    if desired is None and rng.random() < _value(config, "dimensionless_probability", 0.75):
+        desired = "ratio"
+    # Bounded rejection happens before costly factor evaluation. The existing
+    # dimension algebra is authoritative; no second unit system is introduced.
+    for _ in range(24):
+        tree = _random_tree_raw(rng, config, depth, family)
+        try:
+            _semantic_valid(tree, config)
+            if desired is None or expression_dimension(tree) == desired:
+                return tree
+        except ValueError:
+            pass
+    terminals = sorted(FEATURE_FAMILIES[family] if family else TERMINAL_FIELDS)
+    matches = [name for name in terminals if desired is None or TERMINAL_DIMENSIONS[name] == desired]
+    if not matches:
+        matches = sorted(name for name in TERMINAL_FIELDS if TERMINAL_DIMENSIONS[name] == desired)
+    if not matches:
+        raise ValueError(f"no terminal fallback for dimension {desired}")
+    return Node(str(rng.choice(matches)))
+
+
+def _structured_mutation(parent, kind, rng, config):
+    """One local edit, with bounded validation and unchanged-parent fallback."""
+    paths = _paths(parent)
+    for _ in range(24):
+        path = paths[int(rng.integers(len(paths)))]
+        node = _at_path(parent, path)
+        if kind == "window":
+            if node.window is None:
+                continue
+            windows = config.lags if node.op in {"lag", "delta"} else config.windows
+            options = sorted(set(w for w in windows if w != node.window and w >= MIN_OPERATOR_WINDOW.get(node.op, 1)))
+            # Adjacent configured values: local search rather than a new subtree.
+            lower = [w for w in options if w < node.window]
+            upper = [w for w in options if w > node.window]
+            options = lower[-1:] + upper[:1]
+            if not options:
+                continue
+            replacement = replace(node, window=int(rng.choice(options)))
+        elif kind == "field":
+            if node.children:
+                continue
+            source = node.field or node.op
+            options = sorted({name for fields in FEATURE_FAMILIES.values() if source in fields
+                              for name in fields if name != source
+                              and TERMINAL_DIMENSIONS[name] == TERMINAL_DIMENSIONS[source]})
+            if not options:
+                continue
+            replacement = Node(str(rng.choice(options)))
+        elif kind == "prune":
+            # Removal proposes a simpler hypothesis, not an assertion that an
+            # arbitrary unary operator is mathematically redundant.
+            if len(node.children) != 1 or expression_dimension(node) != expression_dimension(node.children[0]):
+                continue
+            replacement = node.children[0]
+        elif kind == "subtree":
+            try:
+                replacement = _random_tree(rng, config, required_dimension=expression_dimension(node))
+            except ValueError:
+                continue
+        else:
+            raise ValueError(f"unknown mutation kind: {kind}")
+        tree = _replace(parent, path, replacement)
+        try:
+            _semantic_valid(tree, config)
+        except ValueError:
+            continue
+        if expression_hash(tree) != expression_hash(parent):
+            return tree
+    return parent
 
 
 def _select_cost_population(candidates, size, config):
@@ -278,7 +371,8 @@ def _select_cost_population(candidates, size, config):
     return selected
 
 
-def _variation(parent_a: Node, parent_b: Node, rng: np.random.Generator, config: Any) -> Node:
+def _variation(parent_a: Node, parent_b: Node, rng: np.random.Generator, config: Any,
+               statistics=None) -> Node:
     crossover = float(_value(config, "crossover_probability", 0.6))
     mutation = float(_value(config, "mutation_probability", 0.3))
     copy = float(_value(config, "copy_probability", 0.1))
@@ -286,10 +380,28 @@ def _variation(parent_a: Node, parent_b: Node, rng: np.random.Generator, config:
     if draw < crossover:
         parent_a_paths = _paths(parent_a)
         parent_b_paths = _paths(parent_b)
-        target = parent_a_paths[int(rng.integers(len(parent_a_paths)))]
-        source = parent_b_paths[int(rng.integers(len(parent_b_paths)))]
-        return _replace(parent_a, target, _at_path(parent_b, source))
+        for _ in range(24 if _value(config, "semantic_generation", False) else 1):
+            target = parent_a_paths[int(rng.integers(len(parent_a_paths)))]
+            source = parent_b_paths[int(rng.integers(len(parent_b_paths)))]
+            replacement = _at_path(parent_b, source)
+            if _value(config, "semantic_generation", False) and expression_dimension(_at_path(parent_a, target)) != expression_dimension(replacement):
+                continue
+            tree = _replace(parent_a, target, replacement)
+            if _value(config, "semantic_generation", False):
+                try:
+                    _semantic_valid(tree, config)
+                except ValueError:
+                    continue
+            return tree
+        return parent_a
     if draw < crossover + mutation:
+        if _value(config, "structured_mutation", False):
+            kind = str(rng.choice(("window", "field", "prune", "subtree"), p=config.mutation_weights))
+            tree = _structured_mutation(parent_a, kind, rng, config)
+            if statistics is not None:
+                statistics[kind + "_attempts"] += 1
+                statistics[kind + "_changed"] += int(expression_hash(tree) != expression_hash(parent_a))
+            return tree
         parent_paths = _paths(parent_a)
         target = parent_paths[int(rng.integers(len(parent_paths)))]
         return _replace(parent_a, target, _random_tree(rng, config))
@@ -345,7 +457,7 @@ def _training_evaluate(
     return tuple(score.objective_vector), score.eligible, score.reasons, values, score.direction
 
 
-def search(stage_data: Any, config: Any) -> SearchResult:
+def search(stage_data: Any, config: Any, *, progress_callback=None) -> SearchResult:
     """Run a deterministic GP search using one local random generator."""
     from .config import SearchConfig
 
@@ -356,6 +468,10 @@ def search(stage_data: Any, config: Any) -> SearchResult:
     rng = np.random.default_rng(int(_value(config, "seed", 42)))
     population_size = int(_value(config, "population", 200))
     cost_mode = config.fitness_mode == "all_costs_sharpe"
+    if config.behavior_diversity or config.layered_elites or config.dsr_diagnostics:
+        from .config import STAGES
+        if _value(stage_data, "stage") != STAGES["train"]:
+            raise ValueError("research search requires fixed 2024 training stage")
     generations = int(_value(config, "generations", 20))
     max_attempts = min(config.max_attempts, population_size * 50)
     cache: dict[str, tuple[tuple[Any, ...], bool, tuple[str, ...], Node, Any, int | None]] = {}
@@ -364,6 +480,29 @@ def search(stage_data: Any, config: Any) -> SearchResult:
     objective_width: int | None = None
     logs: list[dict[str, Any]] = []
     supplied = list(_value(config, "initial_trees", ()))
+    robustness_checked: set[str] = set()
+    base_scores = {}
+    elite_archive = {}
+    elite_pool = []
+    exploration_pool = []
+    diagnostics = _value(stage_data, "fitness_diagnostics", {})
+    exploration_slots = min(population_size - 1, max(1, int(np.ceil(population_size * config.exploration_fraction))))
+
+    def diverse_select(items, limit):
+        if limit <= 0:
+            return []
+        if config.behavior_diversity:
+            from .research import select_behavior
+            return select_behavior(items, limit, diagnostics, _cost_key, config.behavior_cell_capacity)
+        return _select_cost_population(items, limit, config)
+
+    def research_parent(pool):
+        if config.behavior_diversity:
+            from .research import behavior_buckets
+            buckets = behavior_buckets(pool, diagnostics, _cost_key)
+            cells = sorted(buckets)
+            pool = buckets[cells[int(rng.integers(len(cells)))]]
+        return _tournament(pool, rng, config)
 
     def evaluate_pool(trees: Iterable[Node], generation: int) -> tuple[list[Candidate], list[Candidate], dict[str, Any]]:
         nonlocal evaluations, objective_width
@@ -376,7 +515,7 @@ def search(stage_data: Any, config: Any) -> SearchResult:
             attempted += 1
             try:
                 canonical = canonical_tree(tree)
-                validate_tree(canonical, config)
+                _semantic_valid(canonical, config)
             except Exception as exc:
                 reasons[type(exc).__name__ + ": " + str(exc)] += 1
                 continue
@@ -397,6 +536,7 @@ def search(stage_data: Any, config: Any) -> SearchResult:
                     reasons[type(exc).__name__ + ": " + str(exc)] += 1
                     continue
                 cache[identifier] = (score, eligible, tuple(failure_reasons), canonical, values, direction)
+                base_scores[identifier] = (tuple(score), bool(eligible), tuple(failure_reasons))
             if values is not None:
                 values_by_id[identifier] = {"values": values}
             score = tuple(score)
@@ -460,23 +600,172 @@ def search(stage_data: Any, config: Any) -> SearchResult:
             )
         return list(all_valid.values()), list(all_exploratory.values()), aggregate
 
+    def apply_training_parameter_stability(
+        candidates: Iterable[Candidate], generation_log: dict[str, Any],
+    ) -> list[Candidate]:
+        items = list(candidates)
+        generation_log["parameter_stability_candidates"] = 0
+        generation_log["parameter_stability_backtests"] = 0
+        if not _value(config, "training_parameter_stability", False):
+            return items
+        from .cost_fitness import training_parameter_stability
+
+        unchecked = [
+            candidate for candidate in sorted(items, key=_cost_key)
+            if candidate.eligible and candidate.expression_id not in robustness_checked
+            and (config.layered_elites or any(
+                _at_path(candidate.tree, path).window is not None
+                for path in _paths(candidate.tree)
+            ))
+        ]
+        unchecked = diverse_select(unchecked, config.training_parameter_stability_top_k) if config.behavior_diversity else unchecked[:config.training_parameter_stability_top_k]
+        replacements: dict[str, Candidate] = {}
+        for candidate in unchecked:
+            identifier = candidate.expression_id
+            diagnostics = stage_data.fitness_diagnostics.get(identifier)
+            if not isinstance(diagnostics, dict):
+                raise ValueError(f"missing base fitness diagnostics for {identifier}")
+            baseline = diagnostics.get("full_training_period")
+            if not isinstance(baseline, dict):
+                raise ValueError(f"missing 2024 baseline metrics for {identifier}")
+            evidence = training_parameter_stability(
+                candidate.tree, candidate.direction, stage_data, config, baseline,
+            )
+            penalty = (
+                config.training_parameter_stability_penalty
+                * float(evidence["penalty_units"])
+            )
+            adjusted_score = (
+                _objective_value(candidate.score[0]) - penalty,
+                *candidate.score[1:],
+            )
+            evidence["penalty_weight"] = config.training_parameter_stability_penalty
+            evidence["fitness_penalty"] = penalty
+            evidence["base_score"] = list(candidate.score)
+            evidence["adjusted_score"] = list(adjusted_score)
+            diagnostics["training_parameter_stability"] = evidence
+            diagnostics["score"] = list(adjusted_score)
+            eligible = candidate.eligible
+            failure_reasons = candidate.reasons
+            if config.layered_elites and _objective_value(adjusted_score[0]) <= 0:
+                eligible = False
+                failure_reasons += ("stability-adjusted objective is not positive",)
+            adjusted = replace(candidate, score=adjusted_score, eligible=eligible, reasons=failure_reasons)
+            replacements[identifier] = adjusted
+            score, _, _, tree, values, direction = cache[identifier]
+            cache[identifier] = (
+                adjusted_score, eligible, failure_reasons, tree, values, direction,
+            )
+            diagnostics["reasons"] = list(failure_reasons)
+            robustness_checked.add(identifier)
+            generation_log["parameter_stability_candidates"] += 1
+            generation_log["parameter_stability_backtests"] += int(
+                evidence["backtest_count"]
+            )
+        return [replacements.get(candidate.expression_id, candidate) for candidate in items]
+
+    def select_layered(items, log):
+        nonlocal elite_pool, exploration_pool, elite_archive
+        merged = {c.expression_id: c for c in (*elite_archive.values(), *items)}
+        # Proposals are compared using base scores before admission. Already
+        # checked members recover their final score from cache below.
+        proposals = [replace(c, score=base_scores[c.expression_id][0],
+                             eligible=base_scores[c.expression_id][1],
+                             reasons=base_scores[c.expression_id][2])
+                     for c in merged.values()]
+        checked = apply_training_parameter_stability(proposals, log)
+        final = []
+        for candidate in checked:
+            identifier = candidate.expression_id
+            if identifier in robustness_checked:
+                score, eligible, reasons, tree, _, direction = cache[identifier]
+                if eligible:
+                    final.append(Candidate(tree, identifier, score, eligible, reasons, direction))
+        elite_pool = diverse_select(final, population_size - exploration_slots)
+        elite_archive = {c.expression_id: c for c in elite_pool}
+        # Separate ranking and reserved slots: an unchecked score never
+        # displaces a checked elite. Nonelite parents retain base fitness.
+        exploration_pool = diverse_select(
+            [c for c in proposals if c.expression_id not in elite_archive],
+            population_size - len(elite_pool),
+        )
+        log["elite_population"] = len(elite_pool)
+        log["exploration_population"] = len(exploration_pool)
+        return elite_pool + exploration_pool
+
+    def log_research(log, current):
+        log["cumulative_evaluations"] = evaluations
+        log["cumulative_parameter_stability_candidates"] = len(robustness_checked)
+        log["cumulative_parameter_stability_backtests"] = sum(
+            entry.get("parameter_stability_backtests", 0) for entry in logs
+        ) + log.get("parameter_stability_backtests", 0)
+        log["selected_eligible_population"] = sum(c.eligible for c in current)
+        if config.behavior_diversity:
+            from .research import behavior_buckets
+            log["behavior_cells"] = len(behavior_buckets(current, diagnostics, _cost_key))
+
     valid, exploratory, log = fill(supplied, 0)
-    current = _select_cost_population(exploratory, population_size, config) if cost_mode else select_population(valid, population_size)
+    if config.layered_elites:
+        current = select_layered(exploratory, log)
+    else:
+        exploratory = apply_training_parameter_stability(exploratory, log)
+        valid = [candidate for candidate in exploratory if candidate.eligible]
+        current = diverse_select(exploratory, population_size) if cost_mode else select_population(valid, population_size)
     exploratory_current = select_exploratory(exploratory, population_size)
+    log_research(log, current)
     logs.append(log)
+    if progress_callback is not None:
+        progress_callback(dict(log))
     if cost_mode:
         print(f"generation 0: evaluations={evaluations}, eligible={sum(c.eligible for c in current)}/{population_size}", flush=True)
     for generation in range(1, generations):
         parents = current if current else exploratory_current
         offspring: list[Node] = []
+        variation_statistics = Counter()
+        if config.layered_elites:
+            fresh = set()
+            for _ in range(max_attempts):
+                tree = _random_tree(rng, config)
+                try:
+                    _semantic_valid(tree, config)
+                except ValueError:
+                    continue
+                identifier = expression_hash(tree)
+                if identifier not in cache and identifier not in fresh:
+                    fresh.add(identifier)
+                    offspring.append(tree)
+                if len(offspring) == exploration_slots:
+                    break
+            if len(offspring) < exploration_slots:
+                raise SearchFormationError("could not reserve fresh exploration formula budget")
         while len(offspring) < population_size:
-            parent_a = _tournament(parents, rng, config)
-            parent_b = _tournament(parents, rng, config)
-            offspring.append(_variation(parent_a.tree, parent_b.tree, rng, config))
+            def choose_parent():
+                pool = parents
+                if config.layered_elites:
+                    pool = exploration_pool if rng.random() < config.exploration_fraction else elite_pool
+                    pool = pool or parents
+                return research_parent(pool) if config.behavior_diversity else _tournament(pool, rng, config)
+            parent_a = choose_parent()
+            parent_b = choose_parent()
+            if config.structured_mutation:
+                offspring.append(_variation(parent_a.tree, parent_b.tree, rng, config, variation_statistics))
+            else:
+                offspring.append(_variation(parent_a.tree, parent_b.tree, rng, config))
         offspring_valid, offspring_exploratory, log = fill(offspring, generation)
+        if config.structured_mutation:
+            log["mutation_statistics"] = dict(variation_statistics)
+        if config.layered_elites:
+            log["random_exploration_proposals"] = exploration_slots
         if cost_mode:
             merged = {c.expression_id: c for c in (*current, *offspring_exploratory)}
-            merged_valid = tuple(_select_cost_population(merged.values(), population_size, config))
+            if config.layered_elites:
+                merged_valid = tuple(select_layered(merged.values(), log))
+            else:
+                merged = {
+                    candidate.expression_id: candidate
+                    for candidate in apply_training_parameter_stability(merged.values(), log)
+                }
+                merged_valid = tuple(diverse_select(merged.values(), population_size))
         else:
             merged_valid = select_population(tuple(current) + tuple(offspring_valid), population_size)
         merged_exploratory = select_exploratory(tuple(exploratory_current) + tuple(offspring_exploratory), population_size)
@@ -485,17 +774,28 @@ def search(stage_data: Any, config: Any) -> SearchResult:
             log["family_population"] = dict(Counter(
                 "+".join(sorted(expression_families(c.tree))) for c in current))
         exploratory_current = merged_exploratory
+        log_research(log, current)
         logs.append(log)
+        if progress_callback is not None:
+            progress_callback(dict(log))
         if cost_mode:
             print(f"generation {generation}: evaluations={evaluations}, eligible={sum(c.eligible for c in current)}/{population_size}", flush=True)
-    current = tuple(c for c in current if c.eligible)
+    current = tuple(c for c in (elite_pool if config.layered_elites else current) if c.eligible)
     retained_values = {
         candidate.expression_id: values_by_id[candidate.expression_id]
         for candidate in current
         if candidate.expression_id in values_by_id
     }
+    research = {}
+    if config.dsr_diagnostics:
+        from .research import dsr_report
+        research["dsr"] = dsr_report(diagnostics, config.dsr_effective_trials, evaluations)
+    if config.behavior_diversity:
+        from .research import BEHAVIOR_BINS, behavior_cell
+        research["behavior_bins"] = BEHAVIOR_BINS
+        research["final_cells"] = {c.expression_id: behavior_cell(diagnostics.get(c.expression_id, {}).get("behavior", {})) for c in current}
     return SearchResult(tuple(current), tuple(logs), evaluations, retained_values,
-                        dict(_value(stage_data, "fitness_diagnostics", {})))
+                        dict(_value(stage_data, "fitness_diagnostics", {})), research)
 
 
 __all__ = [

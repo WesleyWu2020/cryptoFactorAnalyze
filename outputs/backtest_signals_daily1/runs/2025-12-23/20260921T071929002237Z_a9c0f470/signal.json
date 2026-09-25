@@ -1,0 +1,92 @@
+{
+  "action": "rebalance",
+  "data_cutoff": "2025-12-23",
+  "execute_after": "2025-12-24T00:00:00Z",
+  "execution_date": "2025-12-24",
+  "expires_at": "2025-12-25T00:00:00Z",
+  "generated_at": "2026-09-21T07:19:28.976612+00:00",
+  "run_id": "20260921T071929002237Z_a9c0f470",
+  "schema_version": 1,
+  "signal_date": "2025-12-23",
+  "signal_id": "2a3e87ca2c76a6292efeef6c",
+  "strategy_id": "composite_portfolio_pruned8",
+  "strategy_version": 1,
+  "targets": [
+    {
+      "instrument": "APTUSDT",
+      "target_weight": -0.024999999999999994
+    },
+    {
+      "instrument": "BCHUSDT",
+      "target_weight": 0.02777777777777777
+    },
+    {
+      "instrument": "BNBUSDT",
+      "target_weight": 0.02777777777777777
+    },
+    {
+      "instrument": "BSVUSDT",
+      "target_weight": -0.024999999999999994
+    },
+    {
+      "instrument": "BTCUSDT",
+      "target_weight": 0.02777777777777777
+    },
+    {
+      "instrument": "CAKEUSDT",
+      "target_weight": -0.024999999999999994
+    },
+    {
+      "instrument": "DASHUSDT",
+      "target_weight": -0.024999999999999994
+    },
+    {
+      "instrument": "ETHUSDT",
+      "target_weight": 0.02777777777777777
+    },
+    {
+      "instrument": "FETUSDT",
+      "target_weight": -0.024999999999999994
+    },
+    {
+      "instrument": "ICPUSDT",
+      "target_weight": -0.024999999999999994
+    },
+    {
+      "instrument": "KASUSDT",
+      "target_weight": -0.024999999999999994
+    },
+    {
+      "instrument": "MUSDT",
+      "target_weight": -0.024999999999999994
+    },
+    {
+      "instrument": "PUMPUSDT",
+      "target_weight": -0.024999999999999994
+    },
+    {
+      "instrument": "QNTUSDT",
+      "target_weight": 0.02777777777777777
+    },
+    {
+      "instrument": "TRXUSDT",
+      "target_weight": 0.02777777777777777
+    },
+    {
+      "instrument": "XMRUSDT",
+      "target_weight": 0.02777777777777777
+    },
+    {
+      "instrument": "XRPUSDT",
+      "target_weight": 0.02777777777777777
+    },
+    {
+      "instrument": "XTZUSDT",
+      "target_weight": 0.02777777777777777
+    },
+    {
+      "instrument": "ZECUSDT",
+      "target_weight": -0.024999999999999994
+    }
+  ]
+}

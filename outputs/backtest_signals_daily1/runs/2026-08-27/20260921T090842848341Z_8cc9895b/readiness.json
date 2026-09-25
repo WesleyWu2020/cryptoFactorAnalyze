@@ -1,0 +1,17 @@
+{
+  "active_instruments": 50,
+  "complete_klines": 50,
+  "errors": [],
+  "market_end": "2026-08-27",
+  "placeholder_klines": 0,
+  "ready": true,
+  "reasons": [],
+  "signal_date": "2026-08-27",
+  "warnings": [
+    {
+      "code": "incomplete_kline",
+      "detail": "first incomplete date=2025-01-07 00:00:00",
+      "level": "warning"
+    }
+  ]
+}

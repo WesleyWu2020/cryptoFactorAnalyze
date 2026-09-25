@@ -45,11 +45,22 @@ def test_cost_fixed_year_validation_binds_training_and_never_loads_test(monkeypa
     from Genetic_Algorithm import cost_fitness
     from Genetic_Algorithm.selection import ValidationSelectionResult
 
-    config = SearchConfig(fitness_mode="all_costs_sharpe", n_groups=5, render_reports=False, validation_stability=True)
+    config = SearchConfig(fitness_mode="all_costs_sharpe", n_groups=5, render_reports=False,
+                          validation_stability=True, exposure_residual_mode="diagnostic",
+                          horizon_diagnostics=True)
     write_artifact(tmp_path / "config.json", asdict(config), immutable=True)
     write_artifact(tmp_path / "training_candidates.json", {"candidates": [
-        {"expression_id": "a", "ast": asdict(Node("close")), "training_direction": 1}]}, immutable=True)
-    write_artifact(tmp_path / "provenance.json", {"stage_content_hashes": {"train": "train-fingerprint"}}, immutable=True)
+        {"expression_id": "archived", "ast": asdict(Node("open")), "training_direction": 1},
+        {"expression_id": "a", "ast": asdict(Node("close")), "training_direction": 1},
+    ]}, immutable=True)
+    (tmp_path / "deduplication.json").write_text(json.dumps({
+        "accepted": ["a"], "rejected": [], "rejection_reasons": {},
+    }), encoding="utf-8")
+    write_artifact(tmp_path / "provenance.json", {
+        "stage_content_hashes": {"train": "train-fingerprint"},
+        "selected_code_content_hashes": cli._runtime_hashes(),
+        "backtest_profile": {"group_tie_policy": "symmetric_fractional"},
+    }, immutable=True)
     write_artifact(tmp_path / "cost_fitness.json", {"candidates": {"a": {"accounting_fingerprint": "accounting"}}}, immutable=True)
     stages = []
     def load(path, stage, *args, **kwargs):
@@ -77,11 +88,23 @@ def test_cost_fixed_year_validation_binds_training_and_never_loads_test(monkeypa
     monkeypatch.setattr(cli, "replay", lambda *a, **k: {"metrics": {"total_return": 0.1, "sharpe": 1.5, "turnover": 0.1}, "artifact_path": "replay.json"})
     monkeypatch.setattr(cli, "_validation_evidence", lambda *a: {"direction": 1})
     monkeypatch.setattr(cli, "select_validation", select)
+    from barra import crypto_barra_exposure
+    from Genetic_Algorithm import exposure
+    from Genetic_Algorithm import horizon
+    monkeypatch.setattr(crypto_barra_exposure, "build_barra_exposures",
+                        lambda *a, **k: {"style": pd.DataFrame(1., index=pd.date_range("2025-01-01", "2025-12-31"), columns=["A"])})
+    monkeypatch.setattr(exposure, "assess_exposure_residual",
+                        lambda values, data, cfg, direction, styles: {"passed": True, "matched_days": len(values)})
+    monkeypatch.setattr(horizon, "assess_horizon_execution",
+                        lambda values, data, cfg, direction: {"direction_source": "frozen_training",
+                                                               "prediction": {"1": {"valid_days": len(values)}}})
     cli._validate(argparse.Namespace(run_dir=tmp_path, h5="unused"))
     assert stages == ["train", "validation"]
     result = read_verified_manifest(tmp_path / "validation.json")
     assert result["accepted"] == ["a"]
     assert result["training_accounting_fingerprint"] == "accounting"
+    assert result["results"]["a"]["exposure_residual"]["matched_days"] == 365
+    assert result["results"]["a"]["horizon_execution"]["prediction"]["1"]["valid_days"] == 365
 
 
 def test_test_rejects_a_missing_manifest(tmp_path):
@@ -130,6 +153,36 @@ def test_search_rejects_invalid_configuration_before_reading_data(tmp_path):
     assert "population" in result.stderr.lower()
 
 
+def test_search_forwards_training_archive_for_novelty(monkeypatch, tmp_path):
+    from types import SimpleNamespace
+
+    config = tmp_path / "config.json"
+    config.write_text(
+        json.dumps({"population": 2, "generations": 1, "fitness_mode": "legacy_ic"}),
+        encoding="utf-8",
+    )
+    archive = tmp_path / "previous" / "training_candidates.json"
+    archive.parent.mkdir()
+    archive.write_text("{}", encoding="utf-8")
+    captured = {}
+
+    def run_search(*args, **kwargs):
+        captured["archive_path"] = kwargs.get("archive_path")
+        return SimpleNamespace(candidates=(), generation_log=())
+
+    monkeypatch.setattr(cli, "run_search", run_search)
+    monkeypatch.setattr(cli, "load_stage", lambda *args, **kwargs: None)
+    monkeypatch.setattr(cli, "evolution_search", lambda *args, **kwargs: None)
+
+    result = cli.main([
+        "search", "--config", str(config), "--h5", "unused.h5",
+        "--run-dir", str(tmp_path / "run"), "--archive", str(archive),
+    ])
+
+    assert result == 0
+    assert captured["archive_path"] == str(archive)
+
+
 def test_audit_rejects_non_training_stage(tmp_path):
     result = _cli("audit", "--stage", "validation", "--h5", "missing.h5", "--output", str(tmp_path / "audit.json"))
 
@@ -141,7 +194,10 @@ def test_validate_empty_training_archive_is_a_successful_no_candidate_outcome(tm
     run_dir = tmp_path / "run"
     run_dir.mkdir()
     write_artifact(run_dir / "training_candidates.json", {"training_only": True, "candidates": []}, immutable=True)
-    write_artifact(run_dir / "provenance.json", {"backtest_profile": {}}, immutable=True)
+    write_artifact(run_dir / "provenance.json", {
+        "selected_code_content_hashes": cli._runtime_hashes(),
+        "backtest_profile": {"group_tie_policy": "symmetric_fractional"},
+    }, immutable=True)
     write_artifact(run_dir / "config.json", json.loads((ROOT / "Genetic_Algorithm/configs/smoke.json").read_text()), immutable=True)
 
     result = _cli("validate", "--run-dir", str(run_dir), "--h5", str(gp_h5))

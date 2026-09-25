@@ -1,0 +1,22 @@
+{
+  "artifact_complete": true,
+  "environment": {
+    "fastparquet": null,
+    "numpy": "2.5.2",
+    "pandas": "3.0.5",
+    "pyarrow": "22.0.0",
+    "python": "3.14.4",
+    "scipy": "1.18.1",
+    "tables": "3.11.1"
+  },
+  "generated_at": "2026-09-21T08:44:29.262084+00:00",
+  "run_id": "20260921T084429387857Z_433ef121",
+  "signal_date": "2026-07-07",
+  "signal_id": "d3972c56d655cd6d9602de33",
+  "source_report": "/Users/dmiwu/work/PythonProject/cryptoFactorAnalyze/reports/portfolio/20260920T080140Z_756193dec1b9",
+  "source_report_config_sha256": "718cb9f26576ae0e39fa7fc79dc0e8483d9f81f1d6b21d79c44edb1fe01f2167",
+  "status": "complete",
+  "strategy_id": "composite_portfolio_pruned8",
+  "strategy_version": 1,
+  "value_pipeline_fingerprint": "d05ee184a3db3ab15b205a9623c1ffca3bbb1b680115c55e062bc180966e6517"
+}

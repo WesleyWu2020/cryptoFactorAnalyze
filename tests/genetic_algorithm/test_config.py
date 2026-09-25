@@ -42,6 +42,9 @@ def test_default_search_config_values_are_frozen():
     assert config.render_reports is True
     assert config.initial_trees == ()
     assert config.evaluate_candidate is None
+    assert config.training_parameter_stability is False
+    assert config.training_parameter_stability_top_k == 5
+    assert config.training_parameter_stability_penalty == 1.0
     with pytest.raises((AttributeError, TypeError)):
         config.population = 12
 
@@ -124,6 +127,20 @@ def test_search_only_config_values_are_strictly_validated():
         SearchConfig(initial_trees=Node("close"))
     with pytest.raises(TypeError):
         SearchConfig(evaluate_candidate=1)
+
+
+def test_training_parameter_stability_configuration_is_strict():
+    SearchConfig(
+        fitness_mode="all_costs_sharpe", training_parameter_stability=True,
+        training_parameter_stability_top_k=3,
+        training_parameter_stability_penalty=0.5,
+    )
+    with pytest.raises(ValueError, match="training parameter stability"):
+        SearchConfig(training_parameter_stability=True)
+    with pytest.raises((TypeError, ValueError)):
+        SearchConfig(training_parameter_stability_top_k=0)
+    with pytest.raises(ValueError):
+        SearchConfig(training_parameter_stability_penalty=-0.1)
 
 
 def test_stage_rejects_reversed_dates():

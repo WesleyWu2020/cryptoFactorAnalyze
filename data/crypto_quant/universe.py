@@ -25,7 +25,7 @@ UNIVERSE_COLUMNS = [
 # as contract lifecycle facts and are not inferred from missing candles.
 HISTORICAL_CONTRACT_END_DATES = {
     "MATICUSDT": pd.Timestamp("2024-09-02"),
-    "EOSUSDT": pd.Timestamp("2025-05-19"),
+    "EOSUSDT": pd.Timestamp("2025-05-21"),
 }
 
 

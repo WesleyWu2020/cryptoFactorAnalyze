@@ -15,6 +15,7 @@ class BacktestProfile:
     signal_delay_days: int = 1
     price_field: str = "open"
     n_groups: int = 10
+    group_tie_policy: str = "legacy_instrument"
     factor_direction: int = 1
     initial_equity: float = 1.0
     gross_exposure: float = 1.0
@@ -52,6 +53,8 @@ def _validate_iso_date(field_name: str, value: str | None) -> None:
 
 
 def _validate_profile(profile: BacktestProfile, requested_profile_id: str) -> None:
+    if profile.group_tie_policy not in {"legacy_instrument", "symmetric_fractional"}:
+        raise ValueError("unsupported group_tie_policy")
     if profile.profile_id != requested_profile_id or profile.profile_id != _SUPPORTED_PROFILE:
         raise ValueError(f"Unsupported profile: {profile.profile_id}")
     if profile.signal_delay_days != 1:

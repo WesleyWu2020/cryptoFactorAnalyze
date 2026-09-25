@@ -1,0 +1,84 @@
+{
+  "action": "rebalance",
+  "data_cutoff": "2025-10-14",
+  "execute_after": "2025-10-15T00:00:00Z",
+  "execution_date": "2025-10-15",
+  "expires_at": "2025-10-16T00:00:00Z",
+  "generated_at": "2026-09-21T06:39:17.813048+00:00",
+  "run_id": "20260921T063917836941Z_aada6f20",
+  "schema_version": 1,
+  "signal_date": "2025-10-14",
+  "signal_id": "7b3b0c4e642abb28d58efd48",
+  "strategy_id": "composite_portfolio_pruned8",
+  "strategy_version": 1,
+  "targets": [
+    {
+      "instrument": "ARBUSDT",
+      "target_weight": -0.02777777777777777
+    },
+    {
+      "instrument": "BCHUSDT",
+      "target_weight": 0.031249999999999993
+    },
+    {
+      "instrument": "BNBUSDT",
+      "target_weight": 0.031249999999999993
+    },
+    {
+      "instrument": "BTCUSDT",
+      "target_weight": 0.031249999999999993
+    },
+    {
+      "instrument": "ENAUSDT",
+      "target_weight": -0.02777777777777777
+    },
+    {
+      "instrument": "ETHUSDT",
+      "target_weight": 0.031249999999999993
+    },
+    {
+      "instrument": "HBARUSDT",
+      "target_weight": -0.02777777777777777
+    },
+    {
+      "instrument": "INJUSDT",
+      "target_weight": -0.02777777777777777
+    },
+    {
+      "instrument": "JUPUSDT",
+      "target_weight": -0.02777777777777777
+    },
+    {
+      "instrument": "KASUSDT",
+      "target_weight": -0.02777777777777777
+    },
+    {
+      "instrument": "NEARUSDT",
+      "target_weight": 0.031249999999999993
+    },
+    {
+      "instrument": "PENGUUSDT",
+      "target_weight": -0.02777777777777777
+    },
+    {
+      "instrument": "SOLUSDT",
+      "target_weight": 0.031249999999999993
+    },
+    {
+      "instrument": "TRXUSDT",
+      "target_weight": 0.031249999999999993
+    },
+    {
+      "instrument": "UNIUSDT",
+      "target_weight": -0.02777777777777777
+    },
+    {
+      "instrument": "WLDUSDT",
+      "target_weight": -0.02777777777777777
+    },
+    {
+      "instrument": "XMRUSDT",
+      "target_weight": 0.031249999999999993
+    }
+  ]
+}

@@ -69,6 +69,10 @@ def build_parser():
     )
     parser.add_argument("--no-plot", action="store_true", help="跳过 HTML 报告渲染")
     parser.add_argument(
+        "--groups", type=int, default=10,
+        help="分组数量（默认 10；factor-mine skill 口径用 5）",
+    )
+    parser.add_argument(
         "--funding-price-mode", default=None,
         choices=["strict", "daily_open_approx"],
         help="资金费定价模式（默认 strict）",
@@ -111,7 +115,7 @@ def main(argv=None):
     )
     params = {
         "rebalance_days": rebalance_days,
-        "n_groups": 10,
+        "n_groups": args.groups,
         "out_of_sample_days": 180,
     }
     if args.start:

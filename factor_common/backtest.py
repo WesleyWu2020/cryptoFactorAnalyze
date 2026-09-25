@@ -59,7 +59,10 @@ Boundary processing order per UTC day ``D``:
    the already-due funding of step 2; fees reduce equity after sizing.
 4. Settle intraday funding events (``D 00:00 < t < (D+1) 00:00``) on the
    post-trade quantities, which stay unchanged until the next boundary.
-5. For ``all_costs``, check funding coverage of day ``D`` for every held
+5. If an exchange lifecycle table supplies a terminal price for ``D``, settle
+   that contract at the supplied price, record an explicit
+   ``contract_settlement`` order, and prevent later re-entry.
+6. For ``all_costs``, check funding coverage of day ``D`` for every held
    instrument. An unresolved event or unaccepted coverage day halts certified
    continuation: known events and quantities through the first unresolved
    cash flow are retained, later exact sizes are never computed from
@@ -182,6 +185,7 @@ def _empty_scenario(instruments) -> dict:
             "final_quantities": {},
             "blocked_orders": [],
             "retrospective_nonexecution": [],
+            "contract_settlements": [],
             "funding_total": 0.0,
         },
     }
@@ -204,6 +208,7 @@ def _run_scenario(ctx: _Context, *, fees: bool, funding: bool) -> dict:
     blocked: list[dict] = []
     retrospective: list[dict] = []
     forced_exits: list[dict] = []
+    contract_settlements: list[dict] = []
     failed_orders = 0
     halt = None
 
@@ -219,6 +224,10 @@ def _run_scenario(ctx: _Context, *, fees: bool, funding: bool) -> dict:
         for inst, qty in held_pre.items():
             price = open_row[inst]
             if not _valid_price(price):
+                if ctx.strict_target:
+                    halt = {"reason": "unpriceable_held_position", "date": day,
+                            "detail": {"instrument": str(inst), "quantity": qty}}
+                    break
                 exit_price = last_price[inst]
                 notional = abs(qty) * exit_price
                 order_fee = notional * fee_rate
@@ -249,6 +258,8 @@ def _run_scenario(ctx: _Context, *, fees: bool, funding: bool) -> dict:
                 continue
             price_pnl += qty * (float(price) - last_price[inst])
             last_price[inst] = float(price)
+        if halt is not None:
+            break
         equity += price_pnl
         equity -= fee + slippage
         held_pre = {inst: qty for inst, qty in quantities.items() if qty != 0.0}
@@ -283,6 +294,8 @@ def _run_scenario(ctx: _Context, *, fees: bool, funding: bool) -> dict:
                 weight = 0.0
                 if signal is not None and _is_number(signal[inst]):
                     weight = float(signal[inst])
+                if ctx.contract_ended(day, inst):
+                    weight = 0.0
                 current = quantities[inst]
                 if weight == 0.0 and current == 0.0:
                     continue
@@ -305,9 +318,14 @@ def _run_scenario(ctx: _Context, *, fees: bool, funding: bool) -> dict:
                     })
                     continue
                 target_qty = weight * equity_before_trade / float(price)
-                if weight != 0.0 and current == 0.0 and not ctx.eligible(day, inst):
+                increase = abs(target_qty - current) > abs(current) + 1e-15
+                if weight != 0.0 and increase and not ctx.eligible(day, inst):
                     failed_orders += 1
-                    blocked.append({"date": _iso(day), "instrument": str(inst)})
+                    reason = ctx.eligibility_reason(day, inst)
+                    blocked_entry = {"date": _iso(day), "instrument": str(inst)}
+                    if ctx.strict_target:
+                        blocked_entry["reason"] = reason
+                    blocked.append(blocked_entry)
                     order_rows.append({
                         "date": day,
                         "instrument": inst,
@@ -320,7 +338,7 @@ def _run_scenario(ctx: _Context, *, fees: bool, funding: bool) -> dict:
                         "fee": 0.0,
                         "slippage": 0.0,
                         "status": "failed",
-                        "reason": "prior_bar_ineligible",
+                        "reason": reason,
                     })
                     continue
                 delta = target_qty - current
@@ -371,7 +389,47 @@ def _run_scenario(ctx: _Context, *, fees: bool, funding: bool) -> dict:
             funding_cash += cash
             equity += cash
 
-        # 5. Coverage of this held day gates certified continuation.
+        # 5. Contracts with an explicit terminal price settle on their final
+        # trading day.  This is an exchange lifecycle event, not an inferred
+        # fill for a later missing candle.
+        settlement_row = ctx.settlement_prices.loc[day]
+        for inst, qty in list(quantities.items()):
+            settlement_price = settlement_row[inst]
+            if qty == 0.0 or not _valid_price(settlement_price):
+                continue
+            settlement_price = float(settlement_price)
+            settlement_pnl = qty * (settlement_price - last_price[inst])
+            notional = abs(qty) * settlement_price
+            order_fee = notional * fee_rate
+            order_slippage = notional * slippage_rate
+            price_pnl += settlement_pnl
+            equity += settlement_pnl - order_fee - order_slippage
+            fee += order_fee
+            slippage += order_slippage
+            trade_notional += notional
+            order_rows.append({
+                "date": day,
+                "instrument": inst,
+                "side": "buy" if qty < 0 else "sell",
+                "target_weight": 0.0,
+                "target_quantity": 0.0,
+                "order_quantity": -qty,
+                "price": settlement_price,
+                "notional": notional,
+                "fee": order_fee,
+                "slippage": order_slippage,
+                "status": "filled",
+                "reason": "contract_settlement",
+            })
+            quantities[inst] = 0.0
+            last_price[inst] = settlement_price
+            contract_settlements.append({
+                "date": _iso(day),
+                "instrument": str(inst),
+                "price": settlement_price,
+            })
+
+        # 6. Coverage of this held day gates certified continuation.
         if funding:
             held_today = sorted(set(held_pre) | set(held_post), key=str)
             if held_today:
@@ -386,7 +444,7 @@ def _run_scenario(ctx: _Context, *, fees: bool, funding: bool) -> dict:
                     }
                     break
 
-        # 6. Record the certified boundary.
+        # 7. Record the certified boundary.
         ledger_rows.append({
             "date": day,
             "equity": equity,
@@ -466,6 +524,7 @@ def _run_scenario(ctx: _Context, *, fees: bool, funding: bool) -> dict:
         "blocked_orders": blocked,
         "retrospective_nonexecution": retrospective,
         "unpriceable_forced_exits": forced_exits,
+        "contract_settlements": contract_settlements,
         "funding_total": float(funding_out["cashflow"].sum()) if not funding_out.empty else 0.0,
     }
     return {
@@ -478,6 +537,145 @@ def _run_scenario(ctx: _Context, *, fees: bool, funding: bool) -> dict:
         "funding_coverage": coverage_out,
         "diagnostics": diagnostics,
     }
+
+
+def run_target_backtest(
+    targets: pd.DataFrame,
+    opens: pd.DataFrame,
+    events: pd.DataFrame,
+    quality: pd.DataFrame,
+    profile: BacktestProfile,
+    *,
+    signal_start,
+    signal_end,
+    portfolio_name: str = PORTFOLIO,
+    settlement_prices: pd.DataFrame | None = None,
+) -> dict:
+    """Backtest explicit targets and settle terminal contracts at known prices."""
+    if portfolio_name != PORTFOLIO:
+        raise ValueError(f"unsupported portfolio_name: {portfolio_name}")
+    if not isinstance(profile, BacktestProfile):
+        raise TypeError("profile must be a BacktestProfile")
+    _validate_axes(targets, name="targets")
+    _validate_axes(opens, name="opens")
+    if not targets.index.equals(opens.index) or not targets.columns.equals(opens.columns):
+        raise ValueError("targets axes must exactly match opens axes")
+    if settlement_prices is None:
+        settlement_prices = pd.DataFrame(np.nan, index=targets.index, columns=targets.columns)
+    else:
+        _validate_axes(settlement_prices, name="settlement_prices")
+        if not targets.index.equals(settlement_prices.index) or not targets.columns.equals(settlement_prices.columns):
+            raise ValueError("settlement_prices axes must exactly match targets axes")
+    if not isinstance(events, pd.DataFrame) or (_EVENT_REQUIRED - set(events.columns)):
+        raise ValueError(f"events missing columns: {sorted(_EVENT_REQUIRED - set(events.columns))}")
+    if not isinstance(quality, pd.DataFrame) or not isinstance(quality.index, pd.MultiIndex) or quality.index.nlevels != 2:
+        raise ValueError("quality must be indexed by (date, instrument)")
+    required_quality = {"has_complete_kline", "has_placeholder_kline"}
+    missing_quality = required_quality - set(quality.columns)
+    if missing_quality:
+        raise ValueError(f"quality missing columns: {sorted(missing_quality)}")
+    signal_start, signal_end = _signal_day(signal_start, "signal_start"), _signal_day(signal_end, "signal_end")
+    if signal_start > signal_end:
+        raise ValueError("signal_start must be on or before signal_end")
+    dates, instruments = targets.index, list(targets.columns)
+    base_diagnostics = {
+        "anchor_date": profile.anchor_date,
+        "rebalance_days": profile.rebalance_days,
+        "signal_delay_days": profile.signal_delay_days,
+        "signal_start": _iso(signal_start),
+        "signal_end": _iso(signal_end),
+    }
+    signal_days = [d for d in dates if signal_start <= d <= signal_end and not targets.loc[d].isna().all()]
+    if not signal_days:
+        return {"status": "complete", "portfolio": portfolio_name, "profile_id": profile.profile_id,
+                "scenarios": {n: _empty_scenario(instruments) for n in SCENARIOS},
+                "diagnostics": {**base_diagnostics,
+                                "scheduled_dates": [], "usable_execution_dates": [], "executed_dates": [],
+                                "no_usable_signals": True}}
+    anchor = pd.Timestamp(profile.anchor_date)
+    recurring_schedule = [
+        day for day in dates
+        if (day - anchor).days % profile.rebalance_days == 0
+    ]
+    signal_day_set = set(signal_days)
+    execution_days = [
+        day for day in recurring_schedule
+        if day - _ONE_DAY in signal_day_set
+    ]
+    if not execution_days:
+        raise ValueError("targets contain no signal with a following execution open")
+    # A target panel may include an explicit all-zero row immediately after
+    # the requested signal window.  Treat its next-open execution as the
+    # liquidation boundary, while ignoring any post-window non-zero targets.
+    post_signal_zero_days = [
+        d for d in dates
+        if d > signal_end
+        and d + _ONE_DAY in dates
+        and targets.loc[d].notna().all()
+        and (targets.loc[d] == 0.0).all()
+    ]
+    explicit_zero_execution_days = [d + _ONE_DAY for d in post_signal_zero_days]
+    execution_days = sorted(set(execution_days) | set(explicit_zero_execution_days))
+    first, last = execution_days[0], execution_days[-1]
+    liquidation = (
+        explicit_zero_execution_days[-1]
+        if explicit_zero_execution_days
+        else last + pd.Timedelta(days=profile.rebalance_days)
+    )
+    loop_dates = dates[(dates >= first) & (dates <= min(liquidation, dates[-1]))]
+    boundary_events, intraday_events = {}, {}
+    if not events.empty:
+        ef = events.copy(); times = pd.to_datetime(ef["funding_time"], utc=True)
+        naive = times.dt.tz_convert("UTC").dt.tz_localize(None); edays = naive.dt.normalize()
+        for mask, bucket in ((naive == edays, boundary_events), (naive != edays, intraday_events)):
+            for d, group in ef[mask].groupby(edays[mask]): bucket[d] = group
+    qmap = {( _as_naive_day(d), str(i)): row for (d, i), row in quality.iterrows()}
+    def eligibility_reason(day, inst):
+        row = qmap.get((day - _ONE_DAY, str(inst)))
+        if row is None: return "prior_bar_quality_unknown"
+        if type(row["has_complete_kline"]) not in (bool, np.bool_) or not bool(row["has_complete_kline"]): return "prior_bar_incomplete_kline"
+        if bool(row["has_placeholder_kline"]): return "prior_bar_placeholder_kline"
+        return None
+    def eligible(day, inst): return eligibility_reason(day, inst) is None
+    def signal_row(day):
+        d = day - _ONE_DAY
+        if d not in targets.index:
+            return None
+        if d in post_signal_zero_days:
+            return targets.loc[d]
+        if not (signal_start <= d <= signal_end):
+            return None
+        return targets.loc[d]
+    def placeholder_same_day(day, inst):
+        row = qmap.get((day, str(inst)))
+        return row is not None and bool(row["has_placeholder_kline"])
+    settlement_dates = {
+        inst: settlement_prices.index[settlement_prices[inst].map(_valid_price)].min()
+        for inst in instruments
+        if settlement_prices[inst].map(_valid_price).any()
+    }
+    def contract_ended(day, inst):
+        terminal_day = settlement_dates.get(inst)
+        return terminal_day is not None and day > terminal_day
+    ctx = _Context(profile=profile, opens=opens, quality=quality, instruments=instruments,
+                   loop_dates=loop_dates, scheduled_set=set(execution_days), signal_row=signal_row,
+                   boundary_events=boundary_events, intraday_events=intraday_events, eligible=eligible,
+                   eligibility_reason=eligibility_reason,
+                   placeholder_same_day=placeholder_same_day,
+                   settlement_prices=settlement_prices, contract_ended=contract_ended,
+                   liquidation=liquidation, missing_tail=liquidation > dates[-1], strict_target=True)
+    scenarios = {"gross": _run_scenario(ctx, fees=False, funding=False),
+                 "trading_net": _run_scenario(ctx, fees=True, funding=False),
+                 "all_costs": _run_scenario(ctx, fees=True, funding=profile.include_funding)}
+    status = "complete" if all(s["status"] == "complete" for s in scenarios.values()) else "incomplete"
+    orders = scenarios["gross"]["orders"]
+    executed = [_iso(d) for d in sorted(orders.loc[orders.status == "filled", "date"].unique())] if not orders.empty else []
+    return {"status": status, "portfolio": portfolio_name, "profile_id": profile.profile_id,
+            "scenarios": scenarios,
+            "diagnostics": {**base_diagnostics,
+                            "scheduled_dates": [_iso(d) for d in execution_days],
+                            "usable_execution_dates": [_iso(d) for d in execution_days],
+                            "executed_dates": executed, "no_usable_signals": False}}
 
 
 def run_backtest(
@@ -588,6 +786,9 @@ def run_backtest(
     def placeholder_same_day(day: pd.Timestamp, instrument) -> bool:
         return placeholder.get((day, str(instrument)), False)
 
+    def eligibility_reason(day: pd.Timestamp, instrument) -> str | None:
+        return "prior_bar_ineligible" if not eligible(day, instrument) else None
+
     ctx = _Context(
         profile=profile,
         opens=opens,
@@ -599,9 +800,13 @@ def run_backtest(
         boundary_events=boundary_events,
         intraday_events=intraday_events,
         eligible=eligible,
+        eligibility_reason=eligibility_reason,
         placeholder_same_day=placeholder_same_day,
+        settlement_prices=pd.DataFrame(np.nan, index=opens.index, columns=opens.columns),
+        contract_ended=lambda day, instrument: False,
         liquidation=liquidation,
         missing_tail=missing_tail,
+        strict_target=False,
     )
 
     scenarios = {
@@ -638,4 +843,4 @@ def run_backtest(
     }
 
 
-__all__ = ["LEDGER_COLUMNS", "ORDER_COLUMNS", "PORTFOLIO", "SCENARIOS", "run_backtest"]
+__all__ = ["LEDGER_COLUMNS", "ORDER_COLUMNS", "PORTFOLIO", "SCENARIOS", "run_backtest", "run_target_backtest"]

@@ -125,10 +125,11 @@ def _ast_payload(node: Node) -> dict[str, Any]:
 def _runtime_module_hashes() -> dict[str, str]:
     package_dir = Path(__file__).resolve().parent
     return {
-        f"Genetic_Algorithm/{name}.py": hashlib.sha256(
-            (package_dir / f"{name}.py").read_bytes()
+        relative: hashlib.sha256(
+            (package_dir.parent / relative).read_bytes()
         ).hexdigest()
-        for name in _RUNTIME_MODULES
+        for relative in (*[f"Genetic_Algorithm/{name}.py" for name in _RUNTIME_MODULES],
+                         "factor_common/grouping.py", "factor_common/profiles.py")
     }
 
 
@@ -152,6 +153,8 @@ def _render_module(
     warmup: int,
     direction: int,
 ) -> str:
+    from .operators import GP_SEMANTICS_VERSION
+    runtime_hashes = _runtime_module_hashes()
     description = f"GP export {identifier} (expression {full_hash})"
     return f'''"""Exported GP factor {identifier}.
 
@@ -162,6 +165,7 @@ eligibility context injected by factor_common (``context_eligible``).
 """
 
 from Genetic_Algorithm.evaluator import evaluate_tree
+from Genetic_Algorithm.export import verify_export_runtime
 from Genetic_Algorithm.expression import (
     Node,
     expression_hash,
@@ -175,13 +179,16 @@ META = {{"factor_name": "{identifier}", "author": "genetic_algorithm",
         "description": {description!r}}}
 
 _EXPRESSION_HASH = "{full_hash}"
+_GP_SEMANTICS_VERSION = {GP_SEMANTICS_VERSION}
+_RUNTIME_HASHES = {runtime_hashes!r}
+verify_export_runtime(_GP_SEMANTICS_VERSION, _RUNTIME_HASHES)
 
 _AST = {ast_payload!r}
 
 SETTING = {{"data_needed": {data_needed!r}, "universe": "historical_top50",
            "warmup_bars": {warmup}, "preprocessing": "none",
            "params": {{}}, "factor_direction": {direction},
-           "context_eligible": True}}
+           "context_eligible": True, "group_tie_policy": "symmetric_fractional"}}
 
 
 def _build_node(payload):
@@ -196,6 +203,7 @@ def _build_node(payload):
 
 
 def calc_factor(data_ctx):
+    verify_export_runtime(_GP_SEMANTICS_VERSION, _RUNTIME_HASHES)
     tree = _build_node(_AST)
     if expression_hash(tree) != _EXPRESSION_HASH:
         raise ValueError(
@@ -217,10 +225,13 @@ def _write_manifest(
     wrapper_sha256: str,
     runtime_hashes: dict[str, str],
 ) -> None:
+    from .operators import GP_SEMANTICS_VERSION
     write_artifact(
         manifest_path,
         {
-            "export_version": 1,
+            "export_version": 2,
+            "gp_semantics_version": GP_SEMANTICS_VERSION,
+            "group_tie_policy": "symmetric_fractional",
             "identifier": identifier,
             "expression_hash": full_hash,
             "ast": ast_payload,
@@ -237,6 +248,12 @@ def _write_manifest(
     )
 
 
+def verify_export_runtime(semantics_version: int, runtime_hashes: Mapping[str, str]) -> None:
+    from .operators import GP_SEMANTICS_VERSION
+    if semantics_version != GP_SEMANTICS_VERSION or dict(runtime_hashes) != _runtime_module_hashes():
+        raise ValueError("GP runtime/semantics mismatch: re-export or use the original runtime")
+
+
 def export_factor(candidate: Any, destination: str | Path, *, direction: int) -> ExportResult:
     """Export one candidate as a regular factor module under ``destination``.
 
@@ -249,6 +266,8 @@ def export_factor(candidate: Any, destination: str | Path, *, direction: int) ->
     direction = _validate_direction(direction)
     tree = canonical_tree(_candidate_tree(candidate))
     validate_node_attributes(tree)
+    from .expression import expression_value_domain
+    expression_value_domain(tree)
     full_hash = expression_hash(tree)
     declared = _candidate_expression_id(candidate)
     if declared is not None and declared != full_hash:
@@ -293,6 +312,9 @@ def export_factor(candidate: Any, destination: str | Path, *, direction: int) ->
             )
         if manifest_path.exists():
             manifest = read_verified_manifest(manifest_path)
+            verify_export_runtime(manifest.get("gp_semantics_version"), manifest.get("runtime_module_hashes", {}))
+            if manifest.get("wrapper_sha256") != hashlib.sha256(target.read_bytes()).hexdigest():
+                raise ValueError("export wrapper hash mismatch")
             if manifest.get("expression_hash") != full_hash:
                 raise FileExistsError(
                     f"export manifest collision at {manifest_path}: recorded "
@@ -306,6 +328,9 @@ def export_factor(candidate: Any, destination: str | Path, *, direction: int) ->
                     f"{manifest.get('factor_direction')}, requested {direction}"
                 )
         else:
+            expected_source = _render_module(identifier, full_hash, ast_payload, data_needed, warmup, direction)
+            if target.read_text(encoding="utf-8") != expected_source:
+                raise ValueError("cannot certify existing export with unknown runtime semantics")
             _write_manifest(
                 manifest_path,
                 identifier=identifier,

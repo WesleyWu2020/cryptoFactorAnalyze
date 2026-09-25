@@ -7,6 +7,7 @@ eligibility context injected by factor_common (``context_eligible``).
 """
 
 from Genetic_Algorithm.evaluator import evaluate_tree
+from Genetic_Algorithm.export import verify_export_runtime
 from Genetic_Algorithm.expression import (
     Node,
     expression_hash,
@@ -20,13 +21,16 @@ META = {"factor_name": "GP_ed2c09f43439ff39", "author": "genetic_algorithm",
         "description": 'GP export GP_ed2c09f43439ff39 (expression ed2c09f43439ff3954db0897c3a09b2e978608fe24d2452bbe2c019a6a05c64a)'}
 
 _EXPRESSION_HASH = "ed2c09f43439ff3954db0897c3a09b2e978608fe24d2452bbe2c019a6a05c64a"
+_GP_SEMANTICS_VERSION = 2
+_RUNTIME_HASHES = {'Genetic_Algorithm/expression.py': '4a212641018c469b852c392d52f7148d19d6ec2a559af86dc5f5c4cf199d0720', 'Genetic_Algorithm/evaluator.py': '1fdae9296bff6404d00bfaa3d0b402f74c328a29c355212507453c089c6f55d8', 'Genetic_Algorithm/operators.py': '0937154310e95e563fe54a49c4214fdb4139496d5817eefcb15ac0332b761aac', 'Genetic_Algorithm/features.py': 'fb7f6f0e2ba1b8c4cf155db70398a2dd1f5ff3be1d3b939eae5a8c52695eb017', 'factor_common/grouping.py': '099cfb75b84d8dd4f3c06c85c42f027a236ffb4bcaf797178ab68105eb0c5596', 'factor_common/profiles.py': 'c913171e2bfc0a45b3db1e2aa138604e902e61cfab863ac4a8203210237ed042'}
+verify_export_runtime(_GP_SEMANTICS_VERSION, _RUNTIME_HASHES)
 
 _AST = {'op': 'negate', 'field': None, 'window': None, 'children': [{'op': 'rolling_mean', 'field': None, 'window': 3, 'children': [{'op': 'add', 'field': None, 'window': None, 'children': [{'op': 'body_relative', 'field': None, 'window': None, 'children': []}, {'op': 'rolling_max', 'field': None, 'window': 20, 'children': [{'op': 'range_relative', 'field': None, 'window': None, 'children': []}]}]}]}]}
 
 SETTING = {"data_needed": ['close', 'high', 'low', 'open'], "universe": "historical_top50",
            "warmup_bars": 21, "preprocessing": "none",
            "params": {}, "factor_direction": 1,
-           "context_eligible": True}
+           "context_eligible": True, "group_tie_policy": "symmetric_fractional"}
 
 
 def _build_node(payload):
@@ -41,6 +45,7 @@ def _build_node(payload):
 
 
 def calc_factor(data_ctx):
+    verify_export_runtime(_GP_SEMANTICS_VERSION, _RUNTIME_HASHES)
     tree = _build_node(_AST)
     if expression_hash(tree) != _EXPRESSION_HASH:
         raise ValueError(

@@ -420,6 +420,11 @@ def select_validation(
                     if not isinstance(check, Mapping) or check.get("passed") is not True:
                         failures.extend((check.get("reasons") if isinstance(check, Mapping) else None)
                                         or [f"missing or failed validation {key}"])
+            if _value(config, "exposure_residual_mode", "off") == "gate":
+                check = result.get("exposure_residual")
+                if not isinstance(check, Mapping) or check.get("passed") is not True:
+                    failures.extend((check.get("reasons") if isinstance(check, Mapping) else None)
+                                    or ["missing or failed Barra residual validation"])
             if _value(config, "validation_stability", False):
                 stability = result.get("cost_stability")
                 if not isinstance(stability, Mapping) or stability.get("passed") is not True:

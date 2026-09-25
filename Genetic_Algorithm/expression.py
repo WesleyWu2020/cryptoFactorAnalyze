@@ -9,8 +9,11 @@ from typing import Any
 
 from .features import TERMINAL_DEPENDENCIES, TERMINAL_FIELDS, TERMINAL_HISTORY
 from .operators import (
-    COMMUTATIVE_OPERATORS, OPERATORS, OPERATOR_ARITY, ROLLING_OPERATORS,
-    WINDOW_OPERATORS,
+    COMMUTATIVE_OPERATORS, LAG_STYLE_OPERATORS, MIN_OPERATOR_WINDOW,
+    MIXED_DIMENSION_OPERATORS, OPERATORS, OPERATOR_ARITY,
+    PRESERVE_DIMENSION_OPERATORS, RATIO_DIMENSION_OPERATORS,
+    ROLLING_OPERATORS, TERMINAL_DIMENSIONS, WINDOW_OPERATORS,
+    combine_dimensions,
 )
 
 
@@ -44,7 +47,7 @@ def _stats(node: Node, depth: int = 0) -> tuple[int, int, int, set[str]]:
     history = max((item[2] for item in child_stats), default=0)
     if node.op in ROLLING_OPERATORS:
         history += node.window - 1
-    elif node.op in {"lag", "delta"}:
+    elif node.op in LAG_STYLE_OPERATORS:
         history += node.window
     fields = set().union(*(item[3] for item in child_stats))
     return max_depth, count, history, fields
@@ -68,12 +71,37 @@ def validate_node_attributes(node: Node) -> None:
     if node.op in WINDOW_OPERATORS:
         if type(node.window) is not int or node.window <= 0:
             raise ValueError("window must be positive")
+        minimum = MIN_OPERATOR_WINDOW.get(node.op)
+        if minimum is not None and node.window < minimum:
+            raise ValueError(
+                f"operator {node.op} requires window >= {minimum}, got {node.window}"
+            )
     elif node.window is not None:
         raise ValueError("non-window operator cannot have window")
 
 
+def expression_dimension(node: Node) -> str:
+    """Infer the dimension (量纲) of a tree bottom-up; illegal combos raise."""
+    validate_node_attributes(node)
+    if node.op not in OPERATOR_ARITY:
+        field = node.field or node.op
+        if field not in TERMINAL_DIMENSIONS:
+            raise ValueError(f"unknown terminal dimension: {field}")
+        return TERMINAL_DIMENSIONS[field]
+    child_dimensions = [expression_dimension(child) for child in node.children]
+    if node.op in PRESERVE_DIMENSION_OPERATORS:
+        return child_dimensions[0]
+    if node.op in RATIO_DIMENSION_OPERATORS:
+        return "ratio"
+    if node.op in MIXED_DIMENSION_OPERATORS:
+        return "mixed"
+    return combine_dimensions(node.op, child_dimensions[0], child_dimensions[1])
+
+
 def validate_tree(node: Node, config: Any) -> None:
     depth, count, history, fields = _stats(node)
+    expression_dimension(node)
+    expression_value_domain(node)
     max_depth = _config_value(config, "max_depth", 4)
     max_nodes = _config_value(config, "max_nodes", 15)
     max_history = _config_value(config, "max_history", 180)
@@ -85,6 +113,27 @@ def validate_tree(node: Node, config: Any) -> None:
         raise ValueError("tree exceeds max history")
     if any(field not in TERMINAL_FIELDS for field in fields):
         raise ValueError("unknown field")
+
+
+def expression_value_domain(node: Node) -> str:
+    """Conservative sign inference, distinct from physical dimensions."""
+    domains = [expression_value_domain(child) for child in node.children]
+    if node.op == "rolling_hit_rate":
+        if domains[0] in {"positive", "negative", "nonpositive", "zero"}:
+            raise ValueError("degenerate rolling_hit_rate: input has a fixed positive/nonpositive sign")
+        return "nonnegative"
+    if node.op in {"rank", "ts_rank"}:
+        return "positive"
+    if node.op in {"abs", "rolling_std", "rolling_mad", "rolling_iqr",
+                   "rolling_downside_std", "rolling_r2", "efficiency_ratio", "rolling_cv"}:
+        return "nonnegative"
+    if node.op == "negate":
+        return {"positive": "negative", "negative": "positive",
+                "nonnegative": "nonpositive", "nonpositive": "nonnegative",
+                "zero": "zero"}.get(domains[0], "unknown")
+    if node.op in {"lag", "rolling_mean", "rolling_min", "rolling_max", "rolling_median"}:
+        return domains[0]
+    return "unknown"
 
 
 def canonical_tree(node: Node) -> Node:
@@ -127,5 +176,5 @@ def node_count(node: Node) -> int:
 
 __all__ = [
     "Node", "validate_tree", "canonical_tree", "expression_hash", "required_fields",
-    "history_days", "node_count",
+    "history_days", "node_count", "expression_dimension",
 ]

@@ -1,0 +1,10 @@
+{
+  "folds": 1,
+  "outputs": {
+    "lightgbm": {
+      "predictions": "models/lightgbm/predictions.parquet",
+      "quarters": 1
+    }
+  },
+  "status": "complete"
+}

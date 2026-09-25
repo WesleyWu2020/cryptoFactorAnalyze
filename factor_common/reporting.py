@@ -60,7 +60,7 @@ import pandas as pd
 from pyecharts import options as opts
 from pyecharts.charts import Bar, Line
 
-from .grouping import assign_groups
+from .grouping import group_weights
 
 _TEMPLATE_PATH = Path(__file__).resolve().parent / "templates" / "report.html"
 
@@ -551,6 +551,7 @@ def _summary_section(result, start, end) -> str:
     rows = [
         ["Factor", _esc(metadata.get("factor_name", "unknown"))],
         ["Profile", _fmt(profile_id)],
+        ["Group tie policy", _fmt(metadata.get("group_tie_policy", "legacy_instrument"))],
         ["Factor direction", _fmt(metadata.get("factor_direction"))],
         ["Evaluation status", _esc(result.get("status", "unknown"))],
         ["Split date", _fmt(split.get("split_date"))],
@@ -682,8 +683,9 @@ def _latest_groups_section(result) -> str:
         return _unavailable(
             "Latest groups", "metadata does not record a valid n_groups"
         )
-    groups, _ = assign_groups(factor_value, n_groups)
-    usable = groups.dropna(how="all")
+    tie_policy = result["metadata"].get("group_tie_policy", "legacy_instrument")
+    weights, _ = group_weights(factor_value, n_groups, tie_policy)
+    usable = weights["group_1"].dropna(how="all")
     if usable.empty:
         return _unavailable(
             "Latest groups",
@@ -692,12 +694,13 @@ def _latest_groups_section(result) -> str:
     latest = usable.index[-1]
     rows = []
     for group_id in range(1, n_groups + 1):
-        members = groups.loc[latest]
-        members = members[members == group_id].index
+        member_weights = weights[f"group_{group_id}"].loc[latest]
+        members = member_weights[member_weights > 0].index
         entries = []
         for instrument in sorted(members, key=str):
             value = factor_value.loc[latest, instrument]
-            entries.append(f"{instrument} ({float(value):.4f})")
+            weight_label = f", weight {member_weights[instrument]:.2%}" if tie_policy == "symmetric_fractional" else ""
+            entries.append(f"{instrument} ({float(value):.4f}{weight_label})")
         rows.append([_esc(f"group_{group_id}"), _esc(", ".join(entries))])
     heading = (
         f'<p class="note">Group membership on {_esc(latest.date().isoformat())}'

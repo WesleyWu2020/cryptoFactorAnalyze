@@ -137,12 +137,12 @@ def _apply(node: Node, data_ctx: dict[str, pd.DataFrame], eligible: pd.DataFrame
     if node.op not in operators.OPERATORS:
         return features.evaluate_terminal(node.field or node.op, data_ctx)
     children = [_apply(child, data_ctx, eligible) for child in node.children]
-    if node.op == "rank":
-        return operators.cross_sectional_rank(children[0], eligible)
-    if node.op in {"lag", "delta", "rolling_mean", "rolling_std", "rolling_min", "rolling_max"}:
-        return operators.OPERATORS[node.op](children[0], node.window)
+    if node.op in {"rank", "cross_sectional_zscore"}:
+        return operators.OPERATORS[node.op](children[0], eligible)
     if node.op == "rolling_corr":
         return operators.rolling_correlation(children[0], children[1], node.window)
+    if node.op in operators.WINDOW_OPERATORS:
+        return operators.OPERATORS[node.op](children[0], node.window)
     return operators.OPERATORS[node.op](*children)
 
 

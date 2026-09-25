@@ -1,5 +1,72 @@
 # Daily genetic-algorithm workflow
 
+## 第三批：预测期限与执行周期
+
+`configs/daily_5groups_all_costs.json` 已启用 `horizon_diagnostics`。2025 验证
+结果的 `horizon_execution` 分开记录两组预先确定的对照：
+
+- `prediction_horizons=[1,3,7,14]`：信号日 `t` 在 `t+1` 开盘入场、持有
+  指定天数的 Rank IC。按退出日剔除验证尾部标签，方向沿用训练结果。
+- `execution_intervals=[1,3,7]`：按固定锚点每隔指定天数调仓，保留相同的
+  下一日开盘执行、五分组、手续费、滑点和资金费。每条账本都在阶段末日
+  之前平仓，空仓日补零后按同一验证日历计算可比 Sharpe。
+
+两组结果只作诊断；正式回放和入选仍固定每天调仓、`hold_days=1`。
+多日标签彼此重叠，其 IC 均值不作为独立样本显著性检验。测试多个期限
+不能据此挑选 2025 表现最好的周期再声称它是未调参的结果。
+可在新运行配置中调整两个有序周期列表，且都必须包含 1 日基线。
+本批变更：`Genetic_Algorithm/horizon.py`、`cost_fitness.py`、`config.py`、
+`cli.py`、`search.py`、`configs/daily_5groups_all_costs.json`、本说明及
+`tests/genetic_algorithm/test_horizon_execution.py`、`test_cli.py`。
+
+## 第二批：风格暴露与残差信号验证
+
+新运行的配置可设 `"exposure_residual_mode": "diagnostic"`，在 2025 验证阶段
+把 Barra 九类当日风格暴露及残差写入 `validation.json` 每个候选的
+`exposure_residual`。改为 `"gate"` 时，残差必须有足够的共同样本，且扣除
+手续费、滑点和资金费后总收益及 Sharpe 均为正，候选才可入选；默认 `off`。
+`configs/daily_5groups_all_costs.json` 已显式开启诊断模式，不改变原有
+入选门槛；确认数据覆盖后可按需切换为 `gate`。
+
+风格数据按验证阶段末日截断，一次加载并供该阶段所有候选复用。原信号和残差
+只在残差有效的同一批日期、币种上比较，沿用训练确定的方向、五分组等执行
+设置；记录联合回归 R²、有效天数、同样本 IC 与两条完整费用账本指标。
+样本或回归不足会写明原因，`gate` 模式下拒绝候选。该检查增加验证耗时，
+并改变验证判据，需在新运行目录重新完成搜索及验证，不能复用旧冻结结果。
+标准化后日残差标准差不高于 `1e-8` 时按数值零处理，避免纯浮点误差
+形成可交易排序。
+本批主要变更：`Genetic_Algorithm/exposure.py`、`config.py`、`cli.py`、
+`selection.py`、`search.py`、`configs/daily_5groups_all_costs.json`、本说明，
+以及 `tests/genetic_algorithm/test_exposure_residual.py`、`test_cli.py`。
+
+## GP 计算语义 v2
+
+新运行统一使用 `symmetric_fractional` 同值分组：跨分组边界的同值标的
+平均分配对应名额；全部同值时多空目标为零，抵消后不重新放大敞口。
+训练、正式回放、导出因子的默认设置和报告采用相同口径。通用回测默认仍为
+`legacy_instrument`，旧 `assign_groups` 整数分组接口保持不变。
+
+`rolling_hit_rate` 将缺失与非有限输入保留为 NaN，窗口必须完整；真实零值
+按未命中处理。表达式校验保守推导值域，拒绝对严格正数排名或恒非正输入
+计算正值占比等确定退化组合；非负输入仍可通过零值频率表达信息。
+
+导出记录语义版本及运行时哈希，加载与调用时检查兼容性。无版本的旧 GP
+导出由标准 loader 拒绝；旧运行应使用原代码环境复现，或在新的输出目录
+重新导出、评估。不要覆盖旧结果，也不要复用旧适应度或冻结结论。
+训练归档版本升至 `daily-gp-search-v2`；冻结和多种子实验指纹包含共享分组、
+执行 profile 与相关回放代码。源码版本变化后需新建实验目录。
+
+验证：`./.venv/bin/python -m pytest tests/genetic_algorithm/test_signal_semantics.py -q`。
+
+本批变更文件（路径相对仓库根目录）：
+
+- 计算与诊断：`Genetic_Algorithm/operators.py`、`expression.py`、`cost_fitness.py`。
+- 分组与报告：`factor_common/grouping.py`、`profiles.py`、`loader.py`、`manager.py`、`reporting.py`。
+- 运行与版本：`Genetic_Algorithm/export.py`、`replay.py`、`search.py`、`cli.py`、`experiment.py` 及本说明。
+- 回归：`tests/genetic_algorithm/test_signal_semantics.py`、`test_cli.py`、`test_end_to_end.py`，以及 `tests/factor_common/test_profiles.py`。
+
+回放同时检查市场数据末日覆盖指定阶段末日，避免缺少执行尾部数据时被标为完成。
+
 This package searches causal daily cross-sectional formulas.  A formula at day
 `t` may use only data available at `t` or earlier: rolling windows are trailing,
 membership is point-in-time, and labels are never inputs to the formula.
@@ -186,17 +253,22 @@ walk-forward 的训练及测试账本在内存中计算，不产生 HTML 或 `fa
 
 ### 固定基准增量研究与邻近参数检验
 
-`daily_5groups_all_costs.json` 现默认启用 `reference_factor=064185107a8f267e`
+`daily_5groups_all_costs.json` 现默认固定三个已通过候选作为基准：
+`064185107a8f267e + a37c60cf4492e9f1 + 0006a47b612eaf9b`。
 及 `validation_parameter_stability=true`，原 bash 入口自动读取此配置。
 基准公式与方向（-1）固定在 `incremental.py`，不从旧测试收益文件加载。
-训练只用 2024：原扣费后 Sharpe 目标减去
+训练只用 2024。默认训练目标为原扣费后 Sharpe 目标减去
 `reference_similarity_penalty * max(0, 收益相关性, 同向持仓重合度)`；
+设置 `training_reference_objective=portfolio_incremental_sharpe` 时，保留原有单因子
+收益、Sharpe、季度稳定性、回撤和覆盖率门槛，并改为按候选加入固定参考组合后的
+2024 年扣费后 Sharpe 增量排序。默认值 `similarity_penalty` 保持旧行为不变；
 相关性达到 0.8 或持仓重合度达到 0.7 时拒绝候选。基准账本每阶段缓存一次。
 
 2025 保留原全年、季度、成本压力及家族筛选，再要求与基准不过度相似，
-且固定组合的扣费后 Sharpe 严格高于基准（默认增量阈值 0）。组合为初始
-资本各占 50% 的两个独立账户，不跨账户再平衡，不调整候选方向或优化权重；
-组合收益从两个已扣费账户的净值合成，不代表合并持仓净额后的执行模拟。
+且固定组合的扣费后 Sharpe 严格高于基准（默认增量阈值 0）。三个基准按
+初始资本等权分别运行，候选加入后四个账户初始各占 25%；不跨账户再平衡，
+不调整候选方向或优化权重。组合收益从各自已扣费净值合成，不代表合并持仓
+净额后的执行模拟。训练时候选分别与三个基准计算收益相关和持仓重合度。
 
 逐个窗口做 ±20% 扰动（四舍五入、去重、保持正窗口），默认至少 75% 的
 变体净收益和 Sharpe 均 > 0。保持原公式及方向，不选择表现最好的变体。
@@ -208,3 +280,100 @@ walk-forward 的训练及测试账本在内存中计算，不产生 HTML 或 `fa
 2026 不参与上述计算或门槛调整。由于基准是查看过 2026 后选出的，整个流程
 仍属于重复研究，新增筛选不能恢复历史测试的独立性，也可能筛出零个候选。
 邻近参数每个窗口最多增加两次验证回测；本次代码修改不自动启动完整训练。
+
+### 连续账本稳定性与固定多种子实验
+
+配置 `stability_mode=continuous_leave_best_out` 后，2024 Q1 仅用于冻结方向，
+Q2–Q4 使用一条连续的全成本账本评分。2025 也从全年连续账本计算季度收益、
+财富利润贡献和集中度。集中度超过配置值只产生适应度惩罚；验证新增硬门槛：
+删除利润贡献最大季度的日收益后，剩余净收益和 Sharpe 必须分别超过
+`validation_min_remaining_return` 与 `validation_min_remaining_sharpe`。
+组合诊断用同一组删除日期比较参考组合与加入候选后的 Sharpe，避免区间错位。
+
+`tmp/run_multi_seed_daily_gp.sh` 默认预先冻结种子 47–51、搜索预算、代码哈希、
+2024 数据指纹和历史归档哈希。各种子独立读取同一个历史归档，不串行继承新结果；
+全部完成后仅合并各自 `deduplication.accepted`，按 2024 因子值跨种子去重，
+最多选 20 个候选统一进行一次 2025 验证。候选来源记录在
+`pooled/candidate_sources.json`，实时代数进度记录在各 seed 目录的
+`search_progress.json`，汇总状态为 `experiment_progress.json`。
+
+```bash
+bash /Users/dmiwu/work/PythonProject/cryptoFactorAnalyze/tmp/run_multi_seed_daily_gp.sh
+```
+
+可通过 `GP_SEEDS`、`GP_EXPERIMENT_DIR`、`GP_CONFIG` 和 `GP_ARCHIVE` 覆盖默认值。
+同一实验目录允许跳过已完成种子并续跑后续阶段；清单冻结后源码变化会终止合并，
+需要新建实验目录。
+
+### 训练期邻近参数稳定性 A/B
+
+配置 `training_parameter_stability=true` 后，每代先按原适应度选择尚未检查的前
+`training_parameter_stability_top_k` 个含窗口公式。每个窗口分别做一次约 -20%
+和 +20% 的单点扰动，只读取固定 2024 训练阶段，并沿用原公式已经冻结的方向。
+变体使用相同全成本账本；中位净收益退化、中位 Sharpe 退化和正收益变体比例不足
+共同形成只减不加的适应度惩罚。公式 hash 的结果在整个搜索内缓存，不重复回测。
+每代检查公式数和实际新增扰动回测数分别写入 `generations.jsonl` 与进度文件。
+
+`daily_5groups_continuous_multiseed_parameter_stability.json` 是实验组配置；原
+`daily_5groups_continuous_multiseed.json` 保持对照组行为。下面的入口固定用相同
+两个 seed（默认 52、53）、种群、代数、历史归档和 2025 验证规则依次运行两组：
+
+```bash
+bash /Users/dmiwu/work/PythonProject/cryptoFactorAnalyze/tmp/run_parameter_stability_ab.sh
+```
+
+两组使用相同种群、代数和尝试上限，但缓存命中和无效公式比例可能不同，因此实际
+唯一公式评估数不保证相等。实验组还会额外执行扰动回测；这些调用被单独计数。
+
+### 可选实验：局部变异、行为分区、分层精英与 DSR 诊断
+
+`configs/daily_5groups_behavior_elites.json` 开启下面所有功能；默认配置的开关均为
+关闭，保留原算法。该配置沿用原 2025 验证与 2026 报告规则，不自动启动训练。
+各开关可单独消融；分层精英必须同时开启训练参数稳定性。
+
+* `structured_mutation`：在原变异概率之内，用 `mutation_weights` 选择窗口、字段、
+  剪枝、子树四类变异（默认 35%/25%/15%/25%）。窗口取相邻的合法配置值；字段
+  必须同家族且同量纲；剪枝只移除一层同量纲的一元节点，再重新评估，不能视为
+  数学等价化简。无合法修改时返回父代，日志记录 attempts/changed，不冒充新公式。
+* `semantic_generation`：复用现有 `expression_dimension`，在生成和交叉阶段检查
+  类型，禁止任何子表达式为 mixed。`dimensionless_probability=0.75` 是生成目标
+  偏好，不保证最终种群恰好占 75%。最多尝试 24 次后回退到合法字段。该约束也会
+  排除原量纲系统将输出标为 mixed 的 safe_log/signed_sqrt 等算子，这是实验限制。
+* `behavior_diversity`：用 2024 评分账本的换手率、与固定参考因子的最大有符号
+  收益相关、最大同侧持仓重叠、市场 beta 划分固定格子。市场代理是前一日已知
+  成分的等权开盘到开盘收益；不用未来成分、不填充缺价。无参考时相关与重叠进入
+  缺失格子，不当成零。分区边界固定在 `research.BEHAVIOR_BINS`，不能按2025/2026
+  调整。保留时优先各格最优者，每格最多 `behavior_cell_capacity=2`，父代先均匀
+  抽格子再在格内竞赛。不是完整 MAP-Elites；是有容量上限的行为分区精英实现。
+  行为分区开启时替代训练种群的字段家族轮流配额，最终家族筛选仍然生效。
+* `layered_elites`：探索池按未扣扰动惩罚的基础分排序，每代至多检查 top_k 个
+  尚未检查的合格候选（按行为分区分配名额）。精英池只比较已检查后的分数；
+  扣分后不再大于零的个体不能成为精英。无窗口公式记录不适用、零扰动成本。
+  每个公式只检查一次，最终仅输出已检查精英。探索保留至少30%的种群名额，
+  每代先生成 ceil(population*0.30) 个缓存中不存在的合法随机公式，再生成其余
+  子代；小种群至少保留一个精英位置。新结构名额不足时明确报错。早期精英不足
+  时探索池补位；分区容量可能使实际保留人数小于 population，但每代评估池仍
+  以 population 为目标。旧精英也参与下一代分区竞争。
+* `dsr_diagnostics`：只记录诊断，不改适应度、方向、候选门槛或验证规则。
+  `search_research.json` 对 `dsr_effective_trials=[1,10,100]` 分别报告条件 DSR。
+  用日频 Sharpe、偏度、非超额峰度和所有有账本试验（含拒绝候选）的 Sharpe
+  离散度，假设零均值原假设。有效试验次数是外部假设，绝非公式数的替代名字；
+  超过可用试验数量的情景标为 unavailable。没有估计真实独立试验数，也没有
+  校正完整自适应搜索、收益序列自相关或覆盖率过滤后的存活偏差。因此不能解释
+  为未来盈利概率，不能用单次公式统计宣称整个搜索已经消除过拟合。
+
+新增诊断只接受固定 2024 训练阶段。2025 不参与分区、繁殖或 DSR 统计。
+`cost_fitness.json` 保留每个公式的 behavior、return_moments 和扰动前后分数；
+`search_research.json` 保存最终分区及 DSR 假设。`generations.jsonl` 和进度文件
+新增累计公式评估/扰动检查/扰动回测数、已选合格数、精英/探索人数、分区数和
+局部变异计数。原 unique_evaluations / parameter_stability_* 字段仍是单代值。
+这些新增源码也纳入训练与冻结清单的源码指纹。
+
+验证命令：
+
+```bash
+./.venv/bin/python -m pytest tests/genetic_algorithm/test_research_search.py -q
+```
+
+已有多种子入口可通过 GP_CONFIG 指向此新配置；应另建实验目录。要判断具体机制
+的贡献，分别关闭其余新开关进行单变量对照，并同时报告实际公式数与扰动回测成本。

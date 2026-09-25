@@ -1,0 +1,92 @@
+{
+  "action": "rebalance",
+  "data_cutoff": "2026-03-30",
+  "execute_after": "2026-03-31T00:00:00Z",
+  "execution_date": "2026-03-31",
+  "expires_at": "2026-04-01T00:00:00Z",
+  "generated_at": "2026-09-21T07:59:53.934652+00:00",
+  "run_id": "20260921T075953985598Z_70334144",
+  "schema_version": 1,
+  "signal_date": "2026-03-30",
+  "signal_id": "e72d7ef5814d7fa656ef01ac",
+  "strategy_id": "composite_portfolio_pruned8",
+  "strategy_version": 1,
+  "targets": [
+    {
+      "instrument": "BNBUSDT",
+      "target_weight": 0.02777777777777777
+    },
+    {
+      "instrument": "BSVUSDT",
+      "target_weight": -0.024999999999999994
+    },
+    {
+      "instrument": "BTCUSDT",
+      "target_weight": 0.02777777777777777
+    },
+    {
+      "instrument": "DASHUSDT",
+      "target_weight": -0.024999999999999994
+    },
+    {
+      "instrument": "ENAUSDT",
+      "target_weight": 0.02777777777777777
+    },
+    {
+      "instrument": "ETHUSDT",
+      "target_weight": 0.02777777777777777
+    },
+    {
+      "instrument": "JUPUSDT",
+      "target_weight": -0.024999999999999994
+    },
+    {
+      "instrument": "LTCUSDT",
+      "target_weight": 0.02777777777777777
+    },
+    {
+      "instrument": "MORPHOUSDT",
+      "target_weight": -0.024999999999999994
+    },
+    {
+      "instrument": "MUSDT",
+      "target_weight": -0.024999999999999994
+    },
+    {
+      "instrument": "NEARUSDT",
+      "target_weight": 0.02777777777777777
+    },
+    {
+      "instrument": "PIPPINUSDT",
+      "target_weight": -0.024999999999999994
+    },
+    {
+      "instrument": "PUMPUSDT",
+      "target_weight": -0.024999999999999994
+    },
+    {
+      "instrument": "SOLUSDT",
+      "target_weight": 0.02777777777777777
+    },
+    {
+      "instrument": "TRXUSDT",
+      "target_weight": 0.02777777777777777
+    },
+    {
+      "instrument": "UNIUSDT",
+      "target_weight": -0.024999999999999994
+    },
+    {
+      "instrument": "WLFIUSDT",
+      "target_weight": -0.024999999999999994
+    },
+    {
+      "instrument": "XTZUSDT",
+      "target_weight": 0.02777777777777777
+    },
+    {
+      "instrument": "ZROUSDT",
+      "target_weight": -0.024999999999999994
+    }
+  ]
+}

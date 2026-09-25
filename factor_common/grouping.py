@@ -1,6 +1,6 @@
 """Deterministic cross-sectional grouping and portfolio target weights.
 
-Grouping contract: on each date, valid (finite) factor values are sorted by
+Legacy grouping contract: on each date, valid (finite) factor values are sorted by
 ``(factor, instrument)`` ascending so ties always break by instrument name.
 The row at sorted position ``p`` of ``count`` valid names joins group
 ``floor(p * n_groups / count) + 1``; group 1 holds the lowest factor values
@@ -8,10 +8,14 @@ and group ``n_groups`` the highest. A date with fewer than ``n_groups``
 valid names is reported in the ``insufficient_dates`` diagnostic and keeps
 all-NaN groups; the configured group count is never reduced silently.
 
+With ``symmetric_fractional``, tied names share the group's rank slots equally.
+Each group still has unit exposure, but overlapping long/short legs cancel;
+the resulting net portfolio is never re-levered to restore gross exposure.
+
 ``target_weights(values, profile)`` returns a dict of weight DataFrames
 sharing the input axes, keyed by portfolio name:
 
-- ``"group_1"`` .. ``"group_{n_groups}"``: equal-weight long-only targets for
+- ``"group_1"`` .. ``"group_{n_groups}"``: long-only targets for
   each group, each row summing to ``profile.gross_exposure`` on valid dates.
 - ``"directional_long"``: the long-only portfolio in the factor's preferred
   direction — the top group (``n_groups``) when ``factor_direction == 1``
@@ -65,6 +69,49 @@ def _long_leg(groups: pd.DataFrame, group_id: int, exposure: float) -> pd.DataFr
     return member.astype(float).mul(exposure).div(counts.replace(0, np.nan), axis=0)
 
 
+def group_weights(values: pd.DataFrame, n_groups: int, tie_policy: str = "legacy_instrument"):
+    """Unit-sum group weights; tied rank slots are shared without name ordering.
+
+    Fractional membership preserves the legacy slot counts for uneven groups.
+    Missing names receive zero; insufficient dates remain NaN. Opposing tied
+    legs may cancel, and the remaining exposure must not be re-levered.
+    """
+    if tie_policy == "legacy_instrument":
+        groups, diagnostics = assign_groups(values, n_groups)
+        diagnostics["group_tie_policy"] = tie_policy
+        return {f"group_{g}": _long_leg(groups, g, 1.0)
+                for g in range(1, n_groups + 1)}, diagnostics
+    if tie_policy != "symmetric_fractional":
+        raise ValueError("unsupported group_tie_policy")
+    _validate_axes(values, name="values")
+    if isinstance(n_groups, bool) or not isinstance(n_groups, int) or n_groups < 2:
+        raise ValueError("n_groups must be an integer greater than or equal to 2")
+    result = np.full((n_groups, *values.shape), np.nan)
+    insufficient = []
+    group_basis = np.eye(n_groups, dtype=np.int64)
+    for day, row in enumerate(values.to_numpy(dtype=float)):
+        valid = np.flatnonzero(np.isfinite(row))
+        count = len(valid)
+        if count < n_groups:
+            insufficient.append(values.index[day])
+            continue
+        ordered = valid[np.argsort(row[valid])]
+        slots = np.arange(count) * n_groups // count
+        totals = np.bincount(slots, minlength=n_groups)
+        _, starts, inverse, counts = np.unique(
+            row[ordered], return_index=True, return_inverse=True, return_counts=True
+        )
+        membership = np.add.reduceat(group_basis[:, slots], starts, axis=1)
+        block_weights = membership / (totals[:, None] * counts[None, :])
+        day_weights = result[:, day, :]
+        day_weights[:] = 0.0
+        day_weights[:, ordered] = block_weights[:, inverse]
+    weights = {f"group_{g + 1}": pd.DataFrame(result[g], index=values.index, columns=values.columns)
+               for g in range(n_groups)}
+    diagnostics = {"insufficient_dates": insufficient, "group_tie_policy": tie_policy}
+    return weights, diagnostics
+
+
 def target_weights(values: pd.DataFrame, profile: BacktestProfile) -> dict[str, pd.DataFrame]:
     """Build per-group, directional long-only, and 50/50 long-short targets.
 
@@ -75,18 +122,18 @@ def target_weights(values: pd.DataFrame, profile: BacktestProfile) -> dict[str, 
     """
     if not isinstance(profile, BacktestProfile):
         raise TypeError("profile must be a BacktestProfile")
-    groups, _ = assign_groups(values, profile.n_groups)
+    unit_weights, _ = group_weights(values, profile.n_groups, profile.group_tie_policy)
     top_group = profile.n_groups if profile.factor_direction == 1 else 1
     weights = {
-        f"group_{group_id}": _long_leg(groups, group_id, profile.gross_exposure)
+        f"group_{group_id}": unit_weights[f"group_{group_id}"] * profile.gross_exposure
         for group_id in range(1, profile.n_groups + 1)
     }
-    weights["directional_long"] = _long_leg(groups, top_group, profile.gross_exposure)
+    weights["directional_long"] = weights[f"group_{top_group}"].copy()
     half = profile.gross_exposure / 2
     long_group, short_group = (
         (profile.n_groups, 1) if profile.factor_direction == 1 else (1, profile.n_groups)
     )
     weights["long_short"] = (
-        _long_leg(groups, long_group, half) - _long_leg(groups, short_group, half)
+        unit_weights[f"group_{long_group}"] * half - unit_weights[f"group_{short_group}"] * half
     )
     return weights

@@ -188,7 +188,18 @@ class CryptoQuantPipeline:
 
     def _fetch_cmc(self, store: CryptoQuantStore, mode: str, end: date) -> date | None:
         existing = store.read("cmc100_daily")
-        last = self._cmc_common_prefix(store, end) if not existing.empty else None
+        if mode == "backfill" or existing.empty:
+            last = None
+        else:
+            # Gap-tolerant high-water mark for the incremental fetch start.
+            # Upstream CMC permanently misses a few historical dates (e.g.
+            # 2024-03-19), so the contiguous prefix never advances past them
+            # and using it here would re-fetch the full history on every
+            # update. Recent gaps still heal within the cmc_overlap_days
+            # overlap window.
+            last = self._cmc_high_watermark(store, end)
+            if last is None:
+                last = self._cmc_common_prefix(store, end)
         start = self.config.universe_start if mode == "backfill" or last is None else max(self.config.universe_start, last - timedelta(days=self.config.cmc_overlap_days - 1))
 
         def on_page(daily: pd.DataFrame, members: pd.DataFrame, through: date) -> None:
@@ -349,6 +360,30 @@ class CryptoQuantPipeline:
                 break
             current += timedelta(days=1)
         return current - timedelta(days=1) if current > self.config.universe_start else None
+
+    def _cmc_high_watermark(self, store: CryptoQuantStore, end: date) -> date | None:
+        """Latest date <= end having a complete 100-member snapshot.
+
+        Unlike `_cmc_common_prefix` this tolerates historical gaps: it scans
+        available dates backwards from `end` instead of requiring a contiguous
+        series from `universe_start`.
+        """
+        daily = store.read("cmc100_daily")
+        members = store.read("cmc100_constituents")
+        if daily.empty or members.empty or "date" not in daily or "date" not in members:
+            return None
+        member_dates = pd.to_datetime(members["date"], errors="coerce", utc=True).dt.date
+        daily_dates = sorted(
+            set(pd.to_datetime(daily["date"], errors="coerce", utc=True).dt.date.dropna()),
+            reverse=True,
+        )
+        for current in daily_dates:
+            if current > end:
+                continue
+            snapshot = members.loc[member_dates == current]
+            if self._is_complete_cmc_snapshot(snapshot):
+                return current
+        return None
 
     @staticmethod
     def _funding_complete_end(end_ms: int) -> date:

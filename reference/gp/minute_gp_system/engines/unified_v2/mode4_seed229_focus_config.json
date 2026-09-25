@@ -1,0 +1,166 @@
+{
+  "single_share": 0.0,
+  "compound_share": 0.12,
+  "intraday_share": 0.58,
+  "structural_explore_share": 0.18,
+  "path_shape_share": 0.08,
+  "proven_relation_share": 0.0,
+  "order_flow_share": 0.0,
+  "adjacent_explore_share": 0.0,
+  "submit_prior_share": 0.0,
+  "primary_share": 0.5,
+  "composition_share": 0.42,
+  "composition_cs_share": 0.0,
+  "ts_comp_ops": [
+    "none",
+    "ts_decay",
+    "ts_decay",
+    "ts_decay",
+    "ts_zscore"
+  ],
+  "ts_comp_windows": [
+    5,
+    10,
+    20,
+    40,
+    60
+  ],
+  "cs_comp_ops": [
+    "none"
+  ],
+  "mode4_ops_primary": [
+    "group_corr",
+    "group_beta",
+    "group_skew",
+    "group_slope",
+    "group_path_length",
+    "group_early_late_diff"
+  ],
+  "mode4_ops_explore": [
+    "group_corr",
+    "group_beta",
+    "group_skew",
+    "group_jump_ratio",
+    "group_top_share",
+    "group_slope_vclock",
+    "group_path_length_vclock"
+  ],
+  "pair_a_fields_primary": [
+    "return_abs",
+    "price_range_pct",
+    "volume_intensity",
+    "mark_index_spread",
+    "dollar_volume_rank",
+    "relative_strength_btc_5d",
+    "rv_20d",
+    "returns"
+  ],
+  "pair_a_fields_explore": [
+    "return_abs",
+    "price_range_pct",
+    "volume_intensity",
+    "mark_index_spread",
+    "dollar_volume_rank",
+    "relative_strength_btc_5d",
+    "rv_20d",
+    "money_flow",
+    "corr_btc_20d",
+    "beta_btc_60d"
+  ],
+  "pair_b_fields_primary": [
+    "volume_intensity",
+    "turnover",
+    "relative_strength_btc_5d",
+    "mark_index_spread",
+    "dollar_volume_rank",
+    "return_abs",
+    "rv_20d"
+  ],
+  "pair_b_fields_explore": [
+    "return_abs",
+    "price_range_pct",
+    "relative_strength_btc_5d",
+    "rv_20d",
+    "mark_index_spread",
+    "dollar_volume_rank",
+    "money_flow"
+  ],
+  "pair_windows_primary": [
+    60,
+    120,
+    180,
+    240,
+    360
+  ],
+  "pair_windows_explore": [
+    30,
+    90,
+    240,
+    480
+  ],
+  "pair_slices_primary": [
+    0.2,
+    0.3,
+    0.5
+  ],
+  "pair_slices_explore": [
+    null,
+    0.1,
+    0.7
+  ],
+  "mask_pairs_primary": [
+    [
+      "rv_20d",
+      "high_0.8"
+    ],
+    [
+      "rv_20d",
+      "low_0.2"
+    ],
+    [
+      "relative_strength_btc_5d",
+      "high_0.8"
+    ],
+    [
+      "relative_strength_btc_5d",
+      "low_0.2"
+    ],
+    [
+      "dollar_volume_rank",
+      "high_0.8"
+    ],
+    [
+      "open",
+      "none"
+    ]
+  ],
+  "mask_pairs_explore": [
+    [
+      "return_abs",
+      "high_0.8"
+    ],
+    [
+      "mark_index_spread",
+      "high_0.8"
+    ],
+    [
+      "funding_oi_joint_5d",
+      "high_0.8"
+    ]
+  ],
+  "pair_a_family_max_share_primary": {
+    "return_family": 0.3,
+    "flow_family": 0.4,
+    "cross_family": 0.5,
+    "oi_family": 0.3,
+    "price_family": 0.2
+  },
+  "pair_a_family_max_share_explore": {
+    "return_family": 0.4,
+    "flow_family": 0.5,
+    "cross_family": 0.6,
+    "oi_family": 0.4,
+    "price_family": 0.3
+  },
+  "pair_a_family_softmax_temperature": 1.0
+}
